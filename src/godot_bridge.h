@@ -62,6 +62,14 @@ auto send_frame( SDL_Renderer *renderer, SDL_Texture *frame ) -> void;
 /// screens draw nothing in curses, so opening one doesn't produce a frame on its own.
 auto sync_screens() -> void;
 
+/// Asks for the pixel minimap to be rendered for Godot with the next frame; the HUD builder calls
+/// this while the HUD shows the map.
+auto request_minimap() -> void;
+/// True once per `request_minimap`, telling the frame code to render the minimap.
+auto take_minimap_request() -> bool;
+/// Sends the minimap held in the render target `image` to Godot, unless it is unchanged.
+auto send_minimap( SDL_Renderer *renderer, SDL_Texture *image ) -> void;
+
 auto shutdown() -> void;
 
 /// Called while the main game view redraws, so Godot knows when to show its HUD.

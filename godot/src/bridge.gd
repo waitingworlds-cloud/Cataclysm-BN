@@ -3,12 +3,13 @@ extends Node
 ##
 ## Godot listens on a local port, starts the game with BN_GODOT_BRIDGE pointing at it, then
 ## exchanges length-prefixed messages over the socket:
-##   game -> Godot: [u32 length][u8 kind][payload]; kind 1 = frame, kind 2 = JSON
+##   game -> Godot: [u32 length][u8 kind][payload]; kind 1 = frame, 2 = JSON, 3 = minimap
 ##   Godot -> game: [u32 length][JSON]
 ## See README.md for the message types.
 
 signal connected
 signal frame_received(texture: ImageTexture)
+signal minimap_received(texture: ImageTexture)
 signal frame_meta(main_view: bool, views: Array)
 signal hud_received(hud: Dictionary)
 signal view_received(view: Dictionary)
@@ -18,6 +19,7 @@ signal game_exited(reason: String)
 
 const KIND_FRAME := 1
 const KIND_JSON := 2
+const KIND_MINIMAP := 3
 
 var _server := TCPServer.new()
 var _peer: StreamPeerTCP
@@ -25,6 +27,7 @@ var _pid := -1
 var _buf := PackedByteArray()
 var _pos := 0
 var _texture: ImageTexture
+var _minimap: ImageTexture
 var _said_hello := false
 var _pending_mouse := {}
 var launch_error := ""
@@ -151,7 +154,13 @@ func _read() -> void:
 		var start := _pos + 5
 		var end := _pos + 4 + length
 		if kind == KIND_FRAME:
-			_on_frame(start, end)
+			_texture = _decode_image(start, end, _texture)
+			if _texture != null:
+				frame_received.emit(_texture)
+		elif kind == KIND_MINIMAP:
+			_minimap = _decode_image(start, end, _minimap)
+			if _minimap != null:
+				minimap_received.emit(_minimap)
 		elif kind == KIND_JSON:
 			_on_json(_buf.slice(start, end).get_string_from_utf8())
 		_pos = end
@@ -163,18 +172,18 @@ func _read() -> void:
 		_pos = 0
 
 
-func _on_frame(start: int, end: int) -> void:
+## Decodes `[u32 width][u32 height][RGBA8 pixels]` into `texture`, reusing it when the size fits.
+func _decode_image(start: int, end: int, texture: ImageTexture) -> ImageTexture:
 	var width := _buf.decode_u32(start)
 	var height := _buf.decode_u32(start + 4)
 	var pixels := _buf.slice(start + 8, end)
 	if pixels.size() != width * height * 4:
-		return
+		return texture
 	var image := Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, pixels)
-	if _texture != null and _texture.get_width() == width and _texture.get_height() == height:
-		_texture.update(image)
-	else:
-		_texture = ImageTexture.create_from_image(image)
-	frame_received.emit(_texture)
+	if texture != null and texture.get_width() == width and texture.get_height() == height:
+		texture.update(image)
+		return texture
+	return ImageTexture.create_from_image(image)
 
 
 func _on_json(text: String) -> void:

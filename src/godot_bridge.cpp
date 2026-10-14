@@ -43,6 +43,8 @@ enum class message_kind : std::uint8_t {
     frame = 1,
     /// UTF-8 JSON object with a `t` member naming its type.
     json = 2,
+    /// The pixel minimap the HUD shows, laid out like `frame`.
+    minimap = 3,
 };
 
 struct pending_pick {
@@ -75,6 +77,9 @@ struct bridge_state {
     std::string sent_hud;
     std::string sent_meta;
     std::vector<std::uint8_t> frame_bytes;
+    bool minimap_requested = false;
+    std::vector<std::uint8_t> minimap_bytes;
+    std::vector<std::uint8_t> sent_minimap;
 };
 
 auto state() -> bridge_state & // *NOPAD*
@@ -271,6 +276,34 @@ auto main_view_visible() -> bool
     return position == ui_adaptor::stack_position::visible;
 }
 
+/// Reads the render target `texture` into `out` as `[u32 width][u32 height][RGBA8 pixels]`.
+auto read_image( SDL_Renderer *renderer, SDL_Texture *texture,
+                 std::vector<std::uint8_t> &out ) -> bool
+{
+    SDL_SetRenderTarget( renderer, texture );
+    auto *const read = SDL_RenderReadPixels( renderer, nullptr );
+    if( read == nullptr ) {
+        return false;
+    }
+    auto *const rgba = SDL_ConvertSurface( read, SDL_PIXELFORMAT_ABGR8888 );
+    SDL_DestroySurface( read );
+    if( rgba == nullptr ) {
+        return false;
+    }
+    const auto width = static_cast<std::uint32_t>( rgba->w );
+    const auto height = static_cast<std::uint32_t>( rgba->h );
+    const auto row_bytes = static_cast<std::size_t>( width ) * 4;
+    out.resize( 8 + row_bytes * height );
+    put_u32( out.data(), width );
+    put_u32( out.data() + 4, height );
+    const auto *pixels = static_cast<const std::uint8_t *>( rgba->pixels );
+    for( auto y = std::size_t{ 0 }; y < height; ++y ) {
+        std::memcpy( out.data() + 8 + y * row_bytes, pixels + y * rgba->pitch, row_bytes );
+    }
+    SDL_DestroySurface( rgba );
+    return true;
+}
+
 } // namespace
 
 auto connect() -> bool
@@ -410,34 +443,32 @@ auto mouse_position() -> point
 auto send_frame( SDL_Renderer *renderer, SDL_Texture *frame ) -> void
 {
     auto &s = state();
-    if( !s.link ) {
+    if( !s.link || !read_image( renderer, frame, s.frame_bytes ) ) {
         return;
     }
-    SDL_SetRenderTarget( renderer, frame );
-    auto *const read = SDL_RenderReadPixels( renderer, nullptr );
-    if( read == nullptr ) {
-        return;
-    }
-    auto *const rgba = SDL_ConvertSurface( read, SDL_PIXELFORMAT_ABGR8888 );
-    SDL_DestroySurface( read );
-    if( rgba == nullptr ) {
-        return;
-    }
-
     sync_screens();
-
-    const auto width = static_cast<std::uint32_t>( rgba->w );
-    const auto height = static_cast<std::uint32_t>( rgba->h );
-    const auto row_bytes = static_cast<std::size_t>( width ) * 4;
-    s.frame_bytes.resize( 8 + row_bytes * height );
-    put_u32( s.frame_bytes.data(), width );
-    put_u32( s.frame_bytes.data() + 4, height );
-    const auto *pixels = static_cast<const std::uint8_t *>( rgba->pixels );
-    for( auto y = std::size_t{ 0 }; y < height; ++y ) {
-        std::memcpy( s.frame_bytes.data() + 8 + y * row_bytes, pixels + y * rgba->pitch, row_bytes );
-    }
-    SDL_DestroySurface( rgba );
     send_message( message_kind::frame, nullptr, 0, s.frame_bytes.data(), s.frame_bytes.size() );
+}
+
+auto request_minimap() -> void
+{
+    state().minimap_requested = true;
+}
+
+auto take_minimap_request() -> bool
+{
+    return std::exchange( state().minimap_requested, false ) && state().link != nullptr;
+}
+
+auto send_minimap( SDL_Renderer *renderer, SDL_Texture *image ) -> void
+{
+    auto &s = state();
+    if( !s.link || !read_image( renderer, image, s.minimap_bytes ) ||
+        s.minimap_bytes == s.sent_minimap ) {
+        return;
+    }
+    s.sent_minimap = s.minimap_bytes;
+    send_message( message_kind::minimap, nullptr, 0, s.minimap_bytes.data(), s.minimap_bytes.size() );
 }
 
 auto sync_screens() -> void

@@ -123,6 +123,8 @@ static SDL_Window_Ptr window;
 static SDL_Renderer_Ptr renderer;
 static SDL_PixelFormat format = SDL_PIXELFORMAT_UNKNOWN;
 static SDL_Texture_Ptr display_buffer;
+/// The pixel minimap rendered on its own for the Godot front end's HUD.
+static SDL_Texture_Ptr bridge_minimap;
 static GeometryRenderer_Ptr geometry;
 #if defined(__ANDROID__)
 static SDL_Texture_Ptr touch_joystick;
@@ -436,6 +438,7 @@ static void WinDestroy()
     }
     geometry.reset();
     format = SDL_PIXELFORMAT_UNKNOWN;
+    bridge_minimap.reset();
     display_buffer.reset();
     renderer.reset();
     ::window.reset();
@@ -520,6 +523,33 @@ SDL_FRect get_android_render_rect( float DisplayBufferWidth, float DisplayBuffer
 
 #endif
 
+/// Renders the pixel minimap into a texture of its own and sends it to the Godot HUD.
+static auto send_bridge_minimap() -> void
+{
+    // Pixel size of the HUD's map card.
+    constexpr auto size = 268;
+    if( !g || !tilecontext ) {
+        return;
+    }
+    if( !bridge_minimap ) {
+        bridge_minimap.reset( SDL_CreateTexture( renderer.get(), SDL_PIXELFORMAT_ARGB8888,
+                              SDL_TEXTUREACCESS_TARGET, size, size ) );
+        if( !bridge_minimap ) {
+            return;
+        }
+    }
+    // The minimap draws into whatever the display buffer is, so stand the image in for it.
+    std::swap( display_buffer, bridge_minimap );
+    SetRenderTarget( renderer, display_buffer );
+    SetRenderDrawColor( renderer, 0, 0, 0, 255 );
+    RenderClear( renderer );
+    tilecontext->draw_minimap( point_zero, tripoint_bub_ms( g->u.bub_pos().xy(), g->ter_view_p.z() ),
+                               size, size );
+    std::swap( display_buffer, bridge_minimap );
+    cata::godot_bridge::send_minimap( renderer.get(), bridge_minimap.get() );
+    SetRenderTarget( renderer, display_buffer );
+}
+
 void refresh_display()
 {
     needupdate = false;
@@ -530,6 +560,9 @@ void refresh_display()
     }
 
     if( cata::godot_bridge::is_active() ) {
+        if( cata::godot_bridge::take_minimap_request() ) {
+            send_bridge_minimap();
+        }
         cata::godot_bridge::send_frame( renderer.get(), display_buffer.get() );
         return;
     }
