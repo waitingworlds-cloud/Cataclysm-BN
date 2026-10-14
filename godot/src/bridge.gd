@@ -191,6 +191,8 @@ func _decode_image(start: int, end: int, texture: ImageTexture) -> ImageTexture:
 func _on_json(text: String) -> void:
 	var msg = JSON.parse_string(text)
 	if typeof(msg) != TYPE_DICTIONARY:
+		if _debug:
+			print("bad message from game: ", text.left(4000))
 		return
 	if _debug and msg.get("t", "") != "hud":
 		print("game: ", text if _debug_full else text.left(300))
