@@ -45,19 +45,24 @@ cut to 300 characters; `BN_BRIDGE_DEBUG=full` prints them whole.
 
 ## What is drawn by Godot
 
-| Screen                                  | Status                                |
-| --------------------------------------- | ------------------------------------- |
-| HUD: survivor card, time and place, map and threats, message log, action dock | Godot |
-| List menus (`uilist`): search, categories, descriptions | Godot                    |
-| Questions and notices (`query_popup`, `popup`, `query_yn`) | Godot                  |
-| Text prompts (`string_input_popup`)     | Godot                                 |
-| Inventory and every item list built on it (drop, pick up, wield, wear, use, ...) | Godot |
-| Item actions (the menu after choosing an item in the inventory) | Godot              |
-| Menus that draw extra panels beside their list | Game (old style), for now      |
-| Advanced inventory, crafting, character sheet, main menu and other full screens | Game (old style), being rebuilt one by one |
+Almost everything outside the map. Each screen keeps every key it had, and shows everything the old
+one did.
 
-When the game shows one of its old-style screens, Godot shows it as the game drew it, so nothing is
-ever unreachable.
+| Area                | Screens drawn by Godot                                                       |
+| ------------------- | ---------------------------------------------------------------------------- |
+| Playing             | HUD (header, sidebar, action bar, survivor card), message log, look around and descriptions, nearby items, monsters and vehicles, aiming |
+| Items               | Inventory and every item list built on it, item actions, item info, comparison, pickup, advanced inventory, sort armor, vending machines, enchanting |
+| Making things       | Crafting, construction                                                       |
+| Character           | Character sheet, morale, bionics, mutations, martial arts and technique details, blood test results, missions, factions, scores, diary |
+| World               | Overmap legend, search and note editor, vehicle screen, computer terminals, conversations with NPCs, trade |
+| Menus and prompts   | List menus (with search, categories and side panels), questions and notices, text prompts, multi-line text editor, long texts and help topics |
+| Settings            | Options, keybindings, auto pickup, safe mode, auto notes, distractions, colors, zones |
+| Outside a game      | Title screen, world picker, world creation and mod lists, character creation, loading progress |
+
+Still drawn by the game in its old style: the Lua console, the debug map editor, the defense mode
+setup, the minigames on in-game computers (robot finds kitten, lights on, minesweeper, snake,
+sokoban), and the debug error screen. When the game shows one of these, Godot shows it as the game
+drew it, so nothing is ever unreachable.
 
 ## The HUD
 
@@ -103,6 +108,44 @@ items, the box on the left marks one. Choosing an item in the inventory opens it
 beside its description. The keys work as before: arrows, `Tab` to jump by category, number keys for
 amounts, and each action's own key.
 
+## Screens
+
+Most big screens are drawn by one data-driven view, `screen` (`src/views/screen_view.gd`). The game
+describes the screen as JSON each time it redraws, using the helpers in `src/godot_screen.h`, and
+Godot lays it out: a header, tabs, a search box with toggles, one or more lists, a details panel
+with buttons, and key hints. Text fields marked "spans" are arrays of `[text, curses color]`, so the
+game's color tags carry over.
+
+| Field                  | Meaning                                                                   |
+| ---------------------- | ------------------------------------------------------------------------- |
+| `title`, `icon`        | Header text and Lucide icon                                                |
+| `subtitle`             | Spans under the title                                                     |
+| `stats`                | Header chips `{icon, label, value (spans), tip}`                          |
+| `tabs`, `subtabs`      | `{text, active, pick, enabled, icon, count, tip}`; `tab_keys {prev, next}` labels the keys that switch tabs |
+| `search`               | `{act, text, typing, placeholder, label, icon, key, tip}`                 |
+| `toggles`              | Toolbar buttons that show a setting: `{act, text, icon, key, on, enabled, tip}` |
+| `panes`, `active_pane` | Lists side by side (see below), and the one holding the cursor            |
+| `aside`                | Details panel: `title` and `warn` (spans), `subtitle`, `icon` or `sym` and `sym_color`, `body` (spans), `mono`, `sections [{title, body, mono}]`, `empty`, `buttons`, `width`, `share` |
+| `buttons`              | `{act, text, icon, key, primary, enabled, tip, pick}`; with `pick` the button sends that pick with `act` |
+| `hints`, `footer`      | Key hints `{key, text}` and a line of spans at the bottom                  |
+| `quit`                 | Action of the close button (default `QUIT`; empty hides it)               |
+| `size`                 | Largest size `[w, h]` in pixels                                           |
+| `dock`                 | `right`: over the HUD sidebar, leaving the map clickable (look around); `side`: the same at full height, for screens shown without the HUD |
+
+A pane holds `rows`, a `body` of spans, or `entries` (a log), with `title`, `icon`, `count`, `note`,
+`empty`, `cursor`, `stretch`, `confirm` (action for clicking the selected row again, default
+`CONFIRM`) and `mark_act` (action for a row's check box). A row has `text` and `cells` (spans),
+`i`, `pick`, `heading`, `enabled`, `passive`, `note`, `icon`, `sym`, `indent`, `tip`, `mark`,
+`key`, `confirm` and `mark_act`.
+
+Clicking a row sends pick `pane * 100000 + i` (or the row's `pick`) with no key: the game moves its
+cursor there. `i` is the row's position in the list unless given, and a heading takes a position
+too, so lists with headings give each data row its `i`. Tabs use picks from `100 * 100000` up.
+
+The game side follows the same pattern in each screen: create a `native_view` of kind `screen` in
+the screen's input context, `publish` the JSON from the screen's redraw callback, and after
+`handle_input` read `take_pick` to move the cursor or switch tab.
+
 ## How it works
 
 The game runs with SDL's offscreen video driver and connects to Godot over a local TCP socket.
@@ -115,8 +158,9 @@ Game to Godot: `[u32 length, little endian][u8 kind][payload]`
   - `frame {main, views}`: whether the main game view (and so the HUD) is showing, and which native
     screens are visible. A native screen is hidden while an old-style screen covers it.
   - `hud {...}`: everything the HUD shows; sent when it changes while the main view is visible.
-  - `view {id, kind, ...}`: state of a native screen. `kind` is `menu`, `popup`, `text_input`,
-    `inventory` or `item_actions`.
+  - `view {id, kind, ...}`: state of a native screen. `kind` is `menu`, `popup`, `text_input`
+    (one line, or the multi-line editor with `multiline`), `inventory`, `item_actions`, `screen`
+    (see "Screens"), `title` (the title screen) or `loading`.
   - `entries {id, entries}`: a menu's rows, or an inventory's lists, sent only when they change.
   - `close {id}`: the screen is gone.
 - kind 3, minimap: same layout as a frame; the game's pixel minimap, sent when it changes while
@@ -136,9 +180,9 @@ Godot to game: `[u32 length][JSON]`
 - `quit`: the window was closed.
 
 Game side: `src/godot_bridge.{h,cpp}` (connection, input, frames, native screens),
-`src/godot_hud.h` with the builder at the end of `src/panels.cpp`, and the native branches in
-`src/ui.cpp`, `src/popup.cpp`, `src/string_input_popup.cpp`, `src/inventory_ui.cpp` and
-`src/examine_item_menu.cpp`.
+`src/godot_hud.h` with the builder at the end of `src/panels.cpp`, `src/godot_screen.h` (helpers
+for `screen` views), and a native branch in each screen's own file, found by searching for
+`native_view`.
 
 Godot side: `src/bridge.gd` (process and socket), `src/main.gd` (layers), `src/ui/hud.gd`,
 `src/views/*.gd`, and `src/ui/slate.gd` (colors, fonts, icons and shared styles).
