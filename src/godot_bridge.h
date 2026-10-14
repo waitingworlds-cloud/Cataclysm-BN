@@ -152,9 +152,22 @@ auto write_spans( JsonOut &jsout, const std::string &text, const nc_color &base 
 /// is then sent to Godot with `write_window_spans`.
 auto capture_window( int lines, int cols ) -> catacurses::window;
 
+/// Columns of a window to send: `[left, left + width)`; a negative width means to the right edge.
+struct window_columns {
+    int left = 0;
+    int width = -1;
+    /// Leaves out the first column when it only holds a drawn divider line.
+    bool skip_divider = false;
+};
+
 /// Writes the text drawn in `w` as an array of `[text, color]` runs, one line per row, without
 /// trailing blanks or empty lines at the end.
-auto write_window_spans( JsonOut &jsout, const catacurses::window &w ) -> void;
+auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
+const window_columns &columns = {} ) -> void;
+
+/// Copies the cells of `from` into `to` with its top left corner at `at`, for drawing code that
+/// makes its own window beside a captured one.
+auto copy_window( const catacurses::window &from, const catacurses::window &to, point at ) -> void;
 
 /// Label of the key bound to `action` in `category`, or empty when unbound.
 auto key_label( const std::string &action, const std::string &category ) -> std::string;

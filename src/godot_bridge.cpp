@@ -678,7 +678,8 @@ auto capture_window( const int lines, const int cols ) -> catacurses::window
     return catacurses::newwin( lines, cols, point( TERMX + 1, 0 ) );
 }
 
-auto write_window_spans( JsonOut &jsout, const catacurses::window &w ) -> void
+auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
+                         const window_columns &columns ) -> void
 {
     // Curses names of the 16 base colors; bright ones are `base + 8`.
     static constexpr auto names = std::array {
@@ -696,10 +697,21 @@ auto write_window_spans( JsonOut &jsout, const catacurses::window &w ) -> void
         jsout.end_array();
         return;
     }
+    const auto is_divider = [&]( const cata_cursesport::curseline & line ) {
+        static const auto parts = std::array<std::string, 9> { "│", "┬", "┴", "┼", "├", "┤", "|", " ", "" };
+        return columns.left < 0 || columns.left >= static_cast<int>( line.chars.size() ) ||
+               std::ranges::contains( parts, line.chars[columns.left].ch );
+    };
+    const auto skip = columns.skip_divider && std::ranges::all_of( win->line, is_divider ) ? 1 : 0;
     // Lines without their trailing blanks, then without trailing empty lines.
     auto rows = std::vector<std::vector<const cata_cursesport::cursecell *>>();
     for( const auto &line : win->line ) {
+        const auto left = std::clamp( columns.left + skip, 0, static_cast<int>( line.chars.size() ) );
+        const auto width = columns.width < 0 ? static_cast<int>( line.chars.size() ) - left :
+                           std::min( columns.width - skip, static_cast<int>( line.chars.size() ) - left );
         auto cells = line.chars
+                     | std::views::drop( left )
+                     | std::views::take( width )
         | std::views::transform( []( const auto & c ) { return &c; } )
         | std::ranges::to<std::vector>();
         while( !cells.empty() && ( cells.back()->ch.empty() || cells.back()->ch == " " ) ) {
@@ -736,6 +748,30 @@ auto write_window_spans( JsonOut &jsout, const catacurses::window &w ) -> void
     }
     flush();
     jsout.end_array();
+}
+
+auto copy_window( const catacurses::window &from, const catacurses::window &to,
+                  const point at ) -> void
+{
+    const auto *src = from.get<cata_cursesport::WINDOW>();
+    auto *dst = to.get<cata_cursesport::WINDOW>();
+    if( src == nullptr || dst == nullptr ) {
+        return;
+    }
+    for( const auto &[y, line] : src->line | std::views::enumerate ) {
+        const auto dy = at.y + static_cast<int>( y );
+        if( dy < 0 || dy >= static_cast<int>( dst->line.size() ) ) {
+            continue;
+        }
+        auto &target = dst->line[dy];
+        for( const auto &[x, cell] : line.chars | std::views::enumerate ) {
+            const auto dx = at.x + static_cast<int>( x );
+            if( dx >= 0 && dx < static_cast<int>( target.chars.size() ) ) {
+                target.chars[dx] = cell;
+            }
+        }
+        target.touched = true;
+    }
 }
 
 auto key_label( const std::string &action, const std::string &category ) -> std::string

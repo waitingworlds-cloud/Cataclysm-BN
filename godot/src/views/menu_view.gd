@@ -6,6 +6,8 @@ extends Control
 const ROW_HEIGHT := 38
 const MIN_WIDTH := 440.0
 const MAX_WIDTH := 920.0
+## A line the game drew across a panel to separate sections.
+static var _RULE := RegEx.create_from_string("(?m)^(\\[/?color[^\\]]*\\])*[─-]{3,}(\\[/?color[^\\]]*\\])*$")
 
 var view_id := 0
 
@@ -36,6 +38,12 @@ var _desc_box: PanelContainer
 var _desc: RichTextLabel
 var _footer: RichTextLabel
 var _hints: HBoxContainer
+var _body: HBoxContainer
+var _side: PanelContainer
+var _side_scroll: ScrollContainer
+var _side_text: RichTextLabel
+var _side_cols := 0
+var _side_lines := 0
 
 
 func _ready() -> void:
@@ -63,8 +71,16 @@ func _ready() -> void:
 
 	col.add_child(_build_header())
 	col.add_child(_build_search())
-	col.add_child(_build_list())
-	col.add_child(_build_description())
+	_body = HBoxContainer.new()
+	_body.add_theme_constant_override("separation", 0)
+	col.add_child(_body)
+	var main := VBoxContainer.new()
+	main.add_theme_constant_override("separation", 0)
+	main.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	main.add_child(_build_list())
+	main.add_child(_build_description())
+	_body.add_child(main)
+	_body.add_child(_build_side())
 	col.add_child(_build_footer())
 	resized.connect(_layout)
 
@@ -209,6 +225,47 @@ func _build_description() -> Control:
 	return _desc_box
 
 
+## Panel the game draws beside the entries (spell details, a map preview): its text keeps the
+## game's column layout, so it uses a fixed-width font.
+func _build_side() -> Control:
+	_side = PanelContainer.new()
+	_side.mouse_filter = Control.MOUSE_FILTER_PASS
+	_side.visible = false
+	_side_scroll = ScrollContainer.new()
+	_side_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_side_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_side.add_child(_side_scroll)
+	_side_text = Slate.rich(12)
+	_side_text.add_theme_font_override("normal_font", Slate.mono())
+	_side_text.add_theme_color_override("default_color", Slate.SOFT)
+	_side_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_side_scroll.add_child(_side_text)
+	return _side
+
+
+func _side_box(left: bool) -> StyleBoxFlat:
+	var sb := Slate.box(Color(1, 1, 1, 0.035), 0, Slate.BORDER, 0)
+	sb.border_color = Slate.BORDER
+	sb.border_width_top = 1
+	if left:
+		sb.border_width_right = 1
+	else:
+		sb.border_width_left = 1
+	sb.content_margin_left = 18
+	sb.content_margin_right = 18
+	sb.content_margin_top = 14
+	sb.content_margin_bottom = 14
+	return sb
+
+
+## Width of the side panel: room for its columns, but never more than most of the screen.
+func _side_width(avail: float) -> float:
+	if not _side.visible:
+		return 0.0
+	var cell := Slate.mono().get_string_size("M", HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+	return minf(_side_cols * cell + 40, avail * 0.62)
+
+
 func _build_footer() -> Control:
 	var bar := PanelContainer.new()
 	var sb := Slate.box(Color(0, 0, 0, 0.18), 0, Slate.BORDER, 0)
@@ -290,6 +347,23 @@ func apply(msg: Dictionary) -> void:
 	_search_key.visible = filter_key != "" and not filtering
 	(_search_key.get_child(0) as Label).text = filter_key
 
+	var side: Dictionary = msg.get("side", {})
+	var had_side := _side.visible
+	_side.visible = not side.is_empty()
+	if _side.visible:
+		var left := bool(side.get("left", false))
+		_body.move_child(_side, 0 if left else _body.get_child_count() - 1)
+		_side.add_theme_stylebox_override("panel", _side_box(left))
+		var side_text := _RULE.sub(Slate.bbcode(side.get("lines", []), Slate.SOFT), "", true).rstrip(" \n")
+		if side_text != _side_text.text:
+			_side_text.text = side_text
+		var cols := int(side.get("cols", 0))
+		var lines := side_text.count("\n") + 1
+		if cols != _side_cols or lines != _side_lines or not had_side:
+			_side_cols = cols
+			_side_lines = lines
+			_layout()
+
 	_describe = bool(msg.get("describe", false))
 	var footer: Array = msg.get("footer", [])
 	_footer.text = Slate.bbcode(footer, Slate.MUTED).strip_edges()
@@ -358,11 +432,17 @@ func _layout() -> void:
 			w += 24 + Slate.body().get_string_size(Slate.plain(e["column"]).strip_edges(),
 					HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
 		widest = max(widest, w)
-	var width := clampf(widest + (100.0 if _has_keys else 60.0), MIN_WIDTH, minf(MAX_WIDTH, viewport.x - 80))
-	_card.custom_minimum_size.x = width
+	var avail := viewport.x - 80
+	var side := _side_width(avail)
+	var width := clampf(widest + (100.0 if _has_keys else 60.0), 300.0 if side > 0 else MIN_WIDTH, minf(MAX_WIDTH, avail - side))
+	_card.custom_minimum_size.x = width + side
+	_side.custom_minimum_size.x = side
 	var rows := maxi(_rows.size(), 1)
 	var reserved := 260.0 + (160.0 if _describe else 0.0)
 	_scroll.custom_minimum_size.y = minf(rows * (ROW_HEIGHT + 2) + 16, maxf(viewport.y - reserved, 160))
+	if _side.visible:
+		var lines_height := _side_lines * 17.0 + 28
+		_side_scroll.custom_minimum_size.y = minf(lines_height, maxf(viewport.y - 260.0, 160))
 	_scroll.visible = not _rows.is_empty()
 
 
@@ -439,6 +519,17 @@ class MenuRow extends PanelContainer:
 			chip.visible = key != ""
 			slot.add_child(chip)
 			row.add_child(slot)
+
+		var extra := Slate.plain(entry.get("extra", [])).strip_edges()
+		if extra != "":
+			var mark := Slate.rich(14)
+			mark.autowrap_mode = TextServer.AUTOWRAP_OFF
+			mark.fit_content = true
+			mark.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			mark.add_theme_font_override("normal_font", Slate.mono_bold())
+			mark.text = _trimmed(entry["extra"], Slate.ACCENT)
+			mark.custom_minimum_size.x = Slate.mono_bold().get_string_size(extra, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x + 2
+			row.add_child(mark)
 
 		_text = Slate.rich(15)
 		_text.autowrap_mode = TextServer.AUTOWRAP_OFF

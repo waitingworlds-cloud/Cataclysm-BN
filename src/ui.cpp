@@ -57,6 +57,31 @@ auto native_menu_of( const uilist *menu ) -> std::shared_ptr<native_menu>
     return found == native_menus().end() ? nullptr : found->second.lock();
 }
 
+/// Draws the menu's side panel (its callback's `refresh`, into the window `pad_left` or
+/// `pad_right` makes room in) and writes it as `side`: `{lines, cols, left}`.
+auto write_native_side( JsonOut &jsout, uilist &menu ) -> void
+{
+    if( ( menu.pad_left <= 0 && menu.pad_right <= 0 ) || !menu.window ) {
+        return;
+    }
+    werase( menu.window );
+    if( menu.callback != nullptr ) {
+        menu.callback->refresh( &menu );
+    }
+    // Callbacks draw a divider next to the entries and leave the menu's border alone.
+    const auto left = menu.pad_left > 0;
+    const auto columns = left ?
+                         cata::godot_bridge::window_columns{ .left = 1, .width = menu.pad_left - 1 } :
+                         cata::godot_bridge::window_columns{ .left = menu.w_width - menu.pad_right, .width = menu.pad_right - 1, .skip_divider = true };
+    jsout.member( "side" );
+    jsout.start_object();
+    jsout.member( "lines" );
+    cata::godot_bridge::write_window_spans( jsout, menu.window, columns );
+    jsout.member( "cols", columns.width );
+    jsout.member( "left", left );
+    jsout.end_object();
+}
+
 auto hotkey_label( int hotkey ) -> std::string
 {
     if( hotkey <= 0 ) {
@@ -1074,10 +1099,7 @@ shared_ptr_fast<ui_adaptor> uilist::create_or_get_ui_adaptor()
 {
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
 #if defined(TILES)
-    // Menus that draw extra content beside their entries stay on curses for now.
-    const auto pads = ( pad_left_setup.fun ? pad_left_setup.fun() : 0 ) +
-                      ( pad_right_setup.fun ? pad_right_setup.fun() : 0 );
-    if( !current_ui && cata::godot_bridge::native_screens() && pads == 0 ) {
+    if( !current_ui && cata::godot_bridge::native_screens() ) {
         ui = current_ui = make_shared_fast<ui_adaptor>();
         auto menu = std::make_shared<native_menu>( this, input_category );
         menu->view.attach( *current_ui );
@@ -1095,6 +1117,13 @@ shared_ptr_fast<ui_adaptor> uilist::create_or_get_ui_adaptor()
                     if( !entry.ctxt.empty() ) {
                         jsout.member( "column" );
                         write_spans( jsout, entry.ctxt, color );
+                    }
+                    // A mark drawn over the start of the entry, such as a favorite's star.
+                    const auto &extra = entry.extratxt;
+                    const auto extra_text = extra.sym != 0 ? utf32_to_utf8( extra.sym ) : extra.txt;
+                    if( !extra_text.empty() ) {
+                        jsout.member( "extra" );
+                        write_spans( jsout, extra_text, extra.color == c_unset ? color : extra.color );
                     }
                     if( desc_enabled && !entry.desc.empty() ) {
                         jsout.member( "desc" );
@@ -1128,10 +1157,18 @@ shared_ptr_fast<ui_adaptor> uilist::create_or_get_ui_adaptor()
                 jsout.member( "describe", desc_enabled );
                 jsout.member( "cancel", allow_cancel );
                 jsout.member( "filter_key", cata::godot_bridge::key_label( "FILTER", input_category ) );
+                write_native_side( jsout, *this );
             } );
         } );
         current_ui->on_screen_resize( [this]( ui_adaptor & ui ) {
             setup();
+            // The callback draws its side panel into the menu's window, which is captured off screen
+            // and sent along (see `write_native_side`).
+            if( pad_left > 0 || pad_right > 0 ) {
+                w_x = TERMX + 1;
+                w_y = 0;
+                window = cata::godot_bridge::capture_window( w_height, w_width );
+            }
             // Godot draws the menu, so it takes no room in the curses frame.
             ui.position( point_zero, point_zero );
         } );
