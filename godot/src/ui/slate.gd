@@ -317,4 +317,6 @@ static func key_name(key: String) -> String:
 		"BACKSPACE": "Backspace", "DELETE": "Del", "HOME": "Home", "END": "End", "PPAGE": "PgUp",
 		"NPAGE": "PgDn", "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→",
 	}
+	if key.begins_with("CTRL+") and key.length() > 5:
+		return "Ctrl+" + key.substr(5)
 	return NAMES.get(key, key)

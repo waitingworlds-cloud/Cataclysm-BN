@@ -1,6 +1,8 @@
 #include "string_editor_window.h"
 
 #if defined(TILES)
+#include "godot_bridge.h"
+#include "json.h"
 #include "sdl_wrappers.h"
 #endif
 
@@ -85,6 +87,13 @@ auto format_line_number( const int line_number, const int width ) -> std::string
     }
     return rendered;
 }
+
+#if defined(TILES)
+/// Size of the text in the Godot front end's editor, in cells (with the same margins as a window).
+const auto native_size = point( 82, 24 );
+/// Pick codes for a click in the Godot editor: `row * native_pick_stride + column`.
+constexpr auto native_pick_stride = 10000;
+#endif
 
 struct lua_syntax_token {
     std::string text;
@@ -368,6 +377,7 @@ string_editor_window::string_editor_window(
 {
     _show_line_numbers = options.show_line_numbers;
     _line_number_min_width = options.line_number_min_width;
+    _title = options.title;
 }
 
 string_editor_window::~string_editor_window() = default;
@@ -375,6 +385,30 @@ string_editor_window::~string_editor_window() = default;
 point string_editor_window::get_line_and_position( const int position, const bool zero_x )
 {
     return _folded->codepoint_coordinates( position, zero_x );
+}
+
+auto string_editor_window::position_at( const point &cell ) const -> int
+{
+    const auto &lines = _folded->get_lines();
+    if( lines.empty() ) {
+        return 0;
+    }
+    const auto &line = lines[std::clamp( cell.y, 0, static_cast<int>( lines.size() ) - 1 )];
+    auto position = line.cpts_start;
+    auto width = 0;
+    const char *src = line.str.c_str();
+    int bytes = line.str.length();
+    // Up to the character under the cell, or the end of the line (before its line break).
+    while( bytes > 0 ) {
+        const uint32_t uc = UTF8_getch( &src, &bytes );
+        const auto cw = std::max( 0, mk_wcwidth( uc ) );
+        if( is_linebreak( uc ) || width + cw > cell.x ) {
+            break;
+        }
+        width += cw;
+        ++position;
+    }
+    return position;
 }
 
 void string_editor_window::print_editor( ui_adaptor &ui )
@@ -557,6 +591,15 @@ std::pair<bool, std::string> string_editor_window::query_string()
     bool reposition = true;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot draws the text in its own card, wider than the window the caller made for it.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "text_input", this, "STRING_EDITOR" ) :
+                  nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         _win = _create_window();
         _max.x = getmaxx( _win );
@@ -564,8 +607,61 @@ std::pair<bool, std::string> string_editor_window::query_string()
         _cursor_desired_x = -1;
         refold = true;
         ui.position_from_window( _win );
+#if defined(TILES)
+        if( native ) {
+            _max = native_size;
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        native->publish( [&]( JsonOut & jsout ) {
+            const auto &lines = _folded->get_lines();
+            jsout.member( "title" );
+            cata::godot_bridge::write_spans( jsout, _title.empty() ? _( "Edit text" ) : _title, c_white );
+            jsout.member( "multiline", true );
+            jsout.member( "columns", std::max( 1,
+                                               _max.x - 2 - ( _show_line_numbers ? _line_number_width + 1 : 0 ) ) );
+            jsout.member( "rows", _max.y );
+            jsout.member( "lines" );
+            jsout.start_array();
+            for( const auto &line : lines ) {
+                const auto text = ends_with_linebreak( line ) ? line.str.substr( 0, line.str.size() - 1 ) :
+                                  line.str;
+                jsout.start_array();
+                // Code (the Lua console, which numbers its lines) is colored; prose is not.
+                const auto tokens = _show_line_numbers ? build_lua_syntax_tokens( text ) :
+                std::vector<lua_syntax_token> { { .text = text, .color = c_white } };
+                for( const auto &token : tokens ) {
+                    jsout.start_array();
+                    jsout.write( token.text );
+                    jsout.write( get_all_colors().get_name( token.color ) );
+                    jsout.end_array();
+                }
+                jsout.end_array();
+            }
+            jsout.end_array();
+            if( _show_line_numbers ) {
+                jsout.member( "numbers", build_line_number_map( lines ) );
+            }
+            const auto cursor = _ime_preview_range ? _ime_preview_range->display_last : _cursor_display;
+            jsout.member( "cursor", std::array{ cursor.x, cursor.y } );
+            if( _ime_preview_range ) {
+                const auto &range = *_ime_preview_range;
+                jsout.member( "preview", std::array {
+                    range.display_first.x, range.display_first.y, range.display_last.x, range.display_last.y
+                } );
+            }
+            jsout.member( "keys" );
+            jsout.start_object();
+            jsout.member( "confirm", cata::godot_bridge::key_label( "TEXT.CONFIRM", "STRING_EDITOR" ) );
+            jsout.member( "cancel", cata::godot_bridge::key_label( "TEXT.QUIT", "STRING_EDITOR" ) );
+            jsout.end_object();
+        } );
+    };
+#endif
     ui.on_redraw( [&]( ui_adaptor & ui ) {
         if( refold ) {
             utf8_wrapper text = _utext;
@@ -598,6 +694,12 @@ std::pair<bool, std::string> string_editor_window::query_string()
             }
             reposition = false;
         }
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         werase( _win );
         print_editor( ui );
         wnoutrefresh( _win );
@@ -619,6 +721,17 @@ std::pair<bool, std::string> string_editor_window::query_string()
 
         const input_event ev = ctxt->get_raw_input();
         ch = ev.type == input_event_t::keyboard ? ev.get_first_input() : 0;
+#if defined(TILES)
+        // A click in the text puts the cursor there: `row * native_pick_stride + column`.
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( edit.empty() && *pick >= 0 ) {
+                _position = position_at( { *pick % native_pick_stride, *pick / native_pick_stride } );
+                _cursor_desired_x = -1;
+                reposition = true;
+            }
+            continue;
+        }
+#endif
 
         if( action == "TEXT.QUIT" ) {
             return { false, _utext.str() };
