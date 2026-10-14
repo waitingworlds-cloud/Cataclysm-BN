@@ -90,6 +90,9 @@ func _ready() -> void:
 	_actions.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	foot.add_child(_actions)
 	resized.connect(_layout)
+	# A new view stays hidden until the game's next frame lists it, and text measured while
+	# hidden has no width, so measure again once it shows.
+	visibility_changed.connect(_layout)
 
 
 func apply(msg: Dictionary) -> void:
