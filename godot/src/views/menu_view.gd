@@ -4,6 +4,11 @@ extends Control
 ## filter; clicking a row picks it, which the game handles as if its key had been pressed.
 
 const ROW_HEIGHT := 38
+## Height a row takes in the list, with the gap below it.
+const ROW_STEP := ROW_HEIGHT + 2
+## Rows built at a time. A long menu (the map editor lists thousands of terrain types) builds only
+## the stretch around what is in view; spacers keep the scroll bar true to the whole list.
+const WINDOW := 120
 const MIN_WIDTH := 440.0
 const MAX_WIDTH := 920.0
 ## A line the game drew across a panel to separate sections.
@@ -20,6 +25,13 @@ var _describe := false
 var _rows := {}
 var _rows_dirty := true
 var _has_keys := false
+## Entries of the shown rows, in order, and the position in it of the first row built.
+var _listed: Array = []
+var _first := 0
+var _top_pad: Control
+var _bottom_pad: Control
+## Width of the widest entry's text, measured when the entries arrive.
+var _widest := 0.0
 
 var _scrim: ColorRect
 var _card: PanelContainer
@@ -195,9 +207,16 @@ func _build_list() -> Control:
 	stack.add_child(_scroll)
 	_list = VBoxContainer.new()
 	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_list.add_theme_constant_override("separation", 2)
+	_list.add_theme_constant_override("separation", ROW_STEP - ROW_HEIGHT)
 	_scroll.add_child(_padded(_list, 10, 8, 10, 8))
 	(_list.get_parent() as Control).size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_top_pad = Control.new()
+	_top_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_list.add_child(_top_pad)
+	_bottom_pad = Control.new()
+	_bottom_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_list.add_child(_bottom_pad)
+	_scroll.get_v_scroll_bar().value_changed.connect(_on_scrolled)
 
 	_empty = Slate.label("Nothing matches.", 14, Slate.FAINT)
 	_empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -307,8 +326,38 @@ func _hint(key: String, text: String) -> HBoxContainer:
 func set_entries(entries: Array) -> void:
 	_entries = entries
 	_has_keys = entries.any(func(e): return String(e.get("key", "")) != "")
+	_widest = _measure_widest()
 	_rows_dirty = true
 	_refresh_rows()
+
+
+## Width of the widest entry. Only the entries with the most characters are measured, as a menu
+## can have thousands.
+func _measure_widest() -> float:
+	var lengths := PackedInt32Array()
+	lengths.resize(_entries.size())
+	var longest := 0
+	for i in _entries.size():
+		var e: Dictionary = _entries[i]
+		var n := Slate.plain(e.get("text", [])).strip_edges().length()
+		if e.has("column"):
+			n += Slate.plain(e["column"]).strip_edges().length() + 3
+		lengths[i] = n
+		longest = maxi(longest, n)
+	var widest := 0.0
+	var measured := 0
+	for i in _entries.size():
+		if lengths[i] < longest * 0.8 or measured >= 64:
+			continue
+		measured += 1
+		var e: Dictionary = _entries[i]
+		var w := Slate.body().get_string_size(Slate.plain(e.get("text", [])).strip_edges(),
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+		if e.has("column"):
+			w += 24 + Slate.body().get_string_size(Slate.plain(e["column"]).strip_edges(),
+					HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+		widest = maxf(widest, w)
+	return widest
 
 
 func apply(msg: Dictionary) -> void:
@@ -402,53 +451,89 @@ func _refresh_rows() -> void:
 		return
 	if _rows_dirty:
 		_rows_dirty = false
-		for c in _list.get_children():
-			c.queue_free()
-		_rows.clear()
-		for index in _shown:
-			if index < 0 or index >= _entries.size():
-				continue
-			var row := MenuRow.new()
-			row.setup(_entries[index], _has_keys)
-			row.clicked.connect(_on_row_clicked.bind(index))
-			row.hovered.connect(_on_row_hovered.bind(index))
-			_list.add_child(row)
-			_rows[index] = row
-		_empty.visible = _rows.is_empty() and not _entries.is_empty()
+		_listed = _shown.filter(func(i): return i >= 0 and i < _entries.size())
+		_first = _window_start(_listed.find(_selected))
+		_build_rows()
+		_empty.visible = _listed.is_empty() and not _entries.is_empty()
 		_layout()
 	for index in _rows:
 		_rows[index].set_selected(index == _selected)
+
+
+## First row to build so that the row at `pos` is near the middle of what is built.
+@warning_ignore("integer_division")
+func _window_start(pos: int) -> int:
+	if pos < 0:
+		return 0
+	return clampi(pos - WINDOW / 2, 0, maxi(_listed.size() - WINDOW, 0))
+
+
+func _build_rows() -> void:
+	for index in _rows:
+		var old: Control = _rows[index]
+		_list.remove_child(old)
+		old.queue_free()
+	_rows.clear()
+	var last := mini(_first + WINDOW, _listed.size())
+	for pos in range(_first, last):
+		var index: int = _listed[pos]
+		var row := MenuRow.new()
+		row.setup(_entries[index], _has_keys)
+		row.set_selected(index == _selected)
+		row.clicked.connect(_on_row_clicked.bind(index))
+		row.hovered.connect(_on_row_hovered.bind(index))
+		_list.add_child(row)
+		_rows[index] = row
+	_list.move_child(_bottom_pad, -1)
+	# A hidden spacer takes no room and no gap; a shown one stands in for its rows and their gaps.
+	_top_pad.visible = _first > 0
+	_top_pad.custom_minimum_size.y = _first * ROW_STEP - (ROW_STEP - ROW_HEIGHT)
+	var after := _listed.size() - last
+	_bottom_pad.visible = after > 0
+	_bottom_pad.custom_minimum_size.y = after * ROW_STEP - (ROW_STEP - ROW_HEIGHT)
+
+
+## Builds the stretch of rows around what scrolled into view, before it runs out.
+@warning_ignore("integer_division")
+func _on_scrolled(value: float) -> void:
+	if _listed.size() <= WINDOW:
+		return
+	var top := int(value / ROW_STEP)
+	var seen := int(_scroll.size.y / ROW_STEP) + 1
+	var margin := WINDOW / 6
+	var near_top := _first > 0 and top < _first + margin
+	var near_end := _first + WINDOW < _listed.size() and top + seen > _first + WINDOW - margin
+	if near_top or near_end:
+		_first = clampi(top + seen / 2 - WINDOW / 2, 0, _listed.size() - WINDOW)
+		_build_rows()
 
 
 func _layout() -> void:
 	if _card == null or not is_inside_tree():
 		return
 	var viewport := get_viewport_rect().size
-	var widest := 0.0
-	for e in _entries:
-		var w := Slate.body().get_string_size(Slate.plain(e.get("text", [])).strip_edges(),
-				HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
-		if e.has("column"):
-			w += 24 + Slate.body().get_string_size(Slate.plain(e["column"]).strip_edges(),
-					HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
-		widest = max(widest, w)
+	var widest := _widest
 	var avail := viewport.x - 80
 	var side := _side_width(avail)
 	var width := clampf(widest + (100.0 if _has_keys else 60.0), 300.0 if side > 0 else MIN_WIDTH, minf(MAX_WIDTH, avail - side))
 	_card.custom_minimum_size.x = width + side
 	_side.custom_minimum_size.x = side
-	var rows := maxi(_rows.size(), 1)
+	var rows := maxi(_listed.size(), 1)
 	var reserved := 260.0 + (160.0 if _describe else 0.0)
 	_scroll.custom_minimum_size.y = minf(rows * (ROW_HEIGHT + 2) + 16, maxf(viewport.y - reserved, 160))
 	if _side.visible:
 		var lines_height := _side_lines * 17.0 + 28
 		_side_scroll.custom_minimum_size.y = minf(lines_height, maxf(viewport.y - 260.0, 160))
-	_scroll.visible = not _rows.is_empty()
+	_scroll.visible = not _listed.is_empty()
 
 
 func _scroll_to_selected() -> void:
 	if not _rows.has(_selected):
-		return
+		var pos := _listed.find(_selected)
+		if pos < 0:
+			return
+		_first = _window_start(pos)
+		_build_rows()
 	var row: Control = _rows[_selected]
 	# Rows lay out on the next frame; wait so the scroll target is right.
 	await get_tree().process_frame
