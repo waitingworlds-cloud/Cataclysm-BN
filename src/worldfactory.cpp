@@ -390,7 +390,86 @@ WORLDINFO *worldfactory::pick_world( bool show_prompt, bool empty_only )
     init_windows( ui );
     ui.on_screen_resize( init_windows );
 
+#if defined(TILES)
+    // The Godot front end lists every world at once, with the chosen world's characters and mods.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "PICK_WORLD_DIALOG" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+        ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+            init_windows( ui );
+            ui.position( point_zero, point_zero );
+        } );
+        ui.position( point_zero, point_zero );
+    }
+    const auto publish_native = [&]() {
+        const auto category = std::string( "PICK_WORLD_DIALOG" );
+        const auto cursor = static_cast<int>( selpage ) * iContentHeight + static_cast<int>( sel );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Pick a world to enter game" ) );
+            jsout.member( "icon", "globe" );
+            jsout.member( "size", std::array{ 980, 640 } );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Worlds" ) );
+            jsout.member( "icon", "globe" );
+            jsout.member( "cursor", cursor );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &name : world_names ) {
+                const auto saves = static_cast<int>( get_world( name )->world_saves.size() );
+                gs::write_row( jsout, { .text = { .text = name, .color = c_white },
+                                        .note = { .text = string_format( vgettext( "%d character", "%d characters", saves ), saves ) },
+                                        .icon = "globe"
+                                      } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            const auto *world = get_world( world_names[cursor] );
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 420 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = world->world_name, .color = c_white } );
+            auto body = colorize( _( "Characters:" ), c_white ) + "\n";
+            for( const auto &save : world->world_saves ) {
+                body += save.decoded_name() + "\n";
+            }
+            if( world->world_saves.empty() ) {
+                body += colorize( _( "None!" ), c_dark_gray ) + "\n";
+            }
+            body += "\n" + colorize( _( "Mods:" ), c_white ) + "\n";
+            for( const auto &mod : world->active_mod_order ) {
+                body += ( mod.is_valid() ? remove_color_tags( mod->name() ) : mod.str() ) + "\n";
+            }
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = body } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Play in this world" ), .icon = "play", .category = category, .primary = true } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "CONFIRM", category, _( "Play" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Cancel" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_border( w_worlds_border, BORDER_COLOR, _( " WORLD SELECTION " ) );
         mvwputch( w_worlds_border, point( 0, 4 ), BORDER_COLOR, LINE_XXXO ); // |-
         mvwputch( w_worlds_border, point( iMinScreenWidth - 1, 4 ), BORDER_COLOR, LINE_XOXX ); // -|
@@ -484,6 +563,14 @@ WORLDINFO *worldfactory::pick_world( bool show_prompt, bool empty_only )
         ui_manager::redraw();
 
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick >= 0 && static_cast<size_t>( *pick ) < world_names.size() ) {
+                selpage = static_cast<size_t>( *pick / iContentHeight );
+                sel = static_cast<size_t>( *pick % iContentHeight );
+            }
+        }
+#endif
 
         if( action == "QUIT" ) {
             break;
