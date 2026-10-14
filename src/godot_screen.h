@@ -52,6 +52,24 @@ inline auto write_button( JsonOut &jsout, const button &b ) -> void
     jsout.end_object();
 }
 
+/// Writes a toolbar toggle: a button that shows whether its setting is on.
+inline auto write_toggle( JsonOut &jsout, const button &b, const bool on ) -> void
+{
+    jsout.start_object();
+    jsout.member( "act", b.act );
+    jsout.member( "text", b.text );
+    if( !b.icon.empty() ) {
+        jsout.member( "icon", b.icon );
+    }
+    jsout.member( "key", godot_bridge::key_label( b.act, b.category ) );
+    jsout.member( "on", on );
+    jsout.member( "enabled", b.enabled );
+    if( !b.tip.empty() ) {
+        jsout.member( "tip", b.tip );
+    }
+    jsout.end_object();
+}
+
 /// Writes a footer key hint `{key, text}` for the key bound to `act` in `category`.
 inline auto write_hint( JsonOut &jsout, const std::string &act, const std::string &category,
                         const std::string &text ) -> void
