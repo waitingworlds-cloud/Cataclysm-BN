@@ -292,7 +292,7 @@ static func icon_rect(name: String, size := 20, color := TEXT) -> TextureRect:
 ## Friendlier name for a key label the game sends, e.g. `RETURN` becomes `Enter`.
 static func key_name(key: String) -> String:
 	const NAMES := {
-		"RETURN": "Enter", "ESC": "Esc", "TAB": "Tab", "BTAB": "Shift+Tab", "SPACE": "Space",
+		"RETURN": "Enter", "ESC": "Esc", "TAB": "Tab", "BTAB": "Shift+Tab", "BACKTAB": "Shift+Tab", "SPACE": "Space",
 		"BACKSPACE": "Backspace", "DELETE": "Del", "HOME": "Home", "END": "End", "PPAGE": "PgUp",
 		"NPAGE": "PgDn", "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→",
 	}

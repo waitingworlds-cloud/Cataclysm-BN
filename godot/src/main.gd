@@ -9,6 +9,7 @@ const PopupView := preload("res://src/views/popup_view.gd")
 const TextInputView := preload("res://src/views/text_input_view.gd")
 const InventoryView := preload("res://src/views/inventory_view.gd")
 const ItemActionsView := preload("res://src/views/item_actions_view.gd")
+const ScreenView := preload("res://src/views/screen_view.gd")
 const Keys := preload("res://src/keys.gd")
 
 var frame_view: TextureRect
@@ -135,6 +136,8 @@ func _on_view(msg: Dictionary) -> void:
 				view = InventoryView.new()
 			"item_actions":
 				view = ItemActionsView.new()
+			"screen":
+				view = ScreenView.new()
 			_:
 				return
 		view.view_id = id
