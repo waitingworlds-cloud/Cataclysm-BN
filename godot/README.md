@@ -25,8 +25,9 @@ directly; clicking a button presses the key bound to that action.
    godot --path godot
    ```
 
-   It looks for the game next to the Godot executable, in the repository root, and in
-   `out/build/<preset>/src/`. Options go after `--`:
+   It looks for the game next to the Godot executable, in the repository root, in `build/src/`,
+   and in `out/build/<preset>/src/` (and its `Release`, `RelWithDebInfo` or `Debug` folder for a
+   Visual Studio build). Options go after `--`:
 
    | Option             | Meaning                                                           |
    | ------------------ | ----------------------------------------------------------------- |

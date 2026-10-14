@@ -76,9 +76,13 @@ func _find_game(opts: Dictionary) -> String:
 	var exe_name := "cataclysm-bn-tiles" + (".exe" if OS.get_name() == "Windows" else "")
 	var here := OS.get_executable_path().get_base_dir()
 	var repo := ProjectSettings.globalize_path("res://").path_join("..").simplify_path()
-	var candidates := [here.path_join(exe_name), repo.path_join(exe_name)]
-	for preset in ["linux-slim", "linux-full", "windows-tiles-sounds-x64-msvc", "macos-tiles"]:
-		candidates.append(repo.path_join("out/build/%s/src/%s" % [preset, exe_name]))
+	var candidates := [here.path_join(exe_name), repo.path_join(exe_name), repo.path_join("build/src").path_join(exe_name)]
+	for preset in ["linux-slim", "linux-full", "osx-arm-slim", "windows-tiles-sounds-x64-msvc"]:
+		var dir := repo.path_join("out/build/%s/src" % preset)
+		candidates.append(dir.path_join(exe_name))
+		# Visual Studio builds go in a folder per configuration.
+		for config in ["Release", "RelWithDebInfo", "Debug"]:
+			candidates.append(dir.path_join(config).path_join(exe_name))
 	for path in candidates:
 		if FileAccess.file_exists(path):
 			return path
