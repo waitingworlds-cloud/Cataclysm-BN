@@ -39,6 +39,7 @@
 #include "gun_mode.h"
 #include "help.h"
 #include "iexamine.h"
+#include "imgui_layer.h"
 #include "input.h"
 #include "int_id.h"
 #include "item.h"
@@ -342,6 +343,10 @@ static void generate_weather_anim_frame( const weather_type_id &wtype, weather_p
 input_context game::get_player_input( std::string &action )
 {
     ZoneScopedN( "get_player_input" );
+#if defined(TILES)
+    // The Slate HUD is only interactive while the game waits on the main map view.
+    const auto gui_main_view = cata::imgui_layer::main_view_scope{};
+#endif
     input_context ctxt;
     {
         ZoneScopedN( "get_player_input_context" );
