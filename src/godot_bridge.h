@@ -38,6 +38,18 @@ auto is_active() -> bool;
 /// Pixel size of the Godot window, as last reported.
 auto window_size() -> point;
 
+/// Edges of the window the HUD's docked bars cover, in terminal cells.
+struct screen_insets {
+    int left = 0;
+    int top = 0;
+    int right = 0;
+    int bottom = 0;
+};
+/// Space the HUD covers; the game keeps its map view inside the rest of the window.
+auto map_insets() -> screen_insets;
+/// True once after Godot reported new insets, telling the frame code to lay the screens out again.
+auto take_layout_change() -> bool;
+
 /// What `translate_event` did with an event taken from the SDL queue.
 enum class event_result {
     /// Not a bridge event; handle it as usual.

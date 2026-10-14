@@ -2626,8 +2626,9 @@ std::string panel_manager::get_current_layout_id() const
 int panel_manager::get_width_right()
 {
 #if defined(TILES)
+    // The Godot HUD's sidebar takes the sidebar's place; keep the map out from under it.
     if( cata::godot_bridge::is_active() ) {
-        return 0;
+        return cata::godot_bridge::map_insets().right;
     }
 #endif
     if( get_option<std::string>( "SIDEBAR_POSITION" ) == "left" ) {
@@ -2640,7 +2641,7 @@ int panel_manager::get_width_left()
 {
 #if defined(TILES)
     if( cata::godot_bridge::is_active() ) {
-        return 0;
+        return cata::godot_bridge::map_insets().left;
     }
 #endif
     if( get_option<std::string>( "SIDEBAR_POSITION" ) == "left" ) {

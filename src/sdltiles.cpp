@@ -527,7 +527,7 @@ SDL_FRect get_android_render_rect( float DisplayBufferWidth, float DisplayBuffer
 static auto send_bridge_minimap() -> void
 {
     // Pixel size of the HUD's map card.
-    constexpr auto size = 268;
+    constexpr auto size = 288;
     if( !g || !tilecontext ) {
         return;
     }
@@ -3667,6 +3667,13 @@ static void CheckMessages()
     if( resize_dims.has_value() ) {
         restore_on_out_of_scope<input_event> prev_last_input( last_input );
         needupdate = resized = handle_resize( resize_dims.value().x, resize_dims.value().y );
+    }
+    // The Godot HUD's bars changed size: lay the screens out again around them.
+    if( cata::godot_bridge::take_layout_change() && !resized ) {
+        restore_on_out_of_scope<input_event> prev_last_input( last_input );
+        need_invalidate_framebuffers = true;
+        ui_manager::screen_resized();
+        needupdate = resized = true;
     }
     // resizing already reinitializes the render target
     if( !resized && render_target_reset ) {

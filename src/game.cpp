@@ -41,6 +41,7 @@
 #include "crafting.h"
 #include "creature_throw.h"
 #include "creature_tracker.h"
+#include "cuboid_rectangle.h"
 #include "cursesport.h"
 #include "damage.h"
 #include "debug.h"
@@ -188,6 +189,7 @@
 #include "worldfactory.h"
 
 #include <algorithm>
+#include <array>
 #include <bitset>
 #include <cassert>
 #include <chrono>
@@ -4593,8 +4595,18 @@ shared_ptr_fast<ui_adaptor> game::create_or_get_main_ui_adaptor()
             // (using standard font) that the terrain window can have
             const int sidebar_left = panel_manager::get_manager().get_width_left();
             const int sidebar_right = panel_manager::get_manager().get_width_right();
+            // The Godot HUD's header and action bar take rows at the top and bottom.
+            auto bar_top = 0;
+            auto bar_bottom = 0;
+#if defined(TILES)
+            if( cata::godot_bridge::is_active() ) {
+                const auto insets = cata::godot_bridge::map_insets();
+                bar_top = std::min( insets.top, TERMY / 3 );
+                bar_bottom = std::min( insets.bottom, TERMY / 3 );
+            }
+#endif
 
-            TERRAIN_WINDOW_HEIGHT = TERMY;
+            TERRAIN_WINDOW_HEIGHT = TERMY - bar_top - bar_bottom;
             TERRAIN_WINDOW_WIDTH = TERMX - ( sidebar_left + sidebar_right );
             TERRAIN_WINDOW_TERM_WIDTH = TERRAIN_WINDOW_WIDTH;
             TERRAIN_WINDOW_TERM_HEIGHT = TERRAIN_WINDOW_HEIGHT;
@@ -4628,7 +4640,7 @@ shared_ptr_fast<ui_adaptor> game::create_or_get_main_ui_adaptor()
             POSY = TERRAIN_WINDOW_HEIGHT / 2;
 
             w_terrain = w_terrain_ptr = catacurses::newwin( TERRAIN_WINDOW_HEIGHT, TERRAIN_WINDOW_WIDTH,
-                                        point( sidebar_left, 0 ) );
+                                        point( sidebar_left, bar_top ) );
 
             // minimap is always MINIMAP_WIDTH x MINIMAP_HEIGHT in size
             w_minimap = w_minimap_ptr = catacurses::newwin( MINIMAP_HEIGHT, MINIMAP_WIDTH, point_zero );
@@ -4779,6 +4791,38 @@ static shared_ptr_fast<game::draw_callback_t> create_trail_callback(
     } );
 }
 
+#if defined(TILES)
+namespace
+{
+
+/// Blanks the cells around the map that the Godot HUD's bars cover, so a screen the game still
+/// draws itself never shows text a closed screen left there.
+auto blank_around_map( const catacurses::window &w_map ) -> void
+{
+    // The map window counts tiles, not cells; its size in cells is kept separately.
+    const auto top = catacurses::getbegy( w_map );
+    const auto left = catacurses::getbegx( w_map );
+    const auto bottom = top + TERRAIN_WINDOW_TERM_HEIGHT;
+    const auto right = left + TERRAIN_WINDOW_TERM_WIDTH;
+    const auto strips = std::array {
+        half_open_rectangle<point>( point( 0, 0 ), point( TERMX, top ) ),
+        half_open_rectangle<point>( point( 0, bottom ), point( TERMX, TERMY ) ),
+        half_open_rectangle<point>( point( 0, top ), point( left, bottom ) ),
+        half_open_rectangle<point>( point( right, top ), point( TERMX, bottom ) ),
+    };
+    for( const auto &strip : strips ) {
+        const auto size = strip.p_max - strip.p_min;
+        if( size.x > 0 && size.y > 0 ) {
+            const auto win = catacurses::newwin( size.y, size.x, strip.p_min );
+            werase( win );
+            wnoutrefresh( win );
+        }
+    }
+}
+
+} // namespace
+#endif
+
 void game::draw( ui_adaptor &ui )
 {
     if( test_mode ) {
@@ -4839,6 +4883,7 @@ void game::draw( ui_adaptor &ui )
 #if defined(TILES)
     if( cata::godot_bridge::is_active() ) {
         // The Godot front end draws its own HUD in place of the sidebar.
+        blank_around_map( w_terrain );
         cata::godot_bridge::note_main_view( ui );
         cata::godot_bridge::set_hud( cata::godot_hud::build() );
     } else {

@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "color.h"
+#include "cursesport.h"
 #include "debug.h"
 #include "godot_bridge_socket.h"
 #include "input.h"
@@ -29,6 +30,10 @@
 #include "output.h"
 #include "string_formatter.h"
 #include "ui_manager.h"
+
+// Cell size of the game's main font (sdltiles.cpp).
+extern int fontwidth;
+extern int fontheight;
 
 namespace cata::godot_bridge
 {
@@ -63,6 +68,9 @@ struct bridge_state {
     std::mutex send_mutex;
 
     point size = point( 1280, 800 );
+    /// Docked HUD bars, in pixels: left, top, right, bottom.
+    std::array<int, 4> insets = {};
+    bool layout_changed = false;
     point mouse = point_zero;
     std::string text_buffer;
     input_event pending_input;
@@ -366,6 +374,32 @@ auto window_size() -> point
     return state().size;
 }
 
+auto map_insets() -> screen_insets
+{
+    const auto &s = state();
+    const auto &px = s.insets;
+    const auto scale = std::max( get_scaling_factor(), 1 );
+    const auto cell_w = std::max( fontwidth * scale, 1 );
+    const auto cell_h = std::max( fontheight * scale, 1 );
+    // The map reaches just under each bar, so no strip of empty frame shows between them.
+    const auto before = []( int pixels, int cell ) { return std::max( pixels, 0 ) / cell; };
+    const auto after = []( int pixels, int window, int cell, int cells ) {
+        const auto end = ( std::max( window - std::max( pixels, 0 ), 0 ) + cell - 1 ) / cell;
+        return std::max( cells - end, 0 );
+    };
+    return screen_insets{
+        .left = before( px[0], cell_w ),
+        .top = before( px[1], cell_h ),
+        .right = after( px[2], s.size.x, cell_w, TERMX ),
+        .bottom = after( px[3], s.size.y, cell_h, TERMY ),
+    };
+}
+
+auto take_layout_change() -> bool
+{
+    return std::exchange( state().layout_changed, false );
+}
+
 auto translate_event( SDL_Event &ev ) -> event_result
 {
     auto &s = state();
@@ -405,6 +439,16 @@ auto translate_event( SDL_Event &ev ) -> event_result
             ev.window.data1 = s.size.x;
             ev.window.data2 = s.size.y;
             return event_result::rewritten;
+        }
+        if( type == "insets" ) {
+            const auto insets = std::array {
+                obj.get_int( "left", 0 ), obj.get_int( "top", 0 ), obj.get_int( "right", 0 ), obj.get_int( "bottom", 0 ),
+            };
+            if( insets != s.insets ) {
+                s.insets = insets;
+                s.layout_changed = true;
+            }
+            return event_result::consumed;
         }
         if( type == "action" ) {
             return press_action( obj.get_string( "id" ), obj.get_string( "cat", "DEFAULTMODE" ) );
