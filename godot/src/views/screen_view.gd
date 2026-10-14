@@ -1170,6 +1170,12 @@ class ListRow extends PanelContainer:
 		_restyle()
 
 	func _mark_box(row: Dictionary) -> Control:
+		# A row without a check box in a list that has them keeps the space, so texts line up.
+		if not row.has("mark"):
+			var space := Control.new()
+			space.custom_minimum_size = Vector2(22, 22)
+			space.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			return space
 		var on := bool(row.get("mark", false))
 		var box := PanelContainer.new()
 		box.add_theme_stylebox_override("panel", Slate.box(Slate.ACCENT if on else Color(0, 0, 0, 0), 6,
