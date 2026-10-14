@@ -11,6 +11,9 @@
 #include "enums.h"
 #include "generic_factory.h"
 #include "generic_readers.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#endif
 #include "input.h"
 #include "item.h"
 #include "item_factory.h"
@@ -31,6 +34,7 @@
 #include "string_utils.h"
 #include "translations.h"
 #include "type_id_implement.h"
+#include "ui.h"
 #include "ui_manager.h"
 #include "value_ptr.h"
 
@@ -1656,6 +1660,15 @@ bool ma_style_callback::key( const input_context &ctxt, const input_event &event
             buffer += enumerate_as_string( mutations );
         }
 
+#if defined(TILES)
+        // The Godot front end shows the text in its scrolling card.
+        if( cata::godot_bridge::native_screens() ) {
+            const auto init_window = []() { return new_centered_win( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH ); };
+            scrollable_text( init_window, string_format( _( " Style: %s " ), ma.name ),
+                             replace_colors( buffer ) );
+            return true;
+        }
+#endif
         catacurses::window w;
 
         const std::string text = replace_colors( buffer );
