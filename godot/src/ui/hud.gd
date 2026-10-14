@@ -1,7 +1,8 @@
 extends Control
-## In-game HUD over the map, laid out after the Slate guide: the survivor card (needs, body and
-## stats), the time and place pill, the map and threats card, the message log and the action dock.
-## Rebuilt from the `hud` message the game sends whenever the main view redraws.
+## In-game HUD around the map: a header with the time, weather and place, a sidebar with the map,
+## threats and messages, and an action bar, all docked to the window's edges. The survivor card
+## (body, needs and stats) floats over the map's top left corner. Rebuilt from the `hud` message
+## the game sends whenever the main view redraws; the game keeps its map view inside the bars.
 ##
 ## It shows everything the old sidebar did. Parts the sidebar lets players switch off (compass,
 ## minimap, log, armor, mod panels) follow the sidebar options menu, opened with the gear button.
@@ -54,9 +55,24 @@ const INJURY_NOTES := {
 	"Broken, splinted": "Broken and splinted, mending.",
 }
 
-const MAP_SIZE := 268
+const HEADER_HEIGHT := 56
+const BAR_HEIGHT := 84
+const SIDE_WIDTH := 320
+const SIDE_PADDING := 16
+const MAP_SIZE := 288
 const SURVIVOR_WIDTH := 440
-const SIDE_WIDTH := 300
+const GAP := 16
+## Action bar button widths, widest first; the narrowest drops the labels.
+const DOCK_WIDTHS := [70, 58, 44]
+const CORNER_WIDTH := 3 * 40 + 2 * 6
+
+## Weather words and the icon that fits them, checked in order.
+const WEATHER_ICONS := [
+	["thunder", "cloud-lightning"], ["lightning", "cloud-lightning"], ["snow", "cloud-snow"],
+	["flurr", "cloud-snow"], ["sleet", "cloud-snow"], ["drizzle", "cloud-drizzle"], ["rain", "cloud-rain"],
+	["fog", "cloud-fog"], ["mist", "cloud-fog"], ["haz", "cloud-fog"], ["overcast", "cloud"],
+	["cloud", "cloud"], ["sunny", "sun"], ["clear", "sun"], ["fair", "cloud-sun"],
+]
 
 var _hud := {}
 var _keys := {}
@@ -83,21 +99,19 @@ var _stat_tiles := {}
 var _stat_rows: VBoxContainer
 var _chips: HFlowContainer
 
-# Status pill, details and vehicle
-var _top_column: VBoxContainer
-var _pill: PanelContainer
+# Header: time, weather and place
+var _header: PanelContainer
+var _header_row: HBoxContainer
 var _clock_day: Label
 var _clock_time: Label
-var _weather: RichTextLabel
-var _place: Label
-var _pill_chevron: TextureRect
-var _details: PanelContainer
-var _details_rows: VBoxContainer
-var _vehicle: PanelContainer
+## Header groups by id: [box, icon, label].
+var _groups := {}
+var _wanted := {}
+var _wind_arrow: TextureRect
 var _vehicle_row: HBoxContainer
 
-# Map, threats and mod panels
-var _side: VBoxContainer
+# Sidebar: map, threats, mod panels and messages
+var _side: PanelContainer
 var _minimap: TextureRect
 var _area: AreaView
 var _map_switch: HBoxContainer
@@ -106,25 +120,31 @@ var _threats_box: VBoxContainer
 var _threat_count: Label
 var _threat_list: VBoxContainer
 var _widgets: VBoxContainer
-
-# Log, dock and corner buttons
-var _log: VBoxContainer
+var _log_box: VBoxContainer
+var _log_list: VBoxContainer
 var _log_button: Button
-var _dock: PanelContainer
+
+# Action bar
+var _bar: PanelContainer
+var _balance: Control
 var _dock_buttons := {}
 var _options_button: Button
 
-
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_build_survivor_card()
-	_build_top()
+	_build_header()
 	_build_side()
-	_build_log()
-	_build_dock()
-	_build_corner()
-	resized.connect(_layout_bottom)
+	_build_bar()
+	_build_survivor_card()
 	Bridge.minimap_received.connect(func(texture: ImageTexture): _minimap.texture = texture)
+	Bridge.connected.connect(_send_insets)
+	_send_insets()
+
+
+## Tells the game which edges the bars cover, so it keeps the map view (and the player at its
+## center) inside the space that is left.
+func _send_insets() -> void:
+	Bridge.send({"t": "insets", "left": 0, "top": HEADER_HEIGHT, "right": SIDE_WIDTH, "bottom": BAR_HEIGHT})
 
 
 # --- Shared pieces -------------------------------------------------------------------------------
@@ -136,6 +156,25 @@ func _card(width: float, parent: Control = self) -> PanelContainer:
 	card.mouse_filter = Control.MOUSE_FILTER_STOP
 	parent.add_child(card)
 	return card
+
+
+## Flat panel for a bar docked to one edge, with a hairline on the side facing the map.
+func _bar_box(edge: int) -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Slate.CARD_SOLID
+	sb.border_color = Slate.BORDER
+	match edge:
+		SIDE_TOP:
+			sb.border_width_top = 1
+		SIDE_BOTTOM:
+			sb.border_width_bottom = 1
+		SIDE_LEFT:
+			sb.border_width_left = 1
+	return sb
+
+
+func _section_title(text: String) -> Label:
+	return Slate.label(text, 15, Slate.TEXT, Slate.heavy())
 
 
 func _spacer(height: float) -> Control:
@@ -258,7 +297,7 @@ static func _cap(text: String) -> String:
 
 func _build_survivor_card() -> void:
 	var card := _card(SURVIVOR_WIDTH)
-	card.position = Vector2(20, 20)
+	card.position = Vector2(GAP, HEADER_HEIGHT + GAP)
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 14)
 	card.add_child(col)
@@ -382,110 +421,126 @@ func _on_part_clicked(id: String) -> void:
 	_update_body_view()
 
 
-# --- Time, place and vehicle ---------------------------------------------------------------------
+# --- Header --------------------------------------------------------------------------------------
 
-func _build_top() -> void:
-	_top_column = VBoxContainer.new()
-	_top_column.add_theme_constant_override("separation", 10)
-	_top_column.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_top_column.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_top_column.position.y = 20
-	_top_column.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(_top_column)
+func _build_header() -> void:
+	_header = PanelContainer.new()
+	var sb := _bar_box(SIDE_BOTTOM)
+	sb.content_margin_left = 22
+	sb.content_margin_right = 22
+	_header.add_theme_stylebox_override("panel", sb)
+	_header.anchor_right = 1.0
+	_header.offset_bottom = HEADER_HEIGHT
+	_header.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_header)
+	_header_row = HBoxContainer.new()
+	_header_row.add_theme_constant_override("separation", 20)
+	_header_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_header.add_child(_header_row)
 
-	_pill = PanelContainer.new()
-	var sb := Slate.card_box(999, 0)
-	sb.content_margin_left = 20
-	sb.content_margin_right = 16
-	sb.content_margin_top = 10
-	sb.content_margin_bottom = 10
-	_pill.add_theme_stylebox_override("panel", sb)
-	_pill.mouse_filter = Control.MOUSE_FILTER_STOP
-	_pill.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	_pill.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	_pill.tooltip_text = "Show weather, wind, moon and coordinates"
-	_pill.gui_input.connect(func(event: InputEvent):
-		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-			_details.visible = not _details.visible
-			_pill_chevron.rotation_degrees = 180.0 if _details.visible else 0.0)
-	_top_column.add_child(_pill)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 12)
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_pill.add_child(row)
+	var clock := HBoxContainer.new()
+	clock.add_theme_constant_override("separation", 12)
+	clock.mouse_filter = Control.MOUSE_FILTER_PASS
+	clock.tooltip_text = "Season, day and time. Without a watch the time is a guess, and underground there is none."
+	_header_row.add_child(clock)
 	_clock_day = Slate.label("", 15, Slate.TEXT, Slate.bold())
-	row.add_child(_clock_day)
+	clock.add_child(_clock_day)
 	_clock_time = Slate.label("", 15, Slate.ACCENT, Slate.mono_bold())
-	row.add_child(_clock_time)
-	row.add_child(_divider())
-	_weather = Slate.rich(15)
-	_weather.autowrap_mode = TextServer.AUTOWRAP_OFF
-	_weather.custom_minimum_size.x = 10
-	row.add_child(_weather)
-	row.add_child(_divider())
-	row.add_child(Slate.icon_rect("map-pin", 16, Slate.MUTED))
-	_place = Slate.label("", 15, Slate.SOFT)
-	row.add_child(_place)
-	_pill_chevron = Slate.icon_rect("chevron-down", 16, Slate.FAINT)
-	_pill_chevron.pivot_offset = Vector2(8, 8)
-	row.add_child(_pill_chevron)
+	clock.add_child(_clock_time)
+	_header_row.add_child(_divider())
 
-	_details = _card(360, _top_column)
-	_details.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	_details.visible = false
-	_details_rows = VBoxContainer.new()
-	_details_rows.add_theme_constant_override("separation", 8)
-	_details.add_child(_details_rows)
+	_groups["weather"] = _group("cloud", "Weather")
+	_groups["temperature"] = _group("thermometer", "Temperature (needs a thermometer)")
+	_groups["light"] = _group("sun-dim", "Light where you stand")
+	_groups["wind"] = _group("wind", "Wind; the arrow shows where it blows")
+	_wind_arrow = Slate.icon_rect("arrow-up", 14, Slate.SOFT)
+	_wind_arrow.pivot_offset = Vector2(7, 7)
+	_wind_arrow.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_groups["wind"][0].add_child(_wind_arrow)
+	_groups["moon"] = _group("moon", "Moon phase")
 
-	_vehicle = PanelContainer.new()
-	var vsb := Slate.card_box(999, 0)
-	vsb.content_margin_left = 18
-	vsb.content_margin_right = 18
-	vsb.content_margin_top = 9
-	vsb.content_margin_bottom = 9
-	_vehicle.add_theme_stylebox_override("panel", vsb)
-	_vehicle.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	_vehicle.mouse_filter = Control.MOUSE_FILTER_STOP
-	_vehicle.visible = false
-	_top_column.add_child(_vehicle)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_header_row.add_child(spacer)
+
 	_vehicle_row = HBoxContainer.new()
 	_vehicle_row.add_theme_constant_override("separation", 10)
-	_vehicle_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_vehicle.add_child(_vehicle_row)
+	_vehicle_row.mouse_filter = Control.MOUSE_FILTER_PASS
+	_vehicle_row.visible = false
+	_header_row.add_child(_vehicle_row)
+	_groups["place"] = _group("map-pin", "Where you are")
+	_groups["coords"] = _group("compass", "Overmap coordinates", true)
+	# The window's width, not the header's: a header too full for the window grows past it.
+	resized.connect(_fit_header)
 
 
-func _detail_row(icon_name: String, title: String, value: String, color := Slate.SOFT, mono := false) -> HBoxContainer:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(Slate.icon_rect(icon_name, 16, Slate.FAINT))
-	var l := Slate.label(title, 13, Slate.MUTED)
-	l.custom_minimum_size.x = 92
-	row.add_child(l)
-	var v := Slate.label(value, 13, color, Slate.mono() if mono else Slate.semibold())
-	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	v.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(v)
-	return row
+## One icon-and-text item in the header: [box, icon, label].
+func _group(icon_name: String, tooltip: String, mono := false) -> Array:
+	var box := HBoxContainer.new()
+	box.add_theme_constant_override("separation", 7)
+	box.tooltip_text = tooltip
+	box.mouse_filter = Control.MOUSE_FILTER_PASS
+	_header_row.add_child(box)
+	var icon := Slate.icon_rect(icon_name, 16, Slate.FAINT)
+	icon.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	box.add_child(icon)
+	var label := Slate.label("", 13 if mono else 14, Slate.SOFT, Slate.mono() if mono else Slate.semibold())
+	box.add_child(label)
+	return [box, icon, label]
 
 
-# --- Map, threats and mod panels -----------------------------------------------------------------
+func _set_group(id: String, text: String, color := Slate.SOFT) -> void:
+	var g: Array = _groups[id]
+	(g[2] as Label).text = text
+	(g[2] as Label).add_theme_color_override("font_color", color)
+	_wanted[id] = text != ""
+
+
+## Shows every header item that fits, dropping the least important first in narrow windows.
+## Whatever a narrow window hides is listed in the place's tooltip, so nothing is lost.
+func _fit_header() -> void:
+	for id in _groups:
+		_groups[id][0].visible = bool(_wanted.get(id, false))
+	var hidden: PackedStringArray = []
+	for id in ["coords", "moon", "wind", "light", "temperature"]:
+		if _header_needed() <= size.x - 44:
+			break
+		if _groups[id][0].visible:
+			_groups[id][0].visible = false
+			hidden.append("%s: %s" % [_groups[id][0].tooltip_text.get_slice(" (", 0).get_slice(";", 0), _groups[id][2].text])
+	hidden.reverse()
+	_groups["place"][0].tooltip_text = "\n".join(PackedStringArray(["Where you are"]) + hidden)
+
+
+func _header_needed() -> float:
+	var total := 0.0
+	var shown := 0
+	for c in _header_row.get_children():
+		if c is Control and c.visible:
+			total += (c as Control).get_combined_minimum_size().x
+			shown += 1
+	return total + maxi(shown - 1, 0) * 20
+
+
+# --- Sidebar: map, threats, mod panels and messages ----------------------------------------------
 
 func _build_side() -> void:
-	_side = VBoxContainer.new()
-	_side.add_theme_constant_override("separation", 12)
+	_side = PanelContainer.new()
+	var sb := _bar_box(SIDE_LEFT)
+	sb.set_content_margin_all(SIDE_PADDING)
+	_side.add_theme_stylebox_override("panel", sb)
 	_side.anchor_left = 1.0
 	_side.anchor_right = 1.0
-	_side.offset_left = -SIDE_WIDTH - 20
-	_side.offset_right = -20
-	_side.offset_top = 20
-	_side.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_side.anchor_bottom = 1.0
+	_side.offset_left = -SIDE_WIDTH
+	_side.offset_top = HEADER_HEIGHT
+	_side.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(_side)
 
-	var card := _card(SIDE_WIDTH, _side)
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 14)
-	card.add_child(col)
+	_side.add_child(col)
 
 	var holder := Control.new()
 	holder.custom_minimum_size = Vector2(MAP_SIZE, MAP_SIZE)
@@ -534,9 +589,10 @@ func _build_side() -> void:
 	_threats_box = VBoxContainer.new()
 	_threats_box.add_theme_constant_override("separation", 8)
 	col.add_child(_threats_box)
+	_threats_box.add_child(_rule())
 	var head := HBoxContainer.new()
 	_threats_box.add_child(head)
-	var title := Slate.label("Threats", 16, Slate.TEXT, Slate.heavy())
+	var title := _section_title("Threats")
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(title)
 	_threat_count = Slate.label("", 13, Slate.MUTED, Slate.bold())
@@ -546,102 +602,124 @@ func _build_side() -> void:
 	_threats_box.add_child(_threat_list)
 
 	_widgets = VBoxContainer.new()
-	_widgets.add_theme_constant_override("separation", 12)
+	_widgets.add_theme_constant_override("separation", 14)
 	_widgets.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_side.add_child(_widgets)
+	col.add_child(_widgets)
 
-
-# --- Log, dock, corner ---------------------------------------------------------------------------
-
-func _build_log() -> void:
-	_log = VBoxContainer.new()
-	_log.add_theme_constant_override("separation", 6)
-	_log.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_log.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_log.offset_left = 20
-	_log.offset_top = -20
-	_log.offset_bottom = -20
-	_log.alignment = BoxContainer.ALIGNMENT_END
-	_log.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(_log)
+	# Messages fill the rest of the sidebar, newest at the bottom; older ones scroll off the top.
+	_log_box = VBoxContainer.new()
+	_log_box.add_theme_constant_override("separation", 8)
+	_log_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.add_child(_log_box)
+	_log_box.add_child(_rule())
+	var log_head := HBoxContainer.new()
+	_log_box.add_child(log_head)
+	var log_title := _section_title("Messages")
+	log_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	log_head.add_child(log_title)
 	_log_button = Button.new()
 	_log_button.focus_mode = Control.FOCUS_NONE
 	_log_button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	_log_button.add_theme_font_size_override("font_size", 13)
-	_log_button.add_theme_color_override("font_color", Slate.SOFT)
-	var sb := Slate.pill_box(Slate.CARD, 14, 6)
-	sb.border_color = Slate.BORDER
-	sb.set_border_width_all(1)
-	_log_button.add_theme_stylebox_override("normal", sb)
-	var sbh := sb.duplicate()
-	sbh.bg_color = Slate.RAISED
-	_log_button.add_theme_stylebox_override("hover", sbh)
-	_log_button.add_theme_stylebox_override("pressed", sbh)
+	_log_button.add_theme_font_size_override("font_size", 12)
+	_log_button.add_theme_color_override("font_color", Slate.MUTED)
+	_log_button.add_theme_color_override("font_hover_color", Slate.TEXT)
+	var lb := Slate.pill_box(Color(1, 1, 1, 0.06), 10, 4)
+	_log_button.add_theme_stylebox_override("normal", lb)
+	var lbh := Slate.pill_box(Color(1, 1, 1, 0.12), 10, 4)
+	_log_button.add_theme_stylebox_override("hover", lbh)
+	_log_button.add_theme_stylebox_override("pressed", lbh)
 	_log_button.pressed.connect(func(): Bridge.run_action("messages"))
+	log_head.add_child(_log_button)
+	var clip := Control.new()
+	clip.clip_contents = true
+	clip.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_log_box.add_child(clip)
+	_log_list = VBoxContainer.new()
+	_log_list.add_theme_constant_override("separation", 7)
+	_log_list.anchor_top = 1.0
+	_log_list.anchor_bottom = 1.0
+	_log_list.anchor_right = 1.0
+	_log_list.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_log_list.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	clip.add_child(_log_list)
 
 
-func _build_dock() -> void:
-	_dock = PanelContainer.new()
-	_dock.add_theme_stylebox_override("panel", Slate.card_box(18, 8))
-	_dock.mouse_filter = Control.MOUSE_FILTER_STOP
-	_dock.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	_dock.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_dock.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_dock.offset_top = -20
-	_dock.offset_bottom = -20
-	_dock.resized.connect(_layout_bottom)
-	add_child(_dock)
+# --- Action bar ----------------------------------------------------------------------------------
+
+func _build_bar() -> void:
+	_bar = PanelContainer.new()
+	var sb := _bar_box(SIDE_TOP)
+	sb.content_margin_left = 16
+	sb.content_margin_right = 16
+	_bar.add_theme_stylebox_override("panel", sb)
+	_bar.anchor_top = 1.0
+	_bar.anchor_bottom = 1.0
+	_bar.anchor_right = 1.0
+	_bar.offset_top = -BAR_HEIGHT
+	_bar.offset_right = -SIDE_WIDTH
+	_bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_bar)
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 6)
-	_dock.add_child(row)
+	row.add_theme_constant_override("separation", 12)
+	_bar.add_child(row)
+
+	# Room on the left matching the zoom buttons, so the actions sit in the middle of the map.
+	_balance = Control.new()
+	_balance.custom_minimum_size.x = CORNER_WIDTH
+	_balance.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(_balance)
+	var center := CenterContainer.new()
+	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(center)
+	var dock := HBoxContainer.new()
+	dock.add_theme_constant_override("separation", 4)
+	center.add_child(dock)
 	for entry in DOCK:
 		var button := DockButton.new(entry[0], entry[1], entry[2], entry[3])
-		row.add_child(button)
+		dock.add_child(button)
 		_dock_buttons[entry[0]] = button
 
-
-func _build_corner() -> void:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	row.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	row.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	row.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	row.position = Vector2(-20, -20)
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(row)
-	for z in [["zoom_in", "plus", "Zoom in"], ["zoom_out", "minus", "Zoom out"],
+	var corner := HBoxContainer.new()
+	corner.add_theme_constant_override("separation", 6)
+	corner.alignment = BoxContainer.ALIGNMENT_END
+	corner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(corner)
+	for z in [["zoom_out", "zoom-out", "Zoom out"], ["zoom_in", "zoom-in", "Zoom in"],
 			["toggle_panel_adm", "settings", "HUD options"]]:
-		var b := _icon_button(z[1], z[2], 44, 18)
-		var sb := Slate.box(Slate.CARD, 12)
-		sb.set_content_margin_all(0)
-		b.add_theme_stylebox_override("normal", sb)
-		var sbh := sb.duplicate()
-		sbh.bg_color = Slate.RAISED
-		b.add_theme_stylebox_override("hover", sbh)
-		b.add_theme_stylebox_override("pressed", sbh)
-		b.add_theme_color_override("icon_normal_color", Slate.TEXT)
+		var b := _icon_button(z[1], z[2], 40, 18)
+		var plain := Slate.box(Color(1, 1, 1, 0.05), 10, Slate.BORDER, 0)
+		plain.set_content_margin_all(0)
+		b.add_theme_stylebox_override("normal", plain)
+		var hot := Slate.box(Color(1, 1, 1, 0.12), 10, Slate.BORDER, 0)
+		hot.set_content_margin_all(0)
+		b.add_theme_stylebox_override("hover", hot)
+		b.add_theme_stylebox_override("pressed", hot)
+		b.add_theme_color_override("icon_normal_color", Slate.SOFT)
+		b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		var action: String = z[0]
 		b.pressed.connect(func(): Bridge.run_action(action))
-		row.add_child(b)
+		corner.add_child(b)
 		if action == "toggle_panel_adm":
 			_options_button = b
+	resized.connect(_fit_bar)
+	_fit_bar()
 
 
-## The log sits left of the dock. When the window is too narrow for both side by side, it moves up
-## above the dock instead of running underneath it.
-func _layout_bottom() -> void:
-	if _dock == null or _log == null:
-		return
-	var dock_left := (size.x - _dock.size.x) / 2
-	var room := dock_left - 20 - 24
-	if room >= 320:
-		_log.custom_minimum_size.x = minf(room, 520)
-		_log.offset_bottom = -20
-	else:
-		_log.custom_minimum_size.x = minf(520, size.x - 40)
-		_log.offset_bottom = -(20 + _dock.size.y + 14)
-	_log.offset_top = _log.offset_bottom
-	_log.size.x = _log.custom_minimum_size.x
+## Narrow windows first give up the room that centers the actions, then tighten the buttons.
+func _fit_bar() -> void:
+	var room := size.x - SIDE_WIDTH - 32.0
+	var count := _dock_buttons.size()
+	var needed := func(w: int) -> float: return count * w + (count - 1) * 4 + 12 + CORNER_WIDTH
+	_balance.visible = needed.call(DOCK_WIDTHS[0]) + 12 + CORNER_WIDTH <= room
+	var level: int = DOCK_WIDTHS.size() - 1
+	for i in DOCK_WIDTHS.size():
+		if needed.call(DOCK_WIDTHS[i]) <= room:
+			level = i
+			break
+	for b in _dock_buttons.values():
+		(b as DockButton).set_width(DOCK_WIDTHS[level], level < DOCK_WIDTHS.size() - 1)
 
 
 # --- Updates -------------------------------------------------------------------------------------
@@ -667,12 +745,11 @@ func apply(hud: Dictionary) -> void:
 	_update_stats(hud, show)
 	_update_chips(hud)
 	_update_status(hud)
-	_update_details(hud)
 	_update_vehicle(hud.get("vehicle", {}))
 	_update_map()
 	_update_threats(hud, show)
 	_update_widgets(hud.get("widgets", []))
-	_log.visible = bool(show.get("log", true))
+	_log_box.visible = bool(show.get("log", true))
 	_update_log(hud.get("messages", []))
 	for action in _dock_buttons:
 		_dock_buttons[action].set_key(_key(action))
@@ -896,73 +973,50 @@ func _update_status(hud: Dictionary) -> void:
 			_clock_time.text = "Time unknown"
 			_clock_time.add_theme_font_override("font", Slate.bold())
 			_clock_time.add_theme_color_override("font_color", Slate.MUTED)
-	var parts := []
+
 	if bool(hud.get("underground", false)):
-		parts.append("[color=#%s]Underground[/color]" % _hex(Slate.SOFT))
+		_set_group("weather", "Underground", Slate.SOFT)
+		(_groups["weather"][1] as TextureRect).texture = Slate.icon("layers", 16)
 	else:
 		var weather: Dictionary = hud.get("weather", {})
-		parts.append("[color=#%s]%s[/color]" % [_hex(_colored(weather, Slate.SOFT)), _escape(_text(weather))])
+		_set_group("weather", _text(weather), _colored(weather, Slate.SOFT))
+		(_groups["weather"][1] as TextureRect).texture = Slate.icon(_weather_icon(_text(weather)), 16)
 	var temp := String(hud.get("temperature", "-"))
-	if temp != "-" and temp != "":
-		parts.append("[color=#%s]%s[/color]" % [_hex(Slate.SOFT), _escape(temp)])
-	var light: Dictionary = hud.get("light", {})
-	if light.has("text"):
-		parts.append("[color=#%s]%s[/color]" % [_hex(_colored(light, Slate.SOFT)), _escape(_cap(_text(light)))])
-	_weather.text = ("[color=#%s]  ·  [/color]" % _hex(Slate.FAINT)).join(parts)
-	_place.text = _cap(String(hud.get("place", "")))
-
-
-func _update_details(hud: Dictionary) -> void:
-	for c in _details_rows.get_children():
-		c.queue_free()
-	var kind := String(hud.get("time_kind", "clock"))
-	var time := String(hud.get("time", ""))
-	var time_text := time
-	if kind == "approx":
-		time_text = "%s (no watch)" % time
-	elif kind == "unknown":
-		time_text = "Unknown underground"
-	_details_rows.add_child(_detail_row("clock", "Time", time_text))
-	_details_rows.add_child(_detail_row("sun-moon", "Date", "%s, day %d" % [String(hud.get("season", "")), int(hud.get("day", 1))]))
-	if bool(hud.get("underground", false)):
-		_details_rows.add_child(_detail_row("cloud-rain", "Sky", "Underground"))
+	if temp == "-" or temp == "":
+		_set_group("temperature", "No thermometer", Slate.FAINT)
 	else:
-		var weather: Dictionary = hud.get("weather", {})
-		_details_rows.add_child(_detail_row("cloud-rain", "Sky", _text(weather), _colored(weather, Slate.SOFT)))
-	var temp := String(hud.get("temperature", "-"))
-	_details_rows.add_child(_detail_row("thermometer", "Temperature", temp if temp != "-" else "No thermometer",
-			Slate.SOFT if temp != "-" else Slate.FAINT))
+		_set_group("temperature", temp, Slate.SOFT)
 	var light: Dictionary = hud.get("light", {})
-	_details_rows.add_child(_detail_row("lightbulb", "Light", _cap(_text(light)), _colored(light, Slate.SOFT)))
+	_set_group("light", _cap(_text(light)), _colored(light, Slate.SOFT))
 	var wind: Dictionary = hud.get("wind", {})
-	var wind_row := _detail_row("wind", "Wind", _text(wind), _colored(wind, Slate.SOFT))
-	var arrow := String(hud.get("wind_arrow", ""))
-	if arrow != "":
-		wind_row.add_child(_wind_arrow(arrow))
-	_details_rows.add_child(wind_row)
-	_details_rows.add_child(_detail_row("moon", "Moon", String(hud.get("moon", ""))))
-	_details_rows.add_child(_rule())
-	_details_rows.add_child(_detail_row("map-pin", "Place", _cap(String(hud.get("place", "")))))
-	_details_rows.add_child(_detail_row("compass", "Coordinates", String(hud.get("coords", "")), Slate.SOFT, true))
-
-
-## The game's wind arrows point where the wind blows to; draw the same direction as an icon.
-func _wind_arrow(arrow: String) -> TextureRect:
+	_set_group("wind", _text(wind), _colored(wind, Slate.SOFT))
 	var angles := {"⇑": 0, "⇗": 45, "⇒": 90, "⇘": 135, "⇓": 180, "⇙": 225, "⇐": 270, "⇖": 315}
-	var r := Slate.icon_rect("arrow-up", 16, Slate.SOFT)
-	r.pivot_offset = Vector2(8, 8)
-	r.rotation_degrees = float(angles.get(arrow, 0))
-	return r
+	var arrow := String(hud.get("wind_arrow", ""))
+	_wind_arrow.visible = angles.has(arrow)
+	_wind_arrow.rotation_degrees = float(angles.get(arrow, 0))
+	_set_group("moon", String(hud.get("moon", "")))
+	_set_group("place", _cap(String(hud.get("place", ""))), Slate.TEXT)
+	_set_group("coords", String(hud.get("coords", "")), Slate.MUTED)
+	_fit_header()
+
+
+func _weather_icon(weather: String) -> String:
+	var w := weather.to_lower()
+	for pair in WEATHER_ICONS:
+		if w.contains(pair[0]):
+			return pair[1]
+	return "cloud"
 
 
 func _update_vehicle(veh: Dictionary) -> void:
-	_vehicle.visible = not veh.is_empty()
+	_vehicle_row.visible = not veh.is_empty()
 	if veh.is_empty():
 		return
 	for c in _vehicle_row.get_children():
 		c.queue_free()
 	_vehicle_row.add_child(Slate.icon_rect("car", 18, Slate.SOFT))
 	_vehicle_row.add_child(Slate.label(String(veh.get("name", "")), 14, Slate.TEXT, Slate.bold()))
+	_vehicle_row.tooltip_text = "The vehicle you are controlling"
 	_vehicle_row.add_child(_divider())
 	_vehicle_row.add_child(Slate.label(String(veh.get("heading", "")), 14, Slate.SOFT, Slate.mono()))
 	_vehicle_row.add_child(_divider())
@@ -1074,12 +1128,13 @@ func _threat_row(entry: Dictionary) -> HBoxContainer:
 func _update_widgets(widgets: Array) -> void:
 	for c in _widgets.get_children():
 		c.queue_free()
+	_widgets.visible = not widgets.is_empty()
 	for w in widgets:
-		var card := _card(SIDE_WIDTH, _widgets)
 		var col := VBoxContainer.new()
 		col.add_theme_constant_override("separation", 4)
-		card.add_child(col)
-		col.add_child(Slate.label(String(w.get("name", "")), 14, Slate.TEXT, Slate.heavy()))
+		_widgets.add_child(col)
+		col.add_child(_rule())
+		col.add_child(_section_title(String(w.get("name", ""))))
 		for line in w.get("lines", []):
 			var l := Slate.rich(13)
 			l.text = Slate.bbcode(line, Slate.SOFT)
@@ -1087,37 +1142,24 @@ func _update_widgets(widgets: Array) -> void:
 
 
 func _update_log(messages: Array) -> void:
-	for c in _log.get_children():
-		_log.remove_child(c)
-		if c != _log_button:
-			c.queue_free()
-	var recent := messages.slice(maxi(messages.size() - 5, 0))
-	var n := recent.size()
+	for c in _log_list.get_children():
+		c.queue_free()
+	var n := messages.size()
 	for i in n:
-		var msg: Dictionary = recent[i]
-		var row := PanelContainer.new()
-		var sb := Slate.box(Color(Slate.GROUND, 0.88), 10, Slate.BORDER, 0)
-		sb.content_margin_left = 14
-		sb.content_margin_right = 14
-		sb.content_margin_top = 8
-		sb.content_margin_bottom = 8
-		row.add_theme_stylebox_override("panel", sb)
-		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var age := n - 1 - i
-		row.modulate.a = 1.0 if bool(msg.get("fresh", false)) else clampf(0.92 - age * 0.09, 0.45, 0.92)
+		var msg: Dictionary = messages[i]
 		var line := HBoxContainer.new()
-		line.add_theme_constant_override("separation", 10)
-		row.add_child(line)
+		line.add_theme_constant_override("separation", 9)
+		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var age := n - 1 - i
+		line.modulate.a = 1.0 if bool(msg.get("fresh", false)) else clampf(0.95 - age * 0.06, 0.4, 0.95)
 		line.add_child(DotView.new(Slate.lead_color(msg.get("text", []), Slate.SOFT)))
-		var text := Slate.rich(15)
+		var text := Slate.rich(14)
 		text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		text.text = Slate.bbcode(msg.get("text", []), Slate.SOFT)
 		line.add_child(text)
-		_log.add_child(row)
+		_log_list.add_child(line)
 	var key := _key("messages")
-	_log_button.text = "Open full log" + ("  ·  %s" % key if key != "" else "")
-	_log.add_child(_log_button)
-	_log_button.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	_log_button.text = "Full log" + ("  ·  %s" % key if key != "" else "")
 
 
 # --- Pieces --------------------------------------------------------------------------------------
@@ -1449,6 +1491,7 @@ class DotView extends Control:
 class DockButton extends Button:
 	var action: String
 	var _key: Label
+	var _name: Label
 	var _hint: String
 
 	func _init(action_id: String, title: String, icon_name: String, hint: String) -> void:
@@ -1471,15 +1514,21 @@ class DockButton extends Button:
 		var glyph := Slate.icon_rect(icon_name, 22, Slate.TEXT)
 		glyph.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		col.add_child(glyph)
-		var name := Slate.label(title, 12, Slate.TEXT, Slate.bold())
-		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		col.add_child(name)
+		_name = Slate.label(title, 12, Slate.TEXT, Slate.bold())
+		_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(_name)
 		_key = Slate.label("", 10, Slate.MUTED, Slate.mono())
 		_key.position = Vector2(0, 3)
 		_key.size = Vector2(64, 14)
 		_key.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		add_child(_key)
 		pressed.connect(func(): Bridge.run_action(action))
+
+	## Narrow buttons in small windows; without the label the tooltip still names the action.
+	func set_width(width: int, labeled: bool) -> void:
+		custom_minimum_size.x = width
+		_name.visible = labeled
+		_key.size = Vector2(width - 6, 14)
 
 	func set_key(key: String) -> void:
 		_key.text = key

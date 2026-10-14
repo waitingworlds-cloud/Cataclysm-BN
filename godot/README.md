@@ -2,8 +2,8 @@
 
 A new interface for Cataclysm: Bright Nights, drawn by [Godot](https://godotengine.org). Godot owns
 the window. It starts the game in the background, shows the map the game renders, and draws the HUD,
-menus and prompts itself in the Slate style: full-screen map, floating rounded cards, Manrope and
-JetBrains Mono, amber accent.
+menus and prompts itself in the Slate style: a map framed by a header, a sidebar and an action bar,
+rounded cards, Manrope and JetBrains Mono, amber accent.
 
 Every action still runs through the game's own code and keybindings. Godot never changes game state
 directly; clicking a button presses the key bound to that action.
@@ -59,22 +59,27 @@ ever unreachable.
 ## The HUD
 
 The HUD replaces the game's sidebar and shows everything the sidebar shows, following the same rules
-(health as bars unless the health style is numbers, a clock only with a watch, and so on):
+(health as bars unless the health style is numbers, a clock only with a watch, and so on). Three
+bars are docked to the window edges and the game keeps its map view in the space between them, so
+the survivor stays centered in what you can see:
 
-- **Survivor card**, top left: a body figure colored by each limb's health, with bleeding, bites,
-  infections and breaks outlined. Click a limb, or open the body tab, to see its health, injuries and
-  outer armor. Tabs switch between needs (thirst, hunger, rest, stamina, warmth), body, and stats
-  (attributes, weight, volume, bionic power, mana, armor). Mood, focus, speed, move cost and noise
-  are always shown, with chips for injuries, pain, move mode and safe mode.
-- **Time and place**, top center: season and day, time, weather, temperature, light and place. Click
-  it for wind, moon, coordinates and more. A second pill shows the vehicle you are driving.
-- **Map and threats**, top right: the pixel minimap or the nearby overmap, and every creature in
-  view with its threat level and direction (the sidebar compass).
-- **Message log**, bottom left, **action dock**, bottom center, and zoom and HUD options, bottom right.
+- **Header**, along the top: season, day and time, weather, temperature, light, wind and moon, and
+  on the right the place and coordinates. While driving it also shows the vehicle's speed, cruise
+  control, heading and fuel.
+- **Sidebar**, on the right: the pixel minimap or the nearby overmap, every creature in view with
+  its threat level and direction (the sidebar compass), Lua sidebar widgets from mods, and the
+  message log.
+- **Action bar**, along the bottom: the action dock in the middle, and zoom and HUD options on the
+  right.
+- **Survivor card**, floating at the top left of the map: a body figure colored by each limb's
+  health, with bleeding, bites, infections and breaks outlined. Click a limb, or open the body tab,
+  to see its health, injuries and outer armor. Tabs switch between needs (thirst, hunger, rest,
+  stamina, warmth), body, and stats (attributes, weight, volume, bionic power, mana, armor). Mood,
+  focus, speed, move cost and noise are always shown, with chips for injuries, pain, move mode and
+  safe mode.
 
 The HUD options button (or `}`, the sidebar options key) opens the game's sidebar options: turning a
-panel off there hides the matching part of the HUD. Lua sidebar widgets from mods appear as cards
-under the threats.
+panel off there hides the matching part of the HUD.
 
 Every key still goes to the game first: the HUD never takes keyboard focus, and its buttons press
 the key bound to their action.
@@ -100,6 +105,8 @@ Game to Godot: `[u32 length, little endian][u8 kind][payload]`
 Godot to game: `[u32 length][JSON]`
 
 - `hello {w, h}`, `resize {w, h}`: window size in pixels.
+- `insets {left, top, right, bottom}`: pixels the HUD's docked bars cover at each edge. The game
+  lays its map view out in the rest of the window.
 - `key {k, m, r, down}`: SDL keycode and modifiers. `text {s}`: typed text.
 - `mouse {e: move|down|up|wheel, x, y, b, dy}`: mouse over the map.
 - `action {id, cat}`: press the key bound to a game action, e.g. `inventory`.
