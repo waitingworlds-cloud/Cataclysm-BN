@@ -16,6 +16,10 @@
 #include "color.h"
 #include "debug.h"
 #include "filesystem.h"
+#if defined( TILES )
+#include "godot_bridge.h"
+#include "json.h"
+#endif
 #include "input.h"
 #include "mod_manager.h"
 #include "output.h"
@@ -473,6 +477,7 @@ loading_ui::loading_ui( bool display )
 loading_ui::~loading_ui()
 {
 #if defined( TILES )
+    native = nullptr;
     clear_sdl_display_buffer_before_redraw();
 #endif
 }
@@ -489,6 +494,9 @@ void loading_ui::new_context( const std::string &desc )
     if( menu != nullptr ) {
         menu->reset();
         menu->settext( desc );
+#if defined( TILES )
+        native = nullptr;
+#endif
         ui = nullptr;
         ui_splash = nullptr;
     }
@@ -504,9 +512,40 @@ void loading_ui::init()
 #endif
 
         ui = std::make_unique<ui_adaptor>();
-        ui->on_screen_resize( [this]( ui_adaptor & ui ) { menu->reposition( ui ); } );
-        menu->reposition( *ui );
+#if defined( TILES )
+        // Godot shows the progress as a card over the loading art.
+        if( cata::godot_bridge::native_screens() ) {
+            native = std::make_unique<cata::godot_bridge::native_view>( "loading", this, "default" );
+            native->attach( *ui );
+        }
+        const auto reposition = [this]( ui_adaptor & ui ) {
+            menu->reposition( ui );
+            if( native ) {
+                ui.position( point_zero, point_zero );
+            }
+        };
+#else
+        const auto reposition = [this]( ui_adaptor & ui ) { menu->reposition( ui ); };
+#endif
+        ui->on_screen_resize( reposition );
+        reposition( *ui );
         ui->on_redraw( [this]( ui_adaptor & ui ) {
+#if defined( TILES )
+            if( native ) {
+                const auto &entries = menu->entries;
+                const auto sel = entries.empty() ? 0 : std::clamp( menu->selected, 0,
+                                 static_cast<int>( entries.size() ) - 1 );
+                // Steps already done are marked green; the selected one is in progress until then.
+                const auto done = entries.empty() ? 0 : sel + ( entries[sel].text_color == c_green ? 1 : 0 );
+                native->publish( [&]( JsonOut & jsout ) {
+                    jsout.member( "title", remove_color_tags( menu->text ) );
+                    jsout.member( "step", entries.empty() ? std::string() : remove_color_tags( entries[sel].txt ) );
+                    jsout.member( "done", done );
+                    jsout.member( "total", static_cast<int>( entries.size() ) );
+                } );
+                return;
+            }
+#endif
             if( !get_option<bool>( "LOADING_PROGRESS_COMPACT" ) || menu->entries.empty() ) {
                 menu->show( ui );
                 return;
