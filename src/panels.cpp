@@ -22,12 +22,15 @@
 #include "game.h"
 #include "game_constants.h"
 #include "game_ui.h"
+#include "godot_bridge.h"
+#include "godot_hud.h"
 #include "input.h"
 #include "item.h"
 #include "json.h"
 #include "lua_sidebar_widgets.h"
 #include "magic/magic.h"
 #include "map/map.h"
+#include "message_log_view.h"
 #include "messages.h"
 #include "options.h"
 #include "output.h"
@@ -65,6 +68,7 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -2606,6 +2610,11 @@ std::string panel_manager::get_current_layout_id() const
 
 int panel_manager::get_width_right()
 {
+#if defined(TILES)
+    if( cata::godot_bridge::is_active() ) {
+        return 0;
+    }
+#endif
     if( get_option<std::string>( "SIDEBAR_POSITION" ) == "left" ) {
         return width_left;
     }
@@ -2614,6 +2623,11 @@ int panel_manager::get_width_right()
 
 int panel_manager::get_width_left()
 {
+#if defined(TILES)
+    if( cata::godot_bridge::is_active() ) {
+        return 0;
+    }
+#endif
     if( get_option<std::string>( "SIDEBAR_POSITION" ) == "left" ) {
         return width_right;
     }
@@ -3016,4 +3030,163 @@ void panel_manager::show_adm()
 
     g->show_panel_adm = false;
     g->invalidate_main_ui_adaptor();
+}
+
+namespace
+{
+
+/// Writes `{ "text": ..., "color": ... }` as member `name`.
+auto write_colored( JsonOut &jsout, const std::string &name, const std::string &text,
+                    const nc_color &color ) -> void
+{
+    jsout.member( name );
+    jsout.start_object();
+    jsout.member( "text", text );
+    jsout.member( "color", string_from_color( color ) );
+    jsout.end_object();
+}
+
+/// Writes `text` as `[text, color]` runs, resolving color tags; untagged text uses `base`.
+auto write_runs( JsonOut &jsout, const std::string &text, const nc_color &base ) -> void
+{
+    jsout.start_array();
+    auto colors = std::vector<nc_color> { base };
+    for( const auto &segment : split_by_color( text ) ) {
+        auto run = segment;
+        if( !segment.empty() && segment[0] == '<' ) {
+            const auto tag = get_color_from_tag( segment, report_color_error::no );
+            if( tag.type == color_tag_parse_result::open_color_tag ) {
+                colors.push_back( tag.color );
+            } else if( tag.type == color_tag_parse_result::close_color_tag && colors.size() > 1 ) {
+                colors.pop_back();
+            }
+            if( tag.type != color_tag_parse_result::non_color_tag ) {
+                run = rm_prefix( segment );
+            }
+        }
+        if( run.empty() ) {
+            continue;
+        }
+        jsout.start_array();
+        jsout.write( run );
+        jsout.write( string_from_color( colors.back() ) );
+        jsout.end_array();
+    }
+    jsout.end_array();
+}
+
+/// Actions the HUD offers as buttons, with the key each is bound to.
+auto write_action_keys( JsonOut &jsout ) -> void
+{
+    static const auto actions = std::array<std::string, 22> {
+        "inventory", "advinv", "craft", "construct", "pickup", "look", "fire", "wait", "map",
+        "eat", "wear", "apply", "sleep", "messages", "player_data", "safemode", "mutations",
+        "bionics", "reload_weapon", "wield", "drop", "open"
+    };
+    jsout.member( "keys" );
+    jsout.start_object();
+    for( const auto &action : actions ) {
+        const auto &events = inp_mngr.get_input_for_action( action, "DEFAULTMODE" );
+        const auto key = std::ranges::find_if( events, []( const input_event & ev ) { return ev.type == input_event_t::keyboard; } );
+        jsout.member( action, key == events.end() ? std::string() :
+                      inp_mngr.get_keyname( key->get_first_input(), key->type ) );
+    }
+    jsout.end_object();
+}
+
+} // namespace
+
+auto cata::godot_hud::build() -> std::string
+{
+    auto &u = get_avatar();
+    auto out = std::ostringstream();
+    auto jsout = JsonOut( out );
+    jsout.start_object();
+    jsout.member( "t", "hud" );
+    jsout.member( "name", u.get_name() );
+
+    jsout.member( "weapon" );
+    write_runs( jsout, character_funcs::fmt_wielded_weapon( u ), c_light_gray );
+    jsout.member( "style", u.martial_arts_data->selected_style_name( u ) );
+
+    jsout.member( "body" );
+    jsout.start_array();
+    for( const auto &bp : u.get_all_body_parts( true ) ) {
+        jsout.start_object();
+        jsout.member( "id", bp.id().str() );
+        jsout.member( "label", body_part_name_as_heading( bp, 1 ) );
+        jsout.member( "cur", u.get_part_hp_cur( bp ) );
+        jsout.member( "max", u.get_part_hp_max( bp ) );
+        jsout.end_object();
+    }
+    jsout.end_array();
+
+    const auto thirst = u.get_thirst_description();
+    const auto hunger = u.get_hunger_description();
+    const auto fatigue = u.get_fatigue_description();
+    const auto pain = u.get_pain_description();
+    const auto temp = temp_stat( u );
+    write_colored( jsout, "thirst", thirst.first, thirst.second );
+    write_colored( jsout, "hunger", hunger.first, hunger.second );
+    write_colored( jsout, "fatigue", fatigue.first, fatigue.second );
+    write_colored( jsout, "pain", pain.first, pain.second );
+    write_colored( jsout, "body_temp", temp.second, temp.first );
+
+    jsout.member( "stamina", u.get_stamina() );
+    jsout.member( "stamina_max", u.get_stamina_max() );
+    const auto morale = morale_stat( u );
+    jsout.member( "morale", morale.second );
+    jsout.member( "morale_color", string_from_color( morale.first ) );
+    jsout.member( "morale_face", morale_emotion( morale.second, get_face_type( u ), false ) );
+    jsout.member( "focus", u.focus_pool );
+    jsout.member( "speed", u.get_speed() );
+    write_colored( jsout, "move", move_mode_string( u ), move_mode_color( u ) );
+    const auto power = power_stat( u );
+    write_colored( jsout, "power", power.second, power.first );
+    // Characters without magic have a mana pool too; only show it to those who know a spell.
+    if( u.magic->knows_spell() ) {
+        const auto mana = mana_stat( u );
+        write_colored( jsout, "mana", mana.second, mana.first );
+    }
+
+    write_colored( jsout, "str", value_trimmed( u.get_str() ), str_string( u ).first );
+    write_colored( jsout, "dex", value_trimmed( u.get_dex() ), dex_string( u ).first );
+    write_colored( jsout, "int", value_trimmed( u.get_int() ), int_string( u ).first );
+    write_colored( jsout, "per", value_trimmed( u.get_per() ), per_string( u ).first );
+    write_colored( jsout, "weight", carry_weight_string( u ), get_weight_color( u ) );
+    write_colored( jsout, "volume", carry_volume_string( u ), get_volume_color( u ) );
+
+    jsout.member( "clock", u.has_watch() ? to_string_time_of_day( calendar::turn ) : std::string() );
+    jsout.member( "time_approx", time_approx() );
+    jsout.member( "season", calendar::name_season( season_of_year( calendar::turn ) ) );
+    jsout.member( "day", day_of_season<int>( calendar::turn ) + 1 );
+    jsout.member( "moon", get_moon() );
+    jsout.member( "underground", g->get_levz() < 0 );
+    write_colored( jsout, "weather", get_weather().weather_id->name.translated(),
+                   get_weather().weather_id->color );
+    jsout.member( "temperature", get_temp( u ) );
+    const auto light = get_light_level( character_funcs::fine_detail_vision_mod( u ) );
+    write_colored( jsout, "light", light.first, light.second );
+    jsout.member( "place", ACTIVE_OVERMAP_BUFFER.ter( u.abs_omt_pos() )->get_name() );
+    jsout.member( "z", g->get_levz() );
+    jsout.member( "deaf", u.is_deaf() );
+    jsout.member( "sound", get_sound( u ) );
+    jsout.member( "safe_mode", g->safe_mode != SAFE_MODE_OFF );
+    jsout.member( "safe_color", string_from_color( safe_color() ) );
+
+    jsout.member( "messages" );
+    jsout.start_array();
+    for( const auto &line : Messages::sidebar_lines( 14 ) ) {
+        jsout.start_object();
+        jsout.member( "time", line.time );
+        jsout.member( "fresh", line.fresh );
+        jsout.member( "text" );
+        write_runs( jsout, line.text, line.color );
+        jsout.end_object();
+    }
+    jsout.end_array();
+
+    write_action_keys( jsout );
+    jsout.end_object();
+    return out.str();
 }

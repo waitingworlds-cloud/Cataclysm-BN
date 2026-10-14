@@ -1,4 +1,5 @@
 #include "messages.h"
+#include "message_log_view.h"
 #include "message_types.h"
 #include "calendar.h"
 #include "catacharset.h"
@@ -318,6 +319,34 @@ bool message_exceeds_ttl( const game_message &message )
 }
 
 } //namespace
+
+auto Messages::sidebar_lines( const std::size_t count ) -> std::vector<log_line>
+{
+    auto lines = std::vector<log_line>();
+    for( auto i = static_cast<int>( player_messages.messages.size() ) - 1;
+         i >= 0 && lines.size() < count; --i ) {
+        const auto &m = player_messages.messages[i];
+        if( message_exceeds_ttl( m ) ) {
+            break;
+        }
+        if( m.is_in_cooldown() ) {
+            continue;
+        }
+        auto text = m.get_with_count();
+        if( !m.is_recent( player_messages.curmes ) ) {
+            text = remove_color_tags( text );
+        }
+        lines.push_back( {
+            .time = to_string_time_of_day( m.turn() ),
+            .text = std::move( text ),
+            .color = m.get_color( player_messages.curmes ),
+            .fresh = m.is_new( player_messages.curmes ),
+        } );
+    }
+    std::ranges::reverse( lines );
+    player_messages.curmes = calendar::turn;
+    return lines;
+}
 
 std::vector<std::pair<std::string, std::string>> Messages::recent_messages( const size_t count )
 {

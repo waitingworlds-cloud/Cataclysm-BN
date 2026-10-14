@@ -65,6 +65,8 @@
 #include "game_constants.h"
 #include "game_inventory.h"
 #include "game_ui.h"
+#include "godot_bridge.h"
+#include "godot_hud.h"
 #include "gamemode.h"
 #include "gates.h"
 #include "harvest.h"
@@ -4834,7 +4836,17 @@ void game::draw( ui_adaptor &ui )
         wnoutrefresh( w_terrain );
     }
 
+#if defined(TILES)
+    if( cata::godot_bridge::is_active() ) {
+        // The Godot front end draws its own HUD in place of the sidebar.
+        cata::godot_bridge::note_main_view( ui );
+        cata::godot_bridge::set_hud( cata::godot_hud::build() );
+    } else {
+        draw_panels( true );
+    }
+#else
     draw_panels( true );
+#endif
 
     // Ensure that the cursor lands on the character when everything is drawn.
     // This allows screen readers to describe the area around the player, making it
