@@ -230,6 +230,7 @@ func _build_toolbar() -> Control:
 	_search.mouse_filter = Control.MOUSE_FILTER_STOP
 	_search.mouse_default_cursor_shape = Control.CURSOR_IBEAM
 	_search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_search.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	_search.gui_input.connect(func(e: InputEvent):
 		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
 			var search: Dictionary = _msg.get("search", {})
@@ -415,7 +416,10 @@ func _layout() -> void:
 	_body.vertical = docked
 	_toolbar_row.vertical = docked
 	_toggles.alignment = FlowContainer.ALIGNMENT_BEGIN if docked else FlowContainer.ALIGNMENT_END
-	_toggles.size_flags_horizontal = Control.SIZE_FILL if docked else Control.SIZE_SHRINK_END
+	# Beside the search box the toggles take what it leaves and wrap onto more lines if needed.
+	_toggles.size_flags_horizontal = Control.SIZE_FILL if docked else Control.SIZE_EXPAND_FILL
+	_toggles.size_flags_stretch_ratio = 1.0 if docked else 2.0
+	_search.custom_minimum_size.x = 0 if docked else 300
 	var sb := _aside.get_theme_stylebox("panel") as StyleBoxFlat
 	sb.border_width_left = 0 if alone or docked else 1
 	sb.border_width_top = 1 if docked and not alone else 0
@@ -792,6 +796,7 @@ func _apply_hints(hints: Array) -> void:
 class Pane extends VBoxContainer:
 	var _title: Label
 	var _count: Label
+	var _note: RichTextLabel
 	var _underline: ColorRect
 	var _scroll: ScrollContainer
 	var _list: VBoxContainer
@@ -821,7 +826,16 @@ class Pane extends VBoxContainer:
 		head_box.add_theme_constant_override("margin_top", 14)
 		head_box.add_theme_constant_override("margin_bottom", 10)
 		head_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		head_box.add_child(head)
+		var head_col := VBoxContainer.new()
+		head_col.add_theme_constant_override("separation", 4)
+		head_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		head_col.add_child(head)
+		# A line or two under the title, such as where the list's items are (moving items).
+		_note = Slate.rich(12)
+		_note.add_theme_color_override("default_color", Slate.FAINT)
+		_note.visible = false
+		head_col.add_child(_note)
+		head_box.add_child(head_col)
 		head_box.visible = String(spec.get("title", "")) != ""
 		add_child(head_box)
 		_underline = ColorRect.new()
@@ -894,6 +908,9 @@ class Pane extends VBoxContainer:
 
 	func apply_state(spec: Dictionary) -> void:
 		_count.text = String(spec.get("count", str(_items) if _items > 0 else ""))
+		_title.text = String(spec.get("title", ""))
+		_note.text = Slate.bbcode(spec.get("note", []), Slate.FAINT).strip_edges()
+		_note.visible = _note.text != ""
 		if _text != null and spec.has("scroll"):
 			_scroll.scroll_vertical = int(float(spec["scroll"]) * LINE_HEIGHT)
 		if spec.has("scroll_row") and _list.get_child_count() > 0:
