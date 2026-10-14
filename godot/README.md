@@ -58,9 +58,9 @@ one did.
 | Menus and prompts   | List menus (with search, categories and side panels), questions and notices, text prompts, multi-line text editor, long texts and help topics |
 | Settings            | Options, keybindings, auto pickup, safe mode, auto notes, distractions, colors, zones |
 | Outside a game      | Title screen, world picker, world creation and mod lists, character creation, defense mode setup, loading progress |
+| Games               | The handheld and computer minigames: robot finds kitten, lights on, minesweeper, snake, sokoban |
 
-Still drawn by the game in its old style: the Lua console, the debug map editor, the minigames on
-in-game computers (robot finds kitten, lights on, minesweeper, snake, sokoban), and the debug error
+Still drawn by the game in its old style: the Lua console, the debug map editor and the debug error
 screen. When the game shows one of these, Godot shows it as the game drew it, so nothing is ever
 unreachable.
 
@@ -135,11 +135,19 @@ game's color tags carry over.
 | `size`                 | Largest size `[w, h]` in pixels                                           |
 | `dock`                 | `right`: over the HUD sidebar, leaving the map clickable (look around); `side`: the same at full height, for screens shown without the HUD |
 
-A pane holds `rows`, a `body` of spans, or `entries` (a log), with `title`, `icon`, `count`, `note`,
+A pane holds `rows`, a `body` of spans, `entries` (a log) or a `grid` (a game board), with `title`, `icon`, `count`, `note`,
 `empty`, `cursor`, `stretch`, `confirm` (action for clicking the selected row again, default
 `CONFIRM`) and `mark_act` (action for a row's check box). A row has `text` and `cells` (spans),
 `i`, `pick`, `heading`, `enabled`, `passive`, `note`, `icon`, `sym`, `indent`, `tip`, `mark`,
 `key`, `confirm` and `mark_act`.
+
+A `grid` is rows of `[text, color]` runs, one character per square, written from a window with
+`write_window_grid`. It is drawn as large as fits up to `cell` pixels. `square` boards draw a tile
+per square, with `lit`, `raised` and `hide` naming the characters drawn as lit tiles, raised tiles,
+or with no glyph; on any board `fill` characters are solid blocks and `dot` ones round dots, and
+`plain` ignores colored backgrounds. Clicking a square sends pick `pane * 100000 + row * 1000 +
+column` with the pane's `click` action (`right_click` for the right button; an empty action only
+wakes the game).
 
 Clicking a row sends pick `pane * 100000 + i` (or the row's `pick`) with no key: the game moves its
 cursor there. `i` is the row's position in the list unless given, and a heading takes a position
