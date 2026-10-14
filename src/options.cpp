@@ -3955,7 +3955,11 @@ std::string options_manager::show( bool ingame, const bool world_options_only,
                                          .color = c_light_red
                                        } );
             }
-            buttons.push_back( { .act = "QUIT", .text = world_options_only ? _( "Back" ) : _( "Done" ), .icon = "check", .category = category, .primary = true } );
+            if( world_options_only ) {
+                buttons.push_back( { .act = "NEXT_TAB", .text = _( "Next: Finalize World" ), .icon = "chevron-right", .category = category, .primary = true } );
+            } else {
+                buttons.push_back( { .act = "QUIT", .text = _( "Done" ), .icon = "check", .category = category, .primary = true } );
+            }
             jsout.member( "buttons" );
             jsout.start_array();
             for( const auto &b : buttons ) {
@@ -3971,7 +3975,7 @@ std::string options_manager::show( bool ingame, const bool world_options_only,
             gs::write_hint( jsout, "CONFIRM", category, _( "Toggle or type" ) );
             gs::write_hint( jsout, "NEXT_TAB", category,
                             world_options_only ? _( "Next step" ) : _( "Next page" ) );
-            gs::write_hint( jsout, "QUIT", category, world_options_only ? _( "Back" ) : _( "Done" ) );
+            gs::write_hint( jsout, "QUIT", category, world_options_only ? _( "Cancel" ) : _( "Done" ) );
             jsout.end_array();
         } );
     };

@@ -39,6 +39,8 @@ var _subtabs: HBoxContainer
 var _toolbar: Control
 var _search: PanelContainer
 var _search_text: Label
+var _search_icon: TextureRect
+var _search_label: Label
 var _search_key: PanelContainer
 var _toggles: HFlowContainer
 var _toolbar_row: BoxContainer
@@ -244,7 +246,10 @@ func _build_toolbar() -> Control:
 	search_row.add_theme_constant_override("separation", 10)
 	search_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_search.add_child(search_row)
-	search_row.add_child(Slate.icon_rect("search", 16, Slate.MUTED))
+	_search_icon = Slate.icon_rect("search", 16, Slate.MUTED)
+	search_row.add_child(_search_icon)
+	_search_label = Slate.label("", 14, Slate.MUTED, Slate.semibold())
+	search_row.add_child(_search_label)
 	_search_text = Slate.label("", 14, Slate.FAINT)
 	_search_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_search_text.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -569,6 +574,11 @@ func _apply_toolbar(msg: Dictionary) -> void:
 		var text := String(search.get("text", ""))
 		_search.add_theme_stylebox_override("panel", _search_box(typing))
 		_search.tooltip_text = String(search.get("tip", ""))
+		# The box doubles as a plain text field (a world's name) with its own icon and label.
+		_search_icon.texture = Slate.icon(String(search.get("icon", "search")), 16)
+		_search_label.text = String(search.get("label", ""))
+		_search_label.visible = _search_label.text != ""
+		_search.mouse_default_cursor_shape = Control.CURSOR_IBEAM if search.has("act") else Control.CURSOR_ARROW
 		if typing or text != "":
 			_search_text.text = text + ("▏" if typing else "")
 			_search_text.add_theme_color_override("font_color", Slate.TEXT)
