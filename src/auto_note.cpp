@@ -7,6 +7,10 @@
 #include "fstream_utils.h"
 #include "game.h"
 #include "generic_factory.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "json.h"
 #include "mapgen/map_extras.h"
@@ -178,6 +182,14 @@ void auto_note_manager_gui::show()
     catacurses::window w;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the map extras with a check box for each.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "AUTO_NOTES" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         iContentHeight = FULL_SCREEN_HEIGHT - 2 - iHeaderHeight;
 
@@ -194,6 +206,11 @@ void auto_note_manager_gui::show()
                                 iOffset + point( 1, iHeaderHeight + 1 ) );
 
         ui.position_from_window( w_border );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -222,7 +239,59 @@ void auto_note_manager_gui::show()
         ctx.register_action( "CHANGE_MAPEXTRA_CHARACTER" );
     }
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "AUTO_NOTES" );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Auto notes" ) );
+            jsout.member( "icon", "sticky-note" );
+            jsout.member( "size", std::array{ 820, 800 } );
+            jsout.member( "toggles" );
+            jsout.start_array();
+            gs::write_toggle( jsout, {
+                .act = "SWITCH_AUTO_NOTE_OPTION", .text = _( "Auto notes" ), .icon = "power", .category = category
+            }, get_option<bool>( "AUTO_NOTES" ) );
+            jsout.end_array();
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Map extras to note" ) );
+            jsout.member( "icon", "map-pin" );
+            jsout.member( "cursor", currentLine );
+            jsout.member( "empty", _( "Discover more special encounters to populate this list" ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &id : displayCache ) {
+                const auto &[extra, enabled] = mapExtraCache[id];
+                gs::write_row( jsout, {
+                    .text = { .text = extra.name(), .color = enabled ? c_white : c_light_gray },
+                    .sym = extra.get_symbol(),
+                    .sym_color = get_all_colors().get_name( extra.color ),
+                    .mark = enabled,
+                    .mark_act = "CONFIRM",
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "CONFIRM", category, _( "Toggle" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         // == Draw border
         draw_border( w_border, BORDER_COLOR, _( " AUTO NOTES MANAGER " ) );
         mvwputch( w_border, point( 0, 2 ), c_light_gray, LINE_XXXO );
@@ -324,6 +393,13 @@ void auto_note_manager_gui::show()
         ui_manager::redraw();
 
         const std::string currentAction = ctx.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick >= 0 && *pick < cacheSize ) {
+                currentLine = *pick;
+            }
+        }
+#endif
 
         // Actions that also work with no items to display
         if( currentAction == "SWITCH_AUTO_NOTE_OPTION" ) {
