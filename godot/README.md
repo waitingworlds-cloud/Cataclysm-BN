@@ -128,7 +128,7 @@ game's color tags carry over.
 | `search`               | `{act, text, typing, placeholder, label, icon, key, tip}`                 |
 | `toggles`              | Toolbar buttons that show a setting: `{act, text, icon, key, on, enabled, tip}` |
 | `panes`, `active_pane` | Lists side by side (see below), and the one holding the cursor            |
-| `aside`                | Details panel: `title` and `warn` (spans), `subtitle`, `icon` or `sym` and `sym_color`, `body` (spans), `mono`, `sections [{title, body, mono}]`, `empty`, `buttons`, `width`, `share` |
+| `aside`                | Details panel: `title` and `warn` (spans), `subtitle`, `icon` or `sym` and `sym_color`, `body` (spans), `mono`, `sections [{title, body, mono}]`, `empty`, `buttons`, `width`, `share`, `preview {rect, buttons}` (the character sprite, cropped from the game's frame at `rect` = x, y, w, h pixels) |
 | `buttons`              | `{act, text, icon, key, primary, enabled, tip, pick}`; with `pick` the button sends that pick with `act` |
 | `hints`, `footer`      | Key hints `{key, text}` and a line of spans at the bottom                  |
 | `quit`                 | Action of the close button (default `QUIT`; empty hides it)               |

@@ -17,6 +17,8 @@ const MIN_CELL_WIDTH := 30
 const MAX_CELL_WIDTH := 220
 const CELL_GAP := 12
 const LINE_HEIGHT := 22.0
+## Tallest the character preview gets before it shrinks to fit.
+const PREVIEW_HEIGHT := 280.0
 
 var view_id := 0
 
@@ -61,6 +63,11 @@ var _aside_body: RichTextLabel
 var _aside_sections: VBoxContainer
 var _aside_empty: Label
 var _buttons: VBoxContainer
+## The character's sprite in character creation, cropped out of the game's frame where it is drawn.
+var _preview: VBoxContainer
+var _preview_image: TextureRect
+var _preview_atlas := AtlasTexture.new()
+var _preview_buttons: HBoxContainer
 var _footer: RichTextLabel
 var _hints: HBoxContainer
 
@@ -74,6 +81,7 @@ var _cursor := Vector2i(-1, -1)
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Bridge.frame_received.connect(_on_frame)
 	_scrim = ColorRect.new()
 	_scrim.color = Slate.SCRIM
 	_scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -291,6 +299,7 @@ func _build_aside() -> Control:
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 12)
 	_aside.add_child(col)
+	col.add_child(_build_preview())
 
 	var head := HBoxContainer.new()
 	head.add_theme_constant_override("separation", 14)
@@ -753,6 +762,7 @@ func _apply_aside(msg: Dictionary) -> void:
 	if not _aside.visible:
 		return
 	var aside: Dictionary = msg["aside"]
+	_apply_preview(aside.get("preview", {}))
 	var has_title := aside.has("title")
 	var sym := String(aside.get("sym", ""))
 	var icon := String(aside.get("icon", ""))
@@ -791,6 +801,66 @@ func _apply_aside(msg: Dictionary) -> void:
 	if aside.has("scroll"):
 		_aside_scroll.scroll_vertical = int(float(aside["scroll"]) * LINE_HEIGHT)
 	_apply_buttons(aside.get("buttons", msg.get("buttons", [])))
+
+
+func _build_preview() -> Control:
+	_preview = VBoxContainer.new()
+	_preview.add_theme_constant_override("separation", 8)
+	var well := PanelContainer.new()
+	# Black like the game draws behind the character, so the crop has no visible edge.
+	var box := Slate.box(Color.BLACK, 12, Slate.BORDER, 1)
+	box.content_margin_top = 8
+	box.content_margin_bottom = 8
+	well.add_theme_stylebox_override("panel", box)
+	_preview.add_child(well)
+	_preview_image = TextureRect.new()
+	_preview_image.texture = _preview_atlas
+	_preview_image.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_preview_image.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_preview_image.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	well.add_child(_preview_image)
+	_preview_buttons = HBoxContainer.new()
+	_preview_buttons.add_theme_constant_override("separation", 8)
+	_preview.add_child(_preview_buttons)
+	_preview.visible = false
+	return _preview
+
+
+## Shows the part of the game's frame where it drew the character (`rect` in frame pixels), with
+## the zoom and clothes buttons.
+func _apply_preview(spec: Dictionary) -> void:
+	var rect: Array = spec.get("rect", [])
+	_preview.visible = rect.size() == 4
+	if not _preview.visible:
+		return
+	var region := Rect2(float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+	if _preview_atlas.region != region:
+		_preview_atlas.region = region
+	# Pixel art stays crisp at its own size; a sprite too big for the panel shrinks smoothly.
+	var height := minf(region.size.y, PREVIEW_HEIGHT)
+	_preview_image.custom_minimum_size.y = height
+	_preview_image.texture_filter = TEXTURE_FILTER_LINEAR if region.size.y > PREVIEW_HEIGHT else TEXTURE_FILTER_NEAREST
+	for c in _preview_buttons.get_children():
+		c.queue_free()
+	var buttons: Array = spec.get("buttons", [])
+	_preview_buttons.visible = not buttons.is_empty()
+	for b_spec in buttons:
+		# Zoom buttons fit as an icon and a key; a switch keeps its name so its state reads.
+		var text := String(b_spec.get("text", ""))
+		var is_switch: bool = b_spec.has("on")
+		var b := SlateButton.new(String(b_spec.get("icon", "")), text if is_switch else "", false, true)
+		b.set_key(String(b_spec.get("key", "")))
+		b.tooltip_text = text
+		if is_switch:
+			b.set_on(bool(b_spec["on"]))
+			b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_connect_action(b, b_spec)
+		_preview_buttons.add_child(b)
+
+
+func _on_frame(texture: ImageTexture) -> void:
+	if _preview_atlas.atlas != texture:
+		_preview_atlas.atlas = texture
 
 
 ## Titled blocks of text below the body (a vehicle's parts, its description, its stats), each

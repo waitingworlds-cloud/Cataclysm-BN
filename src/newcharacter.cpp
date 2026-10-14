@@ -537,7 +537,42 @@ struct pick_pages {
     /// Button texts that add or remove the highlighted entry.
     std::string add_text = {};
     std::string remove_text = {};
+    /// The character's sprite shown above the description, when the preview is on.
+    const character_preview_window *preview = nullptr;
 };
+
+/// Godot covers the game's frame and crops the character preview out of it, so the preview gets
+/// room for its largest zoom instead of squeezing beside the lists.
+auto prepare_native_preview( character_preview_window &preview ) -> void
+{
+    constexpr auto orientation = character_preview_window::Orientation{ .type = character_preview_window::TOP_LEFT };
+    preview.prepare( TERMY - 2, TERMX - 2, &orientation, 0 );
+}
+
+/// Where Godot finds the character in the frame, for the side panel. `category` holds the zoom and
+/// clothes keys; a tab without them passes it empty and gets no buttons.
+auto write_preview( JsonOut &jsout, const character_preview_window &preview,
+                    const std::string &category ) -> void
+{
+    const auto area = preview.drawn_area();
+    if( !area ) {
+        return;
+    }
+    jsout.member( "preview" );
+    jsout.start_object();
+    jsout.member( "rect", std::array{ area->at.x, area->at.y, area->size.x, area->size.y } );
+    jsout.member( "buttons" );
+    jsout.start_array();
+    if( !category.empty() ) {
+        gs::write_button( jsout, { .act = "zoom_out", .text = _( "Zoom out" ), .icon = "zoom-out", .category = category } );
+        gs::write_button( jsout, { .act = "zoom_in", .text = _( "Zoom in" ), .icon = "zoom-in", .category = category } );
+        // clothes_showing() is true while the clothes are hidden.
+        gs::write_toggle( jsout, { .act = "TOGGLE_CHARACTER_PREVIEW_CLOTHES", .text = _( "Clothes" ), .icon = "shirt", .category = category },
+                          !preview.clothes_showing() );
+    }
+    jsout.end_array();
+    jsout.end_object();
+}
 
 auto write_pick_pages( JsonOut &jsout, const chargen_frame &f, const pick_pages &p ) -> void
 {
@@ -584,6 +619,9 @@ auto write_pick_pages( JsonOut &jsout, const chargen_frame &f, const pick_pages 
     jsout.member( "aside" );
     jsout.start_object();
     jsout.member( "width", 460 );
+    if( p.preview != nullptr ) {
+        write_preview( jsout, *p.preview, f.category );
+    }
     const auto &entries = p.pages[p.page];
     const auto cursor = p.cursors[p.page];
     const auto has_entry = cursor >= 0 && static_cast<size_t>( cursor ) < entries.size();
@@ -1976,9 +2014,8 @@ tab_direction set_traits( avatar &u, points_left &points )
 #if defined(TILES)
     character_preview_window character_preview;
     character_preview.init( &u );
-    // The Godot front end can't show the preview, which is drawn by the tiles renderer.
     const bool use_character_preview = get_option<bool>( "USE_CHARACTER_PREVIEW" ) &&
-                                       get_option<bool>( "USE_TILES" ) && !cata::godot_bridge::native_screens();
+                                       get_option<bool>( "USE_TILES" );
 #endif
 
     const auto init_windows = [&]( ui_adaptor & ui ) {
@@ -1989,7 +2026,9 @@ tab_direction set_traits( avatar &u, points_left &points )
 #if defined(TILES)
         const int int_page_width = static_cast<int>( page_width );
 
-        if( use_character_preview ) {
+        if( use_character_preview && cata::godot_bridge::native_screens() ) {
+            prepare_native_preview( character_preview );
+        } else if( use_character_preview ) {
             constexpr int preview_nlines_min = 7;
             constexpr int preview_ncols_min = 10;
             const int preview_nlines = std::max( ( TERMY - 9 ) / 3, preview_nlines_min );
@@ -2042,7 +2081,8 @@ tab_direction set_traits( avatar &u, points_left &points )
     const auto publish_native = [&]() {
         auto view = pick_pages{ .used_pages = used_pages, .page = iCurWorkingPage,
                                 .cursors = { iCurrentLine[0], iCurrentLine[1], iCurrentLine[2] },
-                                .add_text = _( "Take trait" ), .remove_text = _( "Remove trait" ) };
+                                .add_text = _( "Take trait" ), .remove_text = _( "Remove trait" ),
+                                .preview = use_character_preview ? &character_preview : nullptr };
         for( auto page = 0; page < 3; page++ ) {
             view.pages[page] = vStartingTraits[page] | std::views::transform( [&]( const trait_entry & e ) {
                 return pick_entry{ .name = e.id->name(), .points = e.id->points, .has = e.avatar_has, .blocked = e.conflicts || e.forbidden };
@@ -2070,6 +2110,9 @@ tab_direction set_traits( avatar &u, points_left &points )
 #if defined(TILES)
         if( native ) {
             publish_native();
+            if( use_character_preview ) {
+                character_preview.display();
+            }
             return;
         }
 #endif
@@ -2463,9 +2506,8 @@ tab_direction set_bionics( avatar &u, points_left &points )
 #if defined(TILES)
     character_preview_window character_preview;
     character_preview.init( &u );
-    // The Godot front end can't show the preview, which is drawn by the tiles renderer.
     const bool use_character_preview = get_option<bool>( "USE_CHARACTER_PREVIEW" ) &&
-                                       get_option<bool>( "USE_TILES" ) && !cata::godot_bridge::native_screens();
+                                       get_option<bool>( "USE_TILES" );
 #endif
 
     const auto init_windows = [&]( ui_adaptor & ui ) {
@@ -2476,7 +2518,9 @@ tab_direction set_bionics( avatar &u, points_left &points )
 #if defined(TILES)
         const int int_page_width = static_cast<int>( page_width );
 
-        if( use_character_preview ) {
+        if( use_character_preview && cata::godot_bridge::native_screens() ) {
+            prepare_native_preview( character_preview );
+        } else if( use_character_preview ) {
             constexpr int preview_nlines_min = 7;
             constexpr int preview_ncols_min = 10;
             const int preview_nlines = std::max( ( TERMY - 9 ) / 3, preview_nlines_min );
@@ -2529,7 +2573,8 @@ tab_direction set_bionics( avatar &u, points_left &points )
     const auto publish_native = [&]() {
         auto view = pick_pages{ .used_pages = used_pages, .page = iCurWorkingPage,
                                 .cursors = { iCurrentLine[0], iCurrentLine[1], iCurrentLine[2] },
-                                .add_text = _( "Add bionic" ), .remove_text = _( "Remove bionic" ) };
+                                .add_text = _( "Add bionic" ), .remove_text = _( "Remove bionic" ),
+                                .preview = use_character_preview ? &character_preview : nullptr };
         for( auto page = 0; page < 3; page++ ) {
             view.pages[page] = vStartingBionics[page] | std::views::transform( [&]( const bionic_entry & e ) {
                 return pick_entry{ .name = e.id->name.translated(), .points = e.id->points, .has = e.avatar_has, .blocked = e.conflicts || e.forbidden };
@@ -2557,6 +2602,9 @@ tab_direction set_bionics( avatar &u, points_left &points )
 #if defined(TILES)
         if( native ) {
             publish_native();
+            if( use_character_preview ) {
+                character_preview.display();
+            }
             return;
         }
 #endif
@@ -2943,9 +2991,8 @@ tab_direction set_profession( avatar &u, points_left &points,
 #if defined(TILES)
     character_preview_window character_preview;
     character_preview.init( &u );
-    // The Godot front end can't show the preview, which is drawn by the tiles renderer.
     const bool use_character_preview = get_option<bool>( "USE_CHARACTER_PREVIEW" ) &&
-                                       get_option<bool>( "USE_TILES" ) && !cata::godot_bridge::native_screens();
+                                       get_option<bool>( "USE_TILES" );
 #endif
     const auto init_windows = [&]( ui_adaptor & ui ) {
         iContentHeight = TERMY - 10;
@@ -2957,7 +3004,9 @@ tab_direction set_profession( avatar &u, points_left &points,
 #if defined(TILES)
         const int int_page_width = 55;
 
-        if( use_character_preview ) {
+        if( use_character_preview && cata::godot_bridge::native_screens() ) {
+            prepare_native_preview( character_preview );
+        } else if( use_character_preview ) {
             constexpr int preview_nlines_min = 7;
             constexpr int preview_ncols_min = 10;
             const int preview_nlines = std::max( ( TERMY - 9 ) / 3, preview_nlines_min );
@@ -3164,6 +3213,18 @@ tab_direction set_profession( avatar &u, points_left &points,
     };
 
 #if defined(TILES)
+    // Draws the character preview with the highlighted profession, so it shows that profession's
+    // clothes and bionics rather than the currently chosen one's.
+    const auto display_preview = [&]() {
+        if( cur_id < 0 || static_cast<size_t>( cur_id ) >= sorted_profs.size() ) {
+            character_preview.display();
+            return;
+        }
+        const auto old_prof = u.prof;
+        u.prof = sorted_profs[cur_id];
+        character_preview.display();
+        u.prof = old_prof;
+    };
     const auto native = chargen_view( ui, u, "NEW_CHAR_PROFESSIONS", init_windows );
     const auto publish_native = [&]() {
         const auto valid = cur_id >= 0 && static_cast<size_t>( cur_id ) < sorted_profs.size();
@@ -3194,6 +3255,9 @@ tab_direction set_profession( avatar &u, points_left &points,
             jsout.member( "aside" );
             jsout.start_object();
             jsout.member( "width", 560 );
+            if( use_character_preview ) {
+                write_preview( jsout, character_preview, "" );
+            }
             if( valid ) {
                 const auto &prof = *sorted_profs[cur_id];
                 const auto cost = std::abs( prof.point_cost() );
@@ -3237,6 +3301,9 @@ tab_direction set_profession( avatar &u, points_left &points,
 #if defined(TILES)
         if( native ) {
             publish_native();
+            if( use_character_preview ) {
+                display_preview();
+            }
             return;
         }
 #endif
@@ -3348,23 +3415,8 @@ tab_direction set_profession( avatar &u, points_left &points,
         wnoutrefresh( w_genderswap );
         wnoutrefresh( w_sorting );
 #if defined(TILES)
-        // Draws character preview. Use a temporary avatar with the highlighted
-        // profession so the preview reflects the selection rather than the
-        // currently assigned profession.
         if( use_character_preview ) {
-            if( cur_id_is_valid ) {
-                // Temporarily assign the highlighted profession to `u` so the
-                // preview code that inspects `av.prof` shows the correct bionics
-                // and profession-related overlays. Restore after display.
-                auto old_prof = u.prof;
-                u.prof = sorted_profs[cur_id];
-                character_preview.init( &u );
-                character_preview.display();
-                u.prof = old_prof;
-                character_preview.init( &u );
-            } else {
-                character_preview.display();
-            }
+            display_preview();
         }
 #endif
     } );
@@ -4727,9 +4779,8 @@ tab_direction set_description( avatar &you, const bool allow_reroll,
 #if defined(TILES)
     character_preview_window character_preview;
     character_preview.init( &you );
-    // The Godot front end can't show the preview, which is drawn by the tiles renderer.
     const bool use_character_preview = get_option<bool>( "USE_CHARACTER_PREVIEW" ) &&
-                                       get_option<bool>( "USE_TILES" ) && !cata::godot_bridge::native_screens();
+                                       get_option<bool>( "USE_TILES" );
 #endif
 
     const auto init_windows = [&]( ui_adaptor & ui ) {
@@ -4760,7 +4811,9 @@ tab_direction set_description( avatar &you, const bool allow_reroll,
 #if defined(TILES)
         const int int_page_width = 38;
 
-        if( use_character_preview ) {
+        if( use_character_preview && cata::godot_bridge::native_screens() ) {
+            prepare_native_preview( character_preview );
+        } else if( use_character_preview ) {
             constexpr int preview_nlines_min = 7;
             constexpr int preview_ncols_min = 10;
             const int preview_nlines = std::max( ( TERMY - 9 ) / 3, preview_nlines_min );
@@ -5049,6 +5102,9 @@ tab_direction set_description( avatar &you, const bool allow_reroll,
             jsout.member( "aside" );
             jsout.start_object();
             jsout.member( "width", 340 );
+            if( use_character_preview ) {
+                write_preview( jsout, character_preview, category );
+            }
             jsout.member( "title" );
             const auto selected = std::array{ _( "Name" ), _( "Height" ), _( "Age" ) } [current_selector];
             gs::write_span( jsout, { .text = selected, .color = c_white } );
@@ -5103,6 +5159,9 @@ tab_direction set_description( avatar &you, const bool allow_reroll,
 #if defined(TILES)
         if( native ) {
             publish_native();
+            if( use_character_preview ) {
+                character_preview.display();
+            }
             return;
         }
 #endif
