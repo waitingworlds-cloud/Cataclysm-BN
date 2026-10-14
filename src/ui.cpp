@@ -51,6 +51,16 @@ auto native_menus() -> std::map<const uilist *, std::weak_ptr<native_menu>> & //
     return menus;
 }
 
+/// Menus whose last query ended on its timeout, kept open until they are queried again. A caller
+/// that asks on every cursor blink (the map editor) would otherwise close and reopen the Godot
+/// menu each time.
+using held_menus = std::map<const uilist *, shared_ptr_fast<ui_adaptor>>;
+auto menus_held_after_timeout() -> held_menus & // *NOPAD*
+{
+    static auto held = held_menus{};
+    return held;
+}
+
 auto native_menu_of( const uilist *menu ) -> std::shared_ptr<native_menu>
 {
     const auto found = native_menus().find( menu );
@@ -191,6 +201,7 @@ uilist::~uilist()
 {
 #if defined(TILES)
     native_menus().erase( this );
+    menus_held_after_timeout().erase( this );
 #endif
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
     if( current_ui ) {
@@ -1210,6 +1221,9 @@ void uilist::query( bool loop, int timeout )
     input_context ctxt = create_main_input_context();
 
     shared_ptr_fast<ui_adaptor> ui = create_or_get_ui_adaptor();
+#if defined(TILES)
+    menus_held_after_timeout().erase( this );
+#endif
 
     ui_manager::redraw();
 
@@ -1294,6 +1308,11 @@ void uilist::query( bool loop, int timeout )
 
         ui_manager::redraw();
     } while( loop && ret == UILIST_WAIT_INPUT );
+#if defined(TILES)
+    if( ret == UILIST_TIMEOUT && cata::godot_bridge::native_screens() ) {
+        menus_held_after_timeout()[this] = ui;
+    }
+#endif
 }
 
 ///@}
