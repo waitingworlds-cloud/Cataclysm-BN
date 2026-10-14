@@ -9,6 +9,7 @@
 #include "game_inventory.h"
 #include "input.h"
 #include "item.h"
+#include "item_category.h"
 #include "item_functions.h"
 #include "itype.h"
 #include "map/map.h"
@@ -20,6 +21,7 @@
 #include "ui_manager.h"
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 //#include "handle_action.cpp"
@@ -27,10 +29,69 @@
 #include "options.h"
 #include "ui.h"
 
+#if defined(TILES)
+#include "color.h"
+#include "godot_bridge.h"
+#include "json.h"
+#endif
+
 struct action_entry {
     std::string action;
     std::function<bool()> on_select;
 };
+
+#if defined(TILES)
+namespace
+{
+
+/// What the Godot front end shows for an item and its actions.
+struct native_item_menu {
+    const item &it;
+    const std::vector<iteminfo> &info;
+    const std::vector<action_entry> &actions;
+    const uilist &list;
+    int selected;
+    /// Lines the details are scrolled by (Page Up and Page Down).
+    int scroll;
+};
+
+auto publish_native( cata::godot_bridge::native_view &view, const native_item_menu &menu ) -> void
+{
+    using cata::godot_bridge::key_label;
+    using cata::godot_bridge::write_spans;
+    view.publish( [&menu]( JsonOut & jsout ) {
+        jsout.member( "name" );
+        write_spans( jsout, menu.it.display_name(), menu.it.color_in_inventory() );
+        jsout.member( "category", menu.it.get_category().name() );
+        jsout.member( "sym", menu.it.symbol() );
+        jsout.member( "sym_color", string_from_color( menu.it.color() ) );
+        jsout.member( "info" );
+        write_spans( jsout, format_item_info( menu.info, {} ), c_light_gray );
+        jsout.member( "selected", menu.selected );
+        jsout.member( "scroll", menu.scroll );
+        jsout.member( "actions" );
+        jsout.start_array();
+        for( auto index = size_t{ 0 }; index < menu.actions.size(); ++index ) {
+            const auto &entry = menu.list.entries[index];
+            jsout.start_object();
+            jsout.member( "act", menu.actions[index].action );
+            jsout.member( "name", entry.txt );
+            jsout.member( "color", string_from_color( entry.text_color ) );
+            jsout.member( "key", key_label( menu.actions[index].action, "INVENTORY_ITEM" ) );
+            jsout.end_object();
+        }
+        jsout.end_array();
+        jsout.member( "keys" );
+        jsout.start_object();
+        for( const auto *action : { "CONFIRM", "QUIT" } ) {
+            jsout.member( action, key_label( action, "INVENTORY_ITEM" ) );
+        }
+        jsout.end_object();
+    } );
+}
+
+} // namespace
+#endif
 
 namespace examine_item_menu
 {
@@ -323,28 +384,51 @@ bool run(
     int num_actions = static_cast<int>( actions.size() );
 
     std::unique_ptr<ui_adaptor> ui = std::make_unique<ui_adaptor>();
-    ui->on_screen_resize( [&]( ui_adaptor & ui ) {
-        int width = func_width();
-        int pos_x = func_pos_x();
-        w_info = catacurses::newwin( TERMY, width, point( pos_x, 0 ) );
-        ui.position_from_window( w_info );
-    } );
-    action_list.w_y_setup = 0;
-    action_list.w_x_setup = [&]( const int popup_width ) -> int {
-        switch( menu_pos )
-        {
-            default:
-            case menu_pos_t::left:
-                return func_pos_x() - popup_width;
-            case menu_pos_t::right:
-                return func_pos_x() + func_width();
-        }
-    };
+#if defined(TILES)
+    // The Godot front end draws the item and its actions as one card.
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "item_actions", &itm,
+                 "INVENTORY_ITEM" );
+        native->attach( *ui );
+        ui->on_screen_resize( []( ui_adaptor & ui ) {
+            ui.position( point_zero, point_zero );
+        } );
+        ui->on_redraw( [&]( const ui_adaptor & ) {
+            publish_native( *native, {
+                .it = itm, .info = item_info_vals, .actions = actions, .list = action_list,
+                .selected = selected_action, .scroll = info_area_scroll_pos,
+            } );
+        } );
+    }
+    const auto drawn_by_godot = native != nullptr;
+#else
+    const auto drawn_by_godot = false;
+#endif
+    if( !drawn_by_godot ) {
+        ui->on_screen_resize( [&]( ui_adaptor & ui ) {
+            int width = func_width();
+            int pos_x = func_pos_x();
+            w_info = catacurses::newwin( TERMY, width, point( pos_x, 0 ) );
+            ui.position_from_window( w_info );
+        } );
+        action_list.w_y_setup = 0;
+        action_list.w_x_setup = [&]( const int popup_width ) -> int {
+            switch( menu_pos )
+            {
+                default:
+                case menu_pos_t::left:
+                    return func_pos_x() - popup_width;
+                case menu_pos_t::right:
+                    return func_pos_x() + func_width();
+            }
+        };
+        ui->on_redraw( [&]( ui_adaptor & ui ) {
+            draw_item_info( w_info, data );
+            action_list.show( ui );
+        } );
+    }
     ui->mark_resize();
-    ui->on_redraw( [&]( ui_adaptor & ui ) {
-        draw_item_info( w_info, data );
-        action_list.show( ui );
-    } );
 
     bool exit = false;
     bool ret_val = true;
@@ -353,6 +437,14 @@ bool run(
         ui_manager::redraw();
 
         const std::string &action = ctxt.handle_input();
+#if defined(TILES)
+        // An action clicked in Godot arrives as a pick of its row, then CONFIRM.
+        if( const auto pick = cata::godot_bridge::take_pick( &itm );
+            pick && *pick >= 0 && *pick < num_actions ) {
+            selected_action = *pick;
+            action_list.set_selected( selected_action );
+        }
+#endif
 
         if( action == "QUIT" || action == "LEFT" ) {
             ret_val = false;

@@ -51,8 +51,10 @@ cut to 300 characters; `BN_BRIDGE_DEBUG=full` prints them whole.
 | List menus (`uilist`): search, categories, descriptions | Godot                    |
 | Questions and notices (`query_popup`, `popup`, `query_yn`) | Godot                  |
 | Text prompts (`string_input_popup`)     | Godot                                 |
+| Inventory and every item list built on it (drop, pick up, wield, wear, use, ...) | Godot |
+| Item actions (the menu after choosing an item in the inventory) | Godot              |
 | Menus that draw extra panels beside their list | Game (old style), for now      |
-| Inventory, crafting, character sheet, main menu and other full screens | Game (old style), being rebuilt one by one |
+| Advanced inventory, crafting, character sheet, main menu and other full screens | Game (old style), being rebuilt one by one |
 
 When the game shows one of its old-style screens, Godot shows it as the game drew it, so nothing is
 ever unreachable.
@@ -85,6 +87,22 @@ panel off there hides the matching part of the HUD.
 Every key still goes to the game first: the HUD never takes keyboard focus, and its buttons press
 the key bound to their action.
 
+## The inventory
+
+The inventory and every item list built on it (drop, pick up, wield, wear, use and the other "choose
+an item" prompts) show as one large card:
+
+- Weight and volume carried as bars against your limits, and a search box (`/`).
+- One pane per list the game shows: carried, nearby, worn and, while marking items to drop or pick
+  up, the ones you chose. Items are grouped by category, with their key, symbol, name and weight, or
+  the list's own columns (damage, encumbrance, ...) where it has them.
+- The selected item's full description on the right, with buttons for its actions.
+
+Click an item to select it, and click it again (or double click) to confirm. In lists where you mark
+items, the box on the left marks one. Choosing an item in the inventory opens its actions as a card
+beside its description. The keys work as before: arrows, `Tab` to jump by category, number keys for
+amounts, and each action's own key.
+
 ## How it works
 
 The game runs with SDL's offscreen video driver and connects to Godot over a local TCP socket.
@@ -97,8 +115,9 @@ Game to Godot: `[u32 length, little endian][u8 kind][payload]`
   - `frame {main, views}`: whether the main game view (and so the HUD) is showing, and which native
     screens are visible. A native screen is hidden while an old-style screen covers it.
   - `hud {...}`: everything the HUD shows; sent when it changes while the main view is visible.
-  - `view {id, kind, ...}`: state of a native screen. `kind` is `menu`, `popup` or `text_input`.
-  - `entries {id, entries}`: a menu's rows, sent only when they change.
+  - `view {id, kind, ...}`: state of a native screen. `kind` is `menu`, `popup`, `text_input`,
+    `inventory` or `item_actions`.
+  - `entries {id, entries}`: a menu's rows, or an inventory's lists, sent only when they change.
   - `close {id}`: the screen is gone.
 - kind 3, minimap: same layout as a frame; the game's pixel minimap, sent when it changes while
   the HUD shows the map.
@@ -111,13 +130,15 @@ Godot to game: `[u32 length][JSON]`
 - `key {k, m, r, down}`: SDL keycode and modifiers. `text {s}`: typed text.
 - `mouse {e: move|down|up|wheel, x, y, b, dy}`: mouse over the map.
 - `action {id, cat}`: press the key bound to a game action, e.g. `inventory`.
-- `pick {id, index, act}`: choose entry `index` in native screen `id`, then press `act`.
+- `pick {id, index, act}`: choose entry `index` in native screen `id`, then press `act`. An empty
+  `act` only moves the cursor there. Inventory entries are `list * 100000 + row`.
 - `press {id, act}`: press the key bound to `act` in native screen `id`'s input context.
 - `quit`: the window was closed.
 
 Game side: `src/godot_bridge.{h,cpp}` (connection, input, frames, native screens),
 `src/godot_hud.h` with the builder at the end of `src/panels.cpp`, and the native branches in
-`src/ui.cpp`, `src/popup.cpp` and `src/string_input_popup.cpp`.
+`src/ui.cpp`, `src/popup.cpp`, `src/string_input_popup.cpp`, `src/inventory_ui.cpp` and
+`src/examine_item_menu.cpp`.
 
 Godot side: `src/bridge.gd` (process and socket), `src/main.gd` (layers), `src/ui/hud.gd`,
 `src/views/*.gd`, and `src/ui/slate.gd` (colors, fonts, icons and shared styles).

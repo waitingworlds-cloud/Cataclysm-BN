@@ -287,3 +287,13 @@ static func icon_rect(name: String, size := 20, color := TEXT) -> TextureRect:
 	r.modulate = color
 	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return r
+
+
+## Friendlier name for a key label the game sends, e.g. `RETURN` becomes `Enter`.
+static func key_name(key: String) -> String:
+	const NAMES := {
+		"RETURN": "Enter", "ESC": "Esc", "TAB": "Tab", "BTAB": "Shift+Tab", "SPACE": "Space",
+		"BACKSPACE": "Backspace", "DELETE": "Del", "HOME": "Home", "END": "End", "PPAGE": "PgUp",
+		"NPAGE": "PgDn", "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→",
+	}
+	return NAMES.get(key, key)

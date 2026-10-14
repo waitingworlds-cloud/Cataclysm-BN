@@ -246,9 +246,16 @@ auto rewrite_mouse( SDL_Event &ev, const JsonObject &obj ) -> void
     }
 }
 
-/// Queues the key bound to `action` as the next game input.
+/// Queues the key bound to `action` as the next game input. An empty `action` queues an input that
+/// does nothing but let the screen apply a pick and redraw (it reads as `TIMEOUT`).
 auto press_action( const std::string &action, const std::string &category ) -> event_result
 {
+    if( action.empty() ) {
+        auto nudge = input_event();
+        nudge.type = input_event_t::timeout;
+        state().pending_input = nudge;
+        return event_result::input;
+    }
     const auto key = key_for_action( action, category );
     if( !key ) {
         return event_result::consumed;

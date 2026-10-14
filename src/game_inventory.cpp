@@ -268,6 +268,7 @@ void game_menus::inv::common( avatar &you )
     common_inventory_selector inv_s( you );
 
     inv_s.set_title( _( "Inventory" ) );
+    inv_s.set_confirm_label( _( "Item actions" ) );
     inv_s.set_hint( string_format(
                         _( "Item hotkeys assigned: <color_light_gray>%d</color>/<color_light_gray>%d</color>" ),
                         you.allocated_invlets().count(), inv_chars.size() ) );

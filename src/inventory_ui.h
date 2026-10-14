@@ -26,6 +26,7 @@
 #include "type_id.h"
 
 class Character;
+class JsonOut;
 class player;
 class item;
 class item_category;
@@ -297,6 +298,8 @@ class inventory_column
         inventory_entry *find_by_invlet( int invlet ) const;
 
         void draw( const catacurses::window &win, point pos ) const;
+        /// Writes the column's rows for the Godot front end (see `godot_bridge.h`).
+        auto write_native( JsonOut &jsout ) const -> void;
 
         void add_entry( const inventory_entry &entry );
         void move_entries_to( inventory_column &dest );
@@ -483,6 +486,10 @@ class inventory_selector
         void set_hint( const std::string &hint ) {
             this->hint = hint;
         }
+        /** Label of the confirm button in the Godot front end, e.g. "Item actions". */
+        void set_confirm_label( const std::string &label ) {
+            this->confirm_label = label;
+        }
         /** Specify whether the header should show stats (weight and volume). */
         void set_display_stats( bool display_stats ) {
             this->display_stats = display_stats;
@@ -663,7 +670,15 @@ class inventory_selector
 
         const navigation_mode_data &get_navigation_data( navigation_mode m ) const;
         std::unique_ptr<string_input_popup> spopup;
+        /// What `spopup` asks for: "filter" or "count".
+        std::string spopup_purpose;
         weak_ptr_fast<ui_adaptor> ui;
+
+        /// The screen Godot draws in place of this one, while it is open (Godot front end only).
+        struct native_inventory;
+        std::weak_ptr<native_inventory> native;
+        auto publish_native( native_inventory &state ) -> void;
+        auto apply_native_pick() -> void;
 
     private:
         catacurses::window w_inv;
@@ -673,6 +688,7 @@ class inventory_selector
 
         std::string title;
         std::string hint;
+        std::string confirm_label;
         size_t active_column_index;
         std::list<item_category> categories;
         navigation_mode mode;
