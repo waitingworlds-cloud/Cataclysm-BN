@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <map>
+#include <ranges>
 #include <vector>
 
 #include "cata_utility.h"
@@ -11,6 +12,10 @@
 #include "debug.h"
 #include "filesystem.h"
 #include "fstream_utils.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "json.h"
 #include "output.h"
@@ -763,6 +768,17 @@ void color_manager::show_gui()
     };
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the colors with what each is drawn as, normal and inverted.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "COLORS" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+    /// Picks for the buttons that act on the normal (`+ 1`) or inverted (`+ 2`) color.
+    constexpr auto change_pick = cata::godot_screen::tab_pick + 1000;
+    constexpr auto reset_pick = change_pick + 10;
+#endif
     const auto init_windows = [&]( ui_adaptor & ui ) {
         iContentHeight = FULL_SCREEN_HEIGHT - 2 - iHeaderHeight;
 
@@ -777,6 +793,11 @@ void color_manager::show_gui()
                                        iOffset + point( 1, iHeaderHeight + 1 ) );
 
         ui.position_from_window( w_colors_border );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     };
     init_windows( ui );
     ui.on_screen_resize( init_windows );
@@ -800,7 +821,106 @@ void color_manager::show_gui()
         name_color_map[pr.first] = color_array[pr.second];
     }
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "COLORS" );
+        const auto custom = [&]( const std::string & name ) -> gs::span {
+return name.empty() ? gs::span{ .text = "—", .color = c_dark_gray } :
+            gs::span{ .text = name, .color = name_color_map[name].color };
+        };
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Color manager" ) );
+            jsout.member( "icon", "palette" );
+            jsout.member( "size", std::array{ 1240, 860 } );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Colors" ) );
+            jsout.member( "icon", "palette" );
+            jsout.member( "cursor", iCurrentLine );
+            jsout.member( "rows" );
+            jsout.start_array();
+            gs::write_row( jsout, {
+                .text = { .text = _( "Color" ) },
+                .cells = { { .text = _( "Normal" ) }, { .text = _( "Custom" ) }, { .text = _( "Invert" ) }, { .text = _( "Custom" ) } },
+                .heading = true,
+            } );
+            // The column titles take the first place in the list, so each color says its own index.
+            for( const auto &[index, pr] : name_color_map | std::views::enumerate ) {
+                const auto &[name, entry] = pr;
+                gs::write_row( jsout, {
+                    .text = { .text = name, .color = c_white },
+                    .cells = {
+                        { .text = _( "default" ), .color = entry.color }, custom( entry.name_custom ),
+                        { .text = _( "default" ), .color = entry.invert }, custom( entry.name_invert_custom ),
+                    },
+                    .i = static_cast<int>( index ),
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 460 );
+            const auto &[name, entry] = *std::next( name_color_map.begin(), iCurrentLine );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = name, .color = entry.color } );
+            jsout.member( "subtitle", iCurrentCol == 1 ? _( "Normal" ) : _( "Invert" ) );
+            // How text in this color looks now, with the custom color when one is set.
+            const auto sample = [&]( const nc_color & base, const std::string & custom_name ) -> std::string {
+                const auto shown = custom_name.empty() ? base : name_color_map[custom_name].color;
+                return string_format( "%s  %s", colorize( _( "Sample text" ), shown ),
+                                      custom_name.empty() ? _( "default" ) : custom_name );
+            };
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = string_format( _( "Normal: %s\nInvert: %s" ),
+                                             sample( entry.color, entry.name_custom ),
+                                             sample( entry.invert, entry.name_invert_custom ) )
+                                   } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            // Enter and the reset key act on the column the cursor is in; the buttons pick one.
+            for( const auto col : { 1, 2 } ) {
+                const auto here = iCurrentCol == col;
+                gs::write_button( jsout, {
+                    .act = here ? "CONFIRM" : "", .text = col == 1 ? _( "Change color" ) : _( "Change invert color" ),
+                    .icon = "pipette", .category = category, .primary = here, .pick = change_pick + col
+                } );
+            }
+            for( const auto col : { 1, 2 } ) {
+                const auto here = iCurrentCol == col;
+                const auto &set = col == 1 ? entry.name_custom : entry.name_invert_custom;
+                gs::write_button( jsout, {
+                    .act = here ? "REMOVE_CUSTOM" : "", .text = col == 1 ? _( "Reset color" ) : _( "Reset invert color" ),
+                    .icon = "rotate-ccw", .category = category, .enabled = !set.empty(), .pick = reset_pick + col
+                } );
+            }
+            gs::write_button( jsout, {
+                .act = "LOAD_TEMPLATE", .text = _( "Load template" ), .icon = "folder-open", .category = category
+            } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Normal or invert" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_border( w_colors_border, BORDER_COLOR, _( " COLOR MANAGER " ) );
         mvwputch( w_colors_border, point( 0, 3 ), BORDER_COLOR, LINE_XXXO ); // |-
         mvwputch( w_colors_border, point( getmaxx( w_colors_border ) - 1, 3 ), BORDER_COLOR,
@@ -872,7 +992,20 @@ void color_manager::show_gui()
     while( true ) {
         ui_manager::redraw();
 
-        const std::string action = ctxt.handle_input();
+        std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick == change_pick + 1 || *pick == change_pick + 2 ) {
+                iCurrentCol = *pick - change_pick;
+                action = "CONFIRM";
+            } else if( *pick == reset_pick + 1 || *pick == reset_pick + 2 ) {
+                iCurrentCol = *pick - reset_pick;
+                action = "REMOVE_CUSTOM";
+            } else if( *pick >= 0 && *pick < iMaxColors ) {
+                iCurrentLine = *pick;
+            }
+        }
+#endif
 
         if( action == "QUIT" ) {
             break;

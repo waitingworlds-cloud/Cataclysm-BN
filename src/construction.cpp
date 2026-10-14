@@ -70,6 +70,11 @@
 #include <ranges>
 #include <utility>
 
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
+
 static const activity_id ACT_MULTIPLE_CONSTRUCTION( "ACT_MULTIPLE_CONSTRUCTION" );
 
 static const construction_category_id construction_category_ALL( "ALL" );
@@ -533,6 +538,11 @@ std::optional<construction_id> construction_menu( const bool blueprint )
     };
 
     const nc_color color_stage = c_light_gray;
+#if defined(TILES)
+    const auto drawn_by_godot = cata::godot_bridge::native_screens();
+#else
+    const auto drawn_by_godot = false;
+#endif
     ui_adaptor ui;
 
     const auto recalc_buffer = [&]() {
@@ -902,14 +912,197 @@ std::optional<construction_id> construction_menu( const bool blueprint )
 
         pos_x = w_list_width + w_list_x0 + 2;
         available_window_width = w_width - pos_x - 1;
+        if( drawn_by_godot ) {
+            // Godot wraps and scrolls the details itself: fold nothing and page by stage.
+            available_window_width = 1000;
+            w_height = 10000;
+        }
 
         recalc_buffer();
 
-        ui.position_from_window( w_con );
+        if( drawn_by_godot ) {
+            ui.position( point_zero, point_zero );
+        } else {
+            ui.position_from_window( w_con );
+        }
     } );
     ui.mark_resize();
 
+#if defined(TILES)
+    namespace gs = cata::godot_screen;
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( drawn_by_godot ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", &select, "CONSTRUCTION" );
+        native->attach( ui );
+    }
+    // Row colors check every variant against the inventory; work them out once per list.
+    auto colored_for = std::vector<construction_group_str_id>();
+    auto row_colors = std::vector<nc_color>();
+    const auto publish_native = [&]() {
+        if( colored_for != constructs ) {
+            colored_for = constructs;
+            row_colors = constructs
+            | std::views::transform( []( const construction_group_str_id & group ) { return construction_color( group, false ); } )
+            | std::ranges::to<std::vector>();
+        }
+        const auto has_line = select >= 0 && select < static_cast<int>( constructs.size() );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", blueprint ? _( "Plan a construction" ) : _( "Construction" ) );
+            jsout.member( "icon", "brick-wall" );
+            if( !tab_status_line.empty() ) {
+                jsout.member( "subtitle" );
+                cata::godot_bridge::write_spans( jsout, trim( trim_punctuation_marks( tab_status_line ) ),
+                                                 c_green );
+            }
+            jsout.member( "stats" );
+            jsout.start_array();
+            if( has_line ) {
+                const auto options = constructions_by_group( constructs[select] );
+                if( !options.empty() ) {
+                    const auto base_time = to_moves<int>( options.front()->time );
+                    const auto adjusted_time = options.front()->adjusted_time();
+                    if( base_time > 0 && adjusted_time > 0 ) {
+                        const auto speed = static_cast<int>( std::round( 100.0f * base_time /
+                                                             static_cast<float>( adjusted_time ) ) );
+                        jsout.start_object();
+                        jsout.member( "icon", "gauge" );
+                        jsout.member( "value" );
+                        cata::godot_bridge::write_spans( jsout, string_format( _( "Construction speed %d%%" ), speed ),
+                                                         speed < 100 ? c_yellow : c_green );
+                        jsout.end_object();
+                    }
+                }
+            }
+            jsout.end_array();
+            jsout.member( "tabs" );
+            jsout.start_array();
+            if( filter_mode ) {
+                jsout.start_object();
+                jsout.member( "text", _( "Searched" ) );
+                jsout.member( "active", true );
+                jsout.end_object();
+            } else {
+                for( const auto &[i, idx] : construct_cat_order | std::views::enumerate ) {
+                    jsout.start_object();
+                    jsout.member( "text", construct_cat[idx].name() );
+                    jsout.member( "active", i == tabindex );
+                    jsout.member( "pick", gs::tab_pick + static_cast<int>( i ) );
+                    jsout.end_object();
+                }
+            }
+            jsout.end_array();
+            jsout.member( "tab_keys" );
+            jsout.start_object();
+            jsout.member( "prev", cata::godot_bridge::key_label( "BACKTAB", "CONSTRUCTION" ) );
+            jsout.member( "next", cata::godot_bridge::key_label( "TAB", "CONSTRUCTION" ) );
+            jsout.end_object();
+            jsout.member( "search" );
+            jsout.start_object();
+            jsout.member( "text", filter );
+            jsout.member( "act", "FILTER" );
+            jsout.member( "key", cata::godot_bridge::key_label( "FILTER", "CONSTRUCTION" ) );
+            jsout.member( "placeholder", _( "Search constructions" ) );
+            jsout.end_object();
+            jsout.member( "toggles" );
+            jsout.start_array();
+            if( !filter.empty() ) {
+                jsout.start_object();
+                jsout.member( "act", "RESET_FILTER" );
+                jsout.member( "text", _( "Clear search" ) );
+                jsout.member( "icon", "x" );
+                jsout.member( "key", cata::godot_bridge::key_label( "RESET_FILTER", "CONSTRUCTION" ) );
+                jsout.end_object();
+            }
+            jsout.start_object();
+            jsout.member( "act", "TOGGLE_UNAVAILABLE_CONSTRUCTIONS" );
+            jsout.member( "text", _( "Hide unavailable" ) );
+            jsout.member( "icon", "eye" );
+            jsout.member( "key", cata::godot_bridge::key_label( "TOGGLE_UNAVAILABLE_CONSTRUCTIONS",
+                          "CONSTRUCTION" ) );
+            jsout.member( "on", hide_unconstructable );
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Constructions" ) );
+            jsout.member( "icon", "list" );
+            jsout.member( "cursor", select );
+            jsout.member( "empty", _( "Nothing matches." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &[i, group] : constructs | std::views::enumerate ) {
+                jsout.start_object();
+                jsout.member( "text" );
+                cata::godot_bridge::write_spans( jsout, group->name(), row_colors[i] );
+                if( is_favorite( group ) ) {
+                    jsout.member( "icon", "star" );
+                    jsout.member( "icon_color", "c_yellow" );
+                }
+                jsout.end_object();
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "active_pane", 0 );
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 560 );
+            if( has_line ) {
+                const auto &group = constructs[select];
+                jsout.member( "title" );
+                cata::godot_bridge::write_spans( jsout, group->name(), c_white );
+                jsout.member( "icon", "brick-wall" );
+                // The first lines repeat the name shown as the title.
+                const auto body = full_construct_buffer
+                                  | std::views::drop( 2 )
+                | std::views::transform( [&]( const std::string & line ) {
+                    return line == construct_separator_line ? std::string( "--" ) : line;
+                } )
+                | std::ranges::to<std::vector>();
+                jsout.member( "body" );
+                cata::godot_bridge::write_spans( jsout, join( body, "\n" ), color_stage );
+                if( !construct_buffer_breakpoints.empty() ) {
+                    jsout.member( "scroll", std::max( 0,
+                                                      construct_buffer_breakpoints[current_construct_breakpoint] - 2 ) );
+                }
+                jsout.member( "buttons" );
+                jsout.start_array();
+                gs::write_button( jsout, {
+                    .act = "CONFIRM",
+                    .text = blueprint ? _( "Choose" ) : _( "Build" ),
+                    .icon = "hammer",
+                    .category = "CONSTRUCTION",
+                    .primary = true,
+                    .enabled = blueprint || player_can_build( g->u, total_inv, group ),
+                } );
+                gs::write_button( jsout, { .act = "TOGGLE_FAVORITE", .text = is_favorite( group ) ? _( "Unfavorite" ) : _( "Favorite" ), .icon = "star", .category = "CONSTRUCTION" } );
+                jsout.end_array();
+            }
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Move" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Category" ) );
+            gs::write_fixed_hint( jsout, "PgUp PgDn", _( "Stages" ) );
+            gs::write_hint( jsout, "CONFIRM", "CONSTRUCTION", blueprint ? _( "Choose" ) : _( "Build" ) );
+            gs::write_hint( jsout, "HELP_KEYBINDINGS", "CONSTRUCTION", _( "Keys" ) );
+            gs::write_hint( jsout, "QUIT", "CONSTRUCTION", _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_grid( w_con, w_list_width + w_list_x0 );
 
         // Erase existing tab selection & list of constructions
@@ -1357,6 +1550,20 @@ std::optional<construction_id> construction_menu( const bool blueprint )
         ui_manager::redraw();
 
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = cata::godot_bridge::take_pick( &select ) ) {
+            if( *pick >= gs::tab_pick ) {
+                if( !filter_mode && *pick - gs::tab_pick < tabcount ) {
+                    tabindex = *pick - gs::tab_pick;
+                    update_cat = true;
+                    update_info = true;
+                }
+            } else if( *pick % gs::row_stride < static_cast<int>( constructs.size() ) ) {
+                select = *pick % gs::row_stride;
+                update_info = true;
+            }
+        }
+#endif
         if( action == "FILTER" ) {
             struct filter_example {
                 char key;
@@ -1490,6 +1697,10 @@ std::optional<construction_id> construction_menu( const bool blueprint )
                         add_msg( m_info, _( "It is too dark to construct right now." ) );
                     } else {
                         ui.reset();
+#if defined(TILES)
+                        // Picking where to build shows the map; this screen must not stay up over it.
+                        native.reset();
+#endif
                         place_construction( constructs[select] );
                         uistate.last_construction = constructs[select];
                     }

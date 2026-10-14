@@ -1,4 +1,5 @@
 #include "enums.h"
+#include "message_log_view.h"
 #include "messages.h"
 
 #include <cstddef>
@@ -28,6 +29,7 @@ auto Messages::size() -> size_t { return 0; }
 auto Messages::has_undisplayed_messages() -> bool { return false; }
 void Messages::display_messages() {}
 void Messages::display_messages(const catacurses::window&, int, int, int, int) {}
+auto Messages::sidebar_lines(std::size_t) -> std::vector<log_line> { return {}; }
 void Messages::serialize(JsonOut&) {}
 void Messages::deserialize(const JsonObject&) {}
 

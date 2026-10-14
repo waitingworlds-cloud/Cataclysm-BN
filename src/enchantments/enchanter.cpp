@@ -11,6 +11,10 @@
 #include "game_inventory.h"
 #include "generic_factory.h"
 #include "generic_readers.h"
+#if defined(TILES)
+#    include "godot_bridge.h"
+#    include "godot_screen.h"
+#endif
 #include "iexamine.h"
 #include "input.h"
 #include "inventory.h"
@@ -35,6 +39,7 @@
 #include "uistate.h"
 
 #include <algorithm>
+#include <array>
 #include <numeric>
 #include <ranges>
 #include <string>
@@ -160,6 +165,14 @@ auto enchantment_selector_menu(std::vector<enchant_info> options, Character& use
     catacurses::window w_ench;
     catacurses::window w_info;
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the enchantments with the chosen one's effects and requirements beside them.
+    auto native =
+        cata::godot_bridge::native_screens()
+            ? std::make_unique<cata::godot_bridge::native_view>("screen", &w_ench, "CRAFTING")
+            : nullptr;
+    if (native) { native->attach(ui); }
+#endif
 
     input_context ctxt("CRAFTING");
     ctxt.register_action("QUIT");
@@ -178,6 +191,9 @@ auto enchantment_selector_menu(std::vector<enchant_info> options, Character& use
         w_info = catacurses::newwin(TERMY, TERMX / 2, point(TERMX / 2, 0));
 
         ui.position(point(0, 0), point(TERMX, TERMY));
+#if defined(TILES)
+        if (native) { ui.position(point_zero, point_zero); }
+#endif
     });
     ui.mark_resize();
 
@@ -192,6 +208,69 @@ auto enchantment_selector_menu(std::vector<enchant_info> options, Character& use
     int info_scroll_max = 0;
     int num_options = names.size();
     ui.on_redraw([&](ui_adaptor& ui) {
+#if defined(TILES)
+        if (native) {
+            namespace gs = cata::godot_screen;
+            const auto category = std::string("CRAFTING");
+            native->publish([&](JsonOut& jsout) {
+                jsout.member("title", string_format(_("Enchant %s"), itm.tname()));
+                jsout.member("icon", "sparkles");
+                jsout.member("size", std::array{1240, 860});
+                jsout.member("panes");
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member("title", _("Enchantment Options"));
+                jsout.member("icon", "sparkles");
+                jsout.member("cursor", line);
+                jsout.member("empty", _("You don't know any enchantment for this item."));
+                jsout.member("rows");
+                jsout.start_array();
+                for (const auto& name : names) {
+                    gs::write_row(jsout, {.text = {.text = name, .color = c_white}});
+                }
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+
+                jsout.member("aside");
+                jsout.start_object();
+                jsout.member("width", 520);
+                if (num_options != 0) {
+                    // Godot wraps the text, so only requirement groups start new lines.
+                    constexpr auto unfolded = 1000;
+                    const auto info = enchantment_info(options[line], user, unfolded, itm);
+                    jsout.member("title");
+                    gs::write_span(jsout, {.text = names[line], .color = c_white});
+                    jsout.member("body");
+                    gs::write_span(jsout, {.text = join(info, "\n")});
+                } else {
+                    jsout.member("empty", _("Nothing to enchant with."));
+                }
+                jsout.member("buttons");
+                jsout.start_array();
+                gs::write_button(
+                    jsout,
+                    {.act = "CONFIRM",
+                     .text = _("Enchant"),
+                     .icon = "sparkles",
+                     .category = category,
+                     .primary = true,
+                     .enabled = num_options != 0});
+                gs::write_button(
+                    jsout, {.act = "QUIT", .text = _("Cancel"), .icon = "x", .category = category});
+                jsout.end_array();
+                jsout.end_object();
+
+                jsout.member("hints");
+                jsout.start_array();
+                gs::write_fixed_hint(jsout, "↑↓", _("Choose"));
+                gs::write_hint(jsout, "CONFIRM", category, _("Enchant"));
+                gs::write_hint(jsout, "QUIT", category, _("Cancel"));
+                jsout.end_array();
+            });
+            return;
+        }
+#endif
         werase(w_ench);
         calcStartPos(names_scroll_min, line, height, num_options);
         names_scroll_max = std::min(num_options, names_scroll_min + height);
@@ -235,6 +314,13 @@ auto enchantment_selector_menu(std::vector<enchant_info> options, Character& use
         ui_manager::redraw();
         const int scroll_info_lines = catacurses::getmaxy(w_info) - 4;
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if (const auto pick = native ? cata::godot_bridge::take_pick(&w_ench) : std::nullopt;
+            pick && *pick >= 0 && *pick < num_options) {
+            line = *pick;
+            info_scroll = 0;
+        }
+#endif
         if (action == "PAGE_UP") {
             info_scroll -= scroll_info_lines;
             if (info_scroll < 0) { info_scroll = info_lines; }

@@ -7,6 +7,8 @@
 #include "calendar.h"
 #ifdef TILES
 #    include "cata_tiles.h"
+#    include "godot_bridge.h"
+#    include "godot_screen.h"
 #endif // TILES
 #include "../ime.h"
 #include "cata_utility.h"
@@ -1312,9 +1314,18 @@ static void draw_ascii(
     ui.set_cursor(w, point(om_half_width, om_half_height));
 }
 
-static void draw_om_sidebar(
+/// Name of the dimension the player is in, shown above the coordinates.
+static auto current_dimension_name() -> std::string {
+    const dimension_info* dim = g->get_current_dimension_info();
+    if (dim == nullptr) { return {}; }
+    if (!dim->display_name.empty()) { return dim->display_name; }
+    return dim->world_type.is_valid() ? dim->world_type.obj().name.translated() : dim->id.str();
+}
+
+/// Describes the overmap tile at `center` (terrain, weather, missions) from the top of `wbar`.
+static void draw_om_tile_info(
     const catacurses::window& wbar, const tripoint_abs_omt& center, const tripoint_abs_omt& orig,
-    bool /* blink */, bool fast_scroll, input_context* inp_ctxt, const draw_data_t& data) {
+    const draw_data_t& data) {
     avatar& player_character = get_avatar();
     // Debug vision allows seeing everything
     const bool has_debug_vision = player_character.has_trait(trait_DEBUG_NIGHTVISION);
@@ -1335,14 +1346,6 @@ static void draw_om_sidebar(
         for (const auto& mgp : mgroups) {
             if (mgp->horde) { break; }
         }
-    }
-
-    // Draw the vertical line
-    for (int j = 0; j < TERMY; j++) { mvwputch(wbar, point(0, j), c_white, LINE_XOXO); }
-
-    // Clear the legend
-    for (int i = 1; i < getmaxx(wbar); i++) {
-        for (int j = 0; j < TERMY; j++) { mvwputch(wbar, point(i, j), c_black, ' '); }
     }
 
     // Draw text describing the overmap tile at the cursor position.
@@ -1452,6 +1455,22 @@ static void draw_om_sidebar(
             mvwprintz(wbar, point(1, ++lines), c_white, mission->name());
         }
     }
+}
+
+static void draw_om_sidebar(
+    const catacurses::window& wbar, const tripoint_abs_omt& center, const tripoint_abs_omt& orig,
+    bool /* blink */, bool fast_scroll, input_context* inp_ctxt, const draw_data_t& data) {
+    avatar& player_character = get_avatar();
+
+    // Draw the vertical line
+    for (int j = 0; j < TERMY; j++) { mvwputch(wbar, point(0, j), c_white, LINE_XOXO); }
+
+    // Clear the legend
+    for (int i = 1; i < getmaxx(wbar); i++) {
+        for (int j = 0; j < TERMY; j++) { mvwputch(wbar, point(i, j), c_black, ' '); }
+    }
+
+    draw_om_tile_info(wbar, center, orig, data);
 
     mvwprintz(wbar, point(1, 12), c_magenta, _("Use movement keys to pan."));
     mvwprintz(wbar, point(1, 13), c_magenta, _("Press W to preview route."));
@@ -1504,16 +1523,7 @@ static void draw_om_sidebar(
     }
 
     // Display dimension name above the coordinate line
-    std::string dim_name;
-    if (const dimension_info* dim = g->get_current_dimension_info()) {
-        dim_name =
-            dim->display_name.empty()
-                ? (dim->world_type.is_valid()
-                       ? dim->world_type.obj().name.translated()
-                       : dim->id.str())
-                : dim->display_name;
-    }
-    mvwprintz(wbar, point(1, getmaxy(wbar) - 2), c_cyan, dim_name);
+    mvwprintz(wbar, point(1, getmaxy(wbar) - 2), c_cyan, current_dimension_name());
 
     mvwprintz(wbar, point(1, getmaxy(wbar) - 1), c_red, _("LEVEL %i, %s"), center.z(),
               fmt_omt_coords(center));
@@ -1542,6 +1552,198 @@ static void draw(
 #endif // TILES
     }
 }
+
+#if defined(TILES)
+namespace {
+
+namespace gs = cata::godot_screen;
+
+/// Width of the panel the Godot front end docks on the right of the overmap, in pixels.
+constexpr auto godot_panel_width = 400;
+/// Columns the legend is written in for that panel.
+constexpr auto godot_legend_columns = 48;
+/// True while the overmap is open to choose a spot, so the panel offers to choose it.
+auto choosing_point = false;
+
+/// Terminal columns the Godot panel covers, with its gaps.
+auto godot_panel_cells() -> int {
+    const auto window = cata::godot_bridge::window_size();
+    if (window.x <= 0 || TERMX <= 0) { return clamp(TERMX / 5, 28, 55); }
+    const auto pixels = std::min(godot_panel_width, window.x * 45 / 100) + 20;
+    return std::min(TERMX - 1, (pixels * TERMX + window.x - 1) / window.x);
+}
+
+/// Writes the members every overmap side panel starts with.
+auto write_side_panel(JsonOut& jsout, const std::string& title, const std::string& icon) -> void {
+    jsout.member("title", title);
+    jsout.member("icon", icon);
+    jsout.member("dock", "side");
+    jsout.member("size", std::array{godot_panel_width, 0});
+}
+
+struct legend_state {
+    const tripoint_abs_omt& curs;
+    const draw_data_t& data;
+    bool fast_scroll = false;
+};
+
+/// The overmap legend as a Godot panel: what is under the cursor, the map toggles and actions.
+auto publish_legend(cata::godot_bridge::native_view& native, const legend_state& st) -> void {
+    const auto category = std::string("OVERMAP");
+    const auto& you = get_avatar();
+    const auto& curs = st.curs;
+    const auto route_shown =
+        !you.omt_path.empty() && (you.omt_path.front() == curs || you.omt_path.back() == curs);
+    const auto driving = you.in_vehicle && you.controlling_vehicle;
+    native.publish([&](JsonOut& jsout) {
+        write_side_panel(jsout, _("Map"), "map");
+        jsout.member("subtitle");
+        auto where = string_format(_("Level %d  ·  %s"), curs.z(), fmt_omt_coords(curs));
+        if (const auto dim = current_dimension_name(); !dim.empty()) { where += "  ·  " + dim; }
+        gs::write_span(jsout, {.text = where});
+
+        jsout.member("toggles");
+        jsout.start_array();
+        const auto toggle =
+            [&](const std::string& act, const std::string& text, const std::string& icon,
+                const bool on) {
+                gs::write_toggle(
+                    jsout, {.act = act, .text = text, .icon = icon, .category = category}, on);
+            };
+        toggle("TOGGLE_MAP_NOTES", _("Notes"), "sticky-note", uistate.overmap_show_map_notes);
+        toggle("TOGGLE_CITY_LABELS", _("City names"), "building", uistate.overmap_show_city_labels);
+        toggle("TOGGLE_HORDES", _("Hordes"), "skull", uistate.overmap_show_hordes);
+        toggle("TOGGLE_OVERLAYS", _("Overlays"), "layers",
+               uistate.overmap_show_overlays || uistate.overmap_blinking);
+        toggle("TOGGLE_BLINKING", _("Blink"), "eye", uistate.overmap_blinking);
+        toggle("TOGGLE_LAND_USE_CODES", _("Land use"), "map", uistate.overmap_show_land_use_codes);
+        toggle("TOGGLE_FOREST_TRAILS", _("Trails"), "trees", uistate.overmap_show_forest_trails);
+        toggle("TOGGLE_OVERMAP_WEATHER", _("Weather"), "cloud-sun",
+               uistate.overmap_visible_weather);
+        toggle("TOGGLE_FAST_SCROLL", _("Fast scroll"), "fast-forward", st.fast_scroll);
+        toggle("TOGGLE_DEFAULT_0", _("Open at ground level"), "arrow-down-to-line",
+               uistate.overmap_default_0);
+        jsout.end_array();
+
+        jsout.member("aside");
+        jsout.start_object();
+        jsout.member("mono", true);
+        jsout.member("body");
+        cata::godot_bridge::write_window_spans(jsout, g->w_omlegend, {.left = 1});
+        jsout.member("buttons");
+        jsout.start_array();
+        const auto button = [&](const gs::button& b, const std::optional<bool> on = std::nullopt) {
+            if (on) {
+                gs::write_toggle(jsout, b, *on);
+            } else {
+                gs::write_button(jsout, b);
+            }
+        };
+        const auto has_note = ACTIVE_OVERMAP_BUFFER.has_note(curs);
+        button(
+            {.act = "CENTER",
+             .text = _("Back to me"),
+             .icon = "locate-fixed",
+             .category = category});
+        button({.act = "SEARCH", .text = _("Search"), .icon = "search", .category = category});
+        button(
+            {.act = "LEVEL_UP", .text = _("Level up"), .icon = "arrow-up", .category = category});
+        button(
+            {.act = "LEVEL_DOWN",
+             .text = _("Level down"),
+             .icon = "arrow-down",
+             .category = category});
+        if (use_tiles && use_tiles_overmap) {
+            button(
+                {.act = "ZOOM_IN", .text = _("Zoom in"), .icon = "zoom-in", .category = category});
+            button(
+                {.act = "ZOOM_OUT",
+                 .text = _("Zoom out"),
+                 .icon = "zoom-out",
+                 .category = category});
+        }
+        button(
+            {.act = "CREATE_NOTE",
+             .text = has_note ? _("Edit note") : _("Add note"),
+             .icon = "square-pen",
+             .category = category});
+        button(
+            {.act = "DELETE_NOTE",
+             .text = _("Delete note"),
+             .icon = "trash",
+             .category = category,
+             .enabled = has_note});
+        button({.act = "LIST_NOTES", .text = _("All notes"), .icon = "list", .category = category});
+        button(
+            {.act = "MISSIONS", .text = _("Missions"), .icon = "scroll-text", .category = category});
+        button(
+            {.act = "TOGGLE_EXPLORED",
+             .text = _("Explored"),
+             .icon = "check",
+             .category = category,
+             .tip = _("Mark this place as explored.")},
+            ACTIVE_OVERMAP_BUFFER.is_explored(curs));
+        button(
+            {.act = "TOGGLE_MARK_PATH",
+             .text = _("Path"),
+             .icon = "footprints",
+             .category = category,
+             .tip = _("Mark this place as part of a travel path.")},
+            ACTIVE_OVERMAP_BUFFER.is_path(curs));
+        button(
+            {.act = "SET_CUSTOM_WAYPOINT",
+             .text = _("Waypoint"),
+             .icon = "flag",
+             .category = category,
+             .tip = _("Set or clear a waypoint here.")},
+            you.custom_waypoint != nullptr);
+        if (st.data.debug_editor) {
+            button(
+                {.act = "PLACE_TERRAIN",
+                 .text = _("Place terrain"),
+                 .icon = "hammer",
+                 .category = category});
+            button(
+                {.act = "PLACE_SPECIAL",
+                 .text = _("Place special"),
+                 .icon = "hammer",
+                 .category = category});
+            button(
+                {.act = "SET_SPECIAL_ARGS",
+                 .text = _("Special args"),
+                 .icon = "hammer",
+                 .category = category});
+        }
+        button(
+            {.act = "CHOOSE_DESTINATION",
+             .text = route_shown ? (driving ? _("Drive there") : _("Travel there"))
+                                 : _("Show route here"),
+             .icon = route_shown ? "navigation" : "route",
+             .category = category,
+             .primary = !choosing_point,
+             .tip = _("Shows the route first; press again to travel.")});
+        if (choosing_point) {
+            button(
+                {.act = "CONFIRM",
+                 .text = _("Choose this spot"),
+                 .icon = "map-pin",
+                 .category = category,
+                 .primary = true});
+        }
+        jsout.end_array();
+        jsout.end_object();
+
+        jsout.member("hints");
+        jsout.start_array();
+        gs::write_fixed_hint(jsout, "←↑→↓", _("Pan"));
+        gs::write_hint(jsout, "HELP_KEYBINDINGS", category, _("All keys"));
+        gs::write_hint(jsout, "QUIT", category, _("Close"));
+        jsout.end_array();
+    });
+}
+
+} // namespace
+#endif
 
 static void create_note(const tripoint_abs_omt& curs) {
     std::string color_notes = _("Color codes: ");
@@ -1681,10 +1883,21 @@ static auto search(const ui_adaptor& om_ui, tripoint_abs_omt& curs, const tripoi
 
     ui_adaptor ui;
     int search_width = OVERMAP_LEGEND_WIDTH - 1;
+#if defined(TILES)
+    // Shown in a panel over the overmap's own, with the cursor on the map.
+    auto native =
+        cata::godot_bridge::native_screens()
+            ? std::make_unique<cata::godot_bridge::native_view>("screen", &ui, "OVERMAP_SEARCH")
+            : nullptr;
+    if (native) { native->attach(ui); }
+#endif
     ui.on_screen_resize([&](ui_adaptor& ui) {
         w_search = catacurses::newwin(13, search_width, point(TERMX - search_width, 3));
 
         ui.position_from_window(w_search);
+#if defined(TILES)
+        if (native) { ui.position(point_zero, point_zero); }
+#endif
     });
     ui.mark_resize();
 
@@ -1697,6 +1910,68 @@ static auto search(const ui_adaptor& om_ui, tripoint_abs_omt& curs, const tripoi
     ctxt.register_action("ANY_INPUT");
 
     ui.on_redraw([&](const ui_adaptor&) {
+#if defined(TILES)
+        if (native) {
+            const auto category = std::string("OVERMAP_SEARCH");
+            const auto here = tripoint_abs_omt(locations[i], orig.z());
+            native->publish([&](JsonOut& jsout) {
+                write_side_panel(jsout, _("Search results"), "search");
+                jsout.member("subtitle");
+                gs::write_span(jsout, {.text = term});
+                jsout.member("aside");
+                jsout.start_object();
+                const auto& ter =
+                    ACTIVE_OVERMAP_BUFFER.ter(tripoint_abs_omt(locations[i], curs.z())).obj();
+                jsout.member("title");
+                gs::write_span(jsout, {.text = ter.get_name(), .color = c_white});
+                jsout.member("sym", ter.get_symbol());
+                jsout.member("sym_color", string_from_color(ter.get_color()));
+                jsout.member("body");
+                gs::write_span(
+                    jsout,
+                    {.text = string_format(
+                         "%s %s\n%s %s",
+                         colorize(locations.size() == 1 ? _("Result:") : _("Results:"),
+                                  c_light_blue),
+                         colorize(string_format("%d/%d", i + 1, locations.size()), c_white),
+                         colorize(_("Direction:"), c_light_blue),
+                         colorize(string_format("%d %s", static_cast<int>(trig_dist(orig, here)),
+                                                direction_name_short(direction_from(orig, here))),
+                                  c_white))});
+                jsout.member("buttons");
+                jsout.start_array();
+                gs::write_button(
+                    jsout,
+                    {.act = "PREV_TAB",
+                     .text = _("Prev"),
+                     .icon = "chevron-left",
+                     .category = category,
+                     .enabled = locations.size() > 1});
+                gs::write_button(
+                    jsout,
+                    {.act = "NEXT_TAB",
+                     .text = _("Next"),
+                     .icon = "chevron-right",
+                     .category = category,
+                     .enabled = locations.size() > 1});
+                gs::write_button(
+                    jsout,
+                    {.act = "CONFIRM",
+                     .text = _("Stay here"),
+                     .icon = "map-pin",
+                     .category = category,
+                     .primary = true});
+                jsout.end_array();
+                jsout.end_object();
+                jsout.member("hints");
+                jsout.start_array();
+                gs::write_hint(jsout, "NEXT_TAB", category, _("Next"));
+                gs::write_hint(jsout, "QUIT", category, _("Back"));
+                jsout.end_array();
+            });
+            return;
+        }
+#endif
         // Draw search box
 
         int a = utf8_width(_("Search:"));
@@ -1794,10 +2069,24 @@ static void place_ter_or_special(
         catacurses::window w_editor;
 
         ui_adaptor ui;
+#if defined(TILES)
+        // Shown in a panel over the overmap's own, with the text this box would show.
+        auto native =
+            cata::godot_bridge::native_screens()
+                ? std::make_unique<cata::godot_bridge::native_view>("screen", &ui, "OVERMAP_EDITOR")
+                : nullptr;
+        if (native) { native->attach(ui); }
+#endif
         ui.on_screen_resize([&](ui_adaptor& ui) {
             w_editor = catacurses::newwin(15, 27, point(TERMX - 27, 3));
 
             ui.position_from_window(w_editor);
+#if defined(TILES)
+            if (native) {
+                w_editor = cata::godot_bridge::capture_window(15, 27);
+                ui.position(point_zero, point_zero);
+            }
+#endif
         });
         ui.mark_resize();
 
@@ -1859,6 +2148,48 @@ static void place_ter_or_special(
             }
             mvwprintz(w_editor, point(1, 12), c_white, _("[%s] Apply"), ctxt.get_desc("CONFIRM"));
             mvwprintz(w_editor, point(1, 13), c_white, _("[ESCAPE/Q] Cancel"));
+#if defined(TILES)
+            if (native) {
+                // The key lines are buttons and hints in the panel.
+                for (const auto y : {11, 12, 13}) {
+                    mvwprintz(w_editor, point(0, y), c_black, std::string(getmaxx(w_editor), ' '));
+                }
+                const auto category = std::string("OVERMAP_EDITOR");
+                native->publish([&](JsonOut& jsout) {
+                    write_side_panel(
+                        jsout, terrain ? _("Place terrain") : _("Place special"), "hammer");
+                    jsout.member("aside");
+                    jsout.start_object();
+                    jsout.member("mono", true);
+                    jsout.member("body");
+                    cata::godot_bridge::write_window_spans(jsout, w_editor, {.left = 1});
+                    jsout.member("buttons");
+                    jsout.start_array();
+                    gs::write_button(
+                        jsout,
+                        {.act = "ROTATE",
+                         .text = _("Rotate"),
+                         .icon = "rotate-cw",
+                         .category = category,
+                         .enabled = can_rotate});
+                    gs::write_button(
+                        jsout,
+                        {.act = "CONFIRM",
+                         .text = _("Apply"),
+                         .icon = "check",
+                         .category = category,
+                         .primary = true});
+                    jsout.end_array();
+                    jsout.end_object();
+                    jsout.member("hints");
+                    jsout.start_array();
+                    gs::write_fixed_hint(jsout, "←↑→↓", _("Move"));
+                    gs::write_hint(jsout, "QUIT", category, _("Cancel"));
+                    jsout.end_array();
+                });
+                return;
+            }
+#endif
             wnoutrefresh(w_editor);
         });
 
@@ -2002,11 +2333,22 @@ static auto display(const tripoint_abs_omt& orig, const draw_data_t& data = draw
     background_pane bg_pane;
 
     ui_adaptor ui;
-    ui.on_screen_resize([](ui_adaptor& ui) {
+#if defined(TILES)
+    // The legend becomes a panel the Godot front end draws over the right of the map.
+    auto native =
+        cata::godot_bridge::native_screens()
+            ? std::make_unique<cata::godot_bridge::native_view>("screen", &ui, "OVERMAP")
+            : nullptr;
+    if (native) { native->attach(ui); }
+#endif
+    ui.on_screen_resize([&](ui_adaptor& ui) {
         /**
          * Handle possibly different overmap font size
          */
         OVERMAP_LEGEND_WIDTH = clamp(TERMX / 5, 28, 55);
+#if defined(TILES)
+        if (native) { OVERMAP_LEGEND_WIDTH = godot_panel_cells(); }
+#endif
         OVERMAP_WINDOW_HEIGHT = TERMY;
         OVERMAP_WINDOW_WIDTH = TERMX - OVERMAP_LEGEND_WIDTH;
         OVERMAP_WINDOW_TERM_WIDTH = OVERMAP_WINDOW_WIDTH;
@@ -2017,6 +2359,12 @@ static auto display(const tripoint_abs_omt& orig, const draw_data_t& data = draw
         g->w_omlegend = catacurses::newwin(
             OVERMAP_WINDOW_TERM_HEIGHT, OVERMAP_LEGEND_WIDTH, point(OVERMAP_WINDOW_TERM_WIDTH, 0));
         g->w_overmap = catacurses::newwin(OVERMAP_WINDOW_HEIGHT, OVERMAP_WINDOW_WIDTH, point_zero);
+#if defined(TILES)
+        if (native) {
+            g->w_omlegend = cata::godot_bridge::
+                capture_window(OVERMAP_WINDOW_TERM_HEIGHT, godot_legend_columns);
+        }
+#endif
 
         ui.position_from_window(catacurses::stdscr);
     });
@@ -2082,6 +2430,14 @@ static auto display(const tripoint_abs_omt& orig, const draw_data_t& data = draw
     ui.on_redraw([&](ui_adaptor& ui) {
         draw(ui, curs, orig, uistate.overmap_show_overlays, show_explored, fast_scroll, &ictxt,
              data, grids_data);
+#if defined(TILES)
+        if (native) {
+            // Only what is under the cursor: the panel shows the controls itself.
+            werase(g->w_omlegend);
+            draw_om_tile_info(g->w_omlegend, curs, orig, data);
+            publish_legend(*native, {.curs = curs, .data = data, .fast_scroll = fast_scroll});
+        }
+#endif
     });
 
     do {
@@ -2297,16 +2653,29 @@ void ui::omap::display_zones(
     overmap_ui::display(center, data);
 }
 
+namespace {
+
+/// Opens the overmap to choose a spot, starting at `origin`.
+auto choose_from(const tripoint_abs_omt& origin) -> tripoint_abs_omt {
+#if defined(TILES)
+    const auto restore = restore_on_out_of_scope<bool>(overmap_ui::choosing_point);
+    overmap_ui::choosing_point = true;
+#endif
+    return overmap_ui::display(origin);
+}
+
+} // namespace
+
 auto ui::omap::choose_point() -> tripoint_abs_omt {
-    return overmap_ui::display(get_player_character().abs_omt_pos());
+    return choose_from(get_player_character().abs_omt_pos());
 }
 
 auto ui::omap::choose_point(const tripoint_abs_omt& origin) -> tripoint_abs_omt {
-    return overmap_ui::display(origin);
+    return choose_from(origin);
 }
 
 auto ui::omap::choose_point(int z) -> tripoint_abs_omt {
     tripoint_abs_omt loc = get_player_character().abs_omt_pos();
     loc.z() = z;
-    return overmap_ui::display(loc);
+    return choose_from(loc);
 }

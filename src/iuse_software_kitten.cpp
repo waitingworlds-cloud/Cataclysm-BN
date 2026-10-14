@@ -1,18 +1,46 @@
 #include "iuse_software_kitten.h"
 
+#include <array>
 #include <cstdlib>  // Needed for rand()
+#include <memory>
+#include <string>
 #include <vector>
 
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "output.h"
 #include "posix_time.h"
 #include "rng.h"
+#include "string_formatter.h"
 #include "translations.h"
 #include "ui_manager.h"
 
 static constexpr int EMPTY = -1;
 static constexpr int ROBOT = 0;
 static constexpr int KITTEN = 1;
+
+#if defined(TILES)
+namespace
+{
+
+/// The move from `from` toward a clicked square, along the longer way, or none for the same square.
+auto step_action( const point from, const point to ) -> std::string
+{
+    const auto d = to - from;
+    if( d == point_zero ) {
+        return {};
+    }
+    if( std::abs( d.x ) >= std::abs( d.y ) ) {
+        return d.x < 0 ? "LEFT" : "RIGHT";
+    }
+    return d.y < 0 ? "UP" : "DOWN";
+}
+
+} // namespace
+#endif
 
 std::string robot_finds_kitten::getmessage( int idx ) const
 {
@@ -303,17 +331,126 @@ robot_finds_kitten::robot_finds_kitten()
     }
 
     ui_adaptor ui;
-    ui.on_screen_resize( [this]( ui_adaptor & ui ) {
+#if defined(TILES)
+    // Godot draws the field as a board, with what robot last touched beside it.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "IUSE_SOFTWARE_KITTEN" ) :
+                  nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
+    ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         bkatwin = catacurses::newwin( rfkLINES + 2, rfkCOLS + 2,
                                       point( ( TERMX - rfkCOLS - 2 ) / 2, ( TERMY - rfkLINES - 2 ) / 2 ) );
         w = catacurses::newwin( rfkLINES, rfkCOLS,
                                 point( ( TERMX - rfkCOLS ) / 2, ( TERMY - rfkLINES ) / 2 ) );
         ui.position_from_window( bkatwin );
+#if defined(TILES)
+        if( native ) {
+            bkatwin = cata::godot_bridge::capture_window( rfkLINES + 2, rfkCOLS + 2 );
+            w = cata::godot_bridge::capture_window( rfkLINES, rfkCOLS );
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
-    ui.on_redraw( [this]( const ui_adaptor & ) {
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "IUSE_SOFTWARE_KITTEN" );
+        const auto ctxt = input_context( category );
+        const auto robot_text = string_format( "%s%s%s", _( "In this game, you are robot (" ),
+                                               colorize( std::string( 1, static_cast<char>( robot.character ) ), robot.color ), _( ")." ) );
+        const auto job_text = string_format(
+                                  _( "Your job is to find kitten.  This task is complicated by the existence of various things "
+                                     "which are not kitten.  Robot must touch items to determine if they are kitten or not.  "
+                                     "The game ends when robot finds kitten.  Alternatively, you may end the game by hitting %s." ),
+                                  ctxt.get_desc( "QUIT" ) );
+        const auto playing = current_ui_state != ui_state::instructions &&
+                             current_ui_state != ui_state::end_animation;
+        const auto finished = current_ui_state == ui_state::end_animation &&
+                              end_animation_frame + 1 == num_end_animation_frames;
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Robot finds kitten" ) );
+            jsout.member( "icon", "cat" );
+            jsout.member( "size", std::array{ 1120, 640 } );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            if( current_ui_state == ui_state::instructions ) {
+                jsout.member( "title", _( "robotfindskitten v22July2008" ) );
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = string_format( "%s\n\n%s\n\n%s\n\n%s",
+                                                 _( "Originally by the illustrious Leonard Richardson, "
+                                                    "rewritten in PDCurses by Joseph Larson, "
+                                                    "ported to CDDA gaming system by a nutcase." ), robot_text, job_text,
+                                                 _( "Press any key to start." ) )
+                                       } );
+            } else if( playing ) {
+                jsout.member( "cell", 20 );
+                // Things come in random colors, some on a background; none is a cursor.
+                jsout.member( "plain", true );
+                jsout.member( "click", "" );
+                jsout.member( "grid" );
+                cata::godot_bridge::write_window_grid( jsout, w, { .at = point( 0, 3 ), .size = point( rfkCOLS, rfkLINES - 3 ) } );
+            } else {
+                // The grand cinema scene, large: robot and kitten meet in the middle.
+                jsout.member( "cell", 48 );
+                jsout.member( "plain", true );
+                jsout.member( "grid" );
+                cata::godot_bridge::write_window_grid( jsout, w, { .at = point( rfkCOLS / 2 - 5, 1 ), .size = point( 10, 1 ) } );
+            }
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 340 );
+            jsout.member( "body" );
+            auto message = std::string();
+            if( current_ui_state == ui_state::bogus_message ) {
+                message = colorize( getmessage( bogus_message_idx ), c_white );
+            } else if( current_ui_state == ui_state::invalid_input ) {
+                message = string_format( _( "Invalid command: Use direction keys or press %s to quit." ),
+                                         ctxt.get_desc( "QUIT" ) );
+            } else if( current_ui_state == ui_state::end_animation ) {
+                message = string_format( "%s\n\n%s", end_animation_frame >= 4 ? colorize( "♥ ♥ ♥",
+                                         c_light_red ) : "",
+                                         end_animation_frame >= 5 ? _( "You found kitten!  Way to go, robot!" ) : "" );
+            } else if( current_ui_state == ui_state::main ) {
+                message = string_format( "%s\n\n%s", robot_text, job_text );
+            }
+            gs::write_span( jsout, { .text = message } );
+            // Any key starts the game and closes the ending; these press Enter.
+            if( current_ui_state == ui_state::instructions || finished ) {
+                jsout.member( "buttons" );
+                jsout.start_array();
+                gs::write_button( jsout, { .act = "CONFIRM", .text = finished ? _( "Done" ) : _( "Start" ), .icon = finished ? "check" : "play", .category = category, .primary = true } );
+                jsout.end_array();
+            }
+            jsout.end_object();
+            jsout.member( "hints" );
+            jsout.start_array();
+            if( playing ) {
+                gs::write_fixed_hint( jsout, "↑↓←→", _( "Move" ) );
+            } else if( current_ui_state == ui_state::instructions || finished ) {
+                gs::write_fixed_hint( jsout, _( "Any key" ),
+                                      current_ui_state == ui_state::instructions ? _( "Start" ) : _( "Done" ) );
+            }
+            gs::write_hint( jsout, "QUIT", category, _( "Quit" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
+    ui.on_redraw( [&]( const ui_adaptor & ) {
         show();
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+        }
+#endif
     } );
 
     /* Now the fun begins. */
@@ -435,7 +572,13 @@ void robot_finds_kitten::process_input()
         case ui_state::invalid_input:
         case ui_state::bogus_message: {
             ctxt.register_cardinal();
-            const std::string action = ctxt.handle_input();
+            auto action = ctxt.handle_input();
+#if defined(TILES)
+            // A clicked square: `row * 1000 + column` of the field, which starts below the messages.
+            if( const auto pick = cata::godot_bridge::take_pick( this ) ) {
+                action = step_action( robot.pos, point( *pick % 1000, *pick / 1000 + 3 ) );
+            }
+#endif
             if( action == "QUIT" ) {
                 current_ui_state = ui_state::exit;
             } else if( action == "ANY_INPUT" ) {

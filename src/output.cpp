@@ -34,11 +34,20 @@
 #include "rng.h"
 #include "string_formatter.h"
 #include "string_input_popup.h"
+#include "string_utils.h"
 #include "ui_manager.h"
 #include "units.h"
 #include "units_utility.h"
 #include "point.h"
 #include "wcwidth.h"
+
+#if defined(TILES)
+#include <memory>
+
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#include "json.h"
+#endif
 
 #if defined(__ANDROID__)
 #include <SDL3/SDL.h>
@@ -383,6 +392,14 @@ void scrollable_text( const std::function<catacurses::window()> &init_window,
     int max_beg_line = 0;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // The Godot front end shows the text in a scrolling card.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &text, "SCROLLABLE_TEXT" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     const auto screen_resize_cb = [&]( ui_adaptor & ui ) {
         w = init_window();
 
@@ -395,10 +412,42 @@ void scrollable_text( const std::function<catacurses::window()> &init_window,
         max_beg_line = std::max( 0, static_cast<int>( lines.size() ) - text_h );
 
         ui.position_from_window( w );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     };
     screen_resize_cb( ui );
     ui.on_screen_resize( screen_resize_cb );
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            namespace gs = cata::godot_screen;
+            native->publish( [&]( JsonOut & jsout ) {
+                const auto heading = trim( title );
+                jsout.member( "title", heading.empty() ? std::string( _( "Read" ) ) : heading );
+                jsout.member( "icon", "scroll-text" );
+                jsout.member( "size", std::array{ 900, 820 } );
+                jsout.member( "aside" );
+                jsout.start_object();
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = text, .color = c_white } );
+                jsout.member( "scroll", std::min( beg_line, max_beg_line ) );
+                jsout.member( "buttons" );
+                jsout.start_array();
+                gs::write_button( jsout, { .act = "QUIT", .text = _( "Close" ), .icon = "x", .category = "SCROLLABLE_TEXT" } );
+                jsout.end_array();
+                jsout.end_object();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Scroll" ) );
+                gs::write_hint( jsout, "PAGE_DOWN", "SCROLLABLE_TEXT", _( "Page" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         werase( w );
         draw_border( w, BORDER_COLOR, title, c_black_white );
         for( int line = beg_line, pos_y = text2.y; line < std::min<int>( beg_line + text_h, lines.size() );
@@ -1057,15 +1106,76 @@ input_event draw_item_info( const std::function<catacurses::window()> &init_wind
         return input_event();
     }
 
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", &data, "default" );
+        // Godot wraps the text itself; scroll by whole lines of the unwrapped text.
+        folded = foldstring( buffer, 1000 );
+        height = 1;
+    }
+#endif
     ui_adaptor ui;
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         init();
         ui.position_from_window( win );
     } );
     ui.mark_resize();
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                namespace gs = cata::godot_screen;
+                jsout.member( "title", remove_color_tags( data.get_item_name().empty()
+                              ? std::string( _( "Item info" ) ) : data.get_item_name() ) );
+                jsout.member( "icon", "info" );
+                if( !data.get_type_name().empty() &&
+                    data.get_item_name().find( data.get_type_name() ) == std::string::npos ) {
+                    jsout.member( "subtitle" );
+                    cata::godot_bridge::write_spans( jsout, data.get_type_name(), c_light_gray );
+                }
+                jsout.member( "size" );
+                jsout.start_array();
+                jsout.write( 900 );
+                jsout.write( 900 );
+                jsout.end_array();
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "body" );
+                cata::godot_bridge::write_spans( jsout, format_item_info( data.get_item_display(),
+                                                 data.get_item_compare() ), c_light_gray );
+                jsout.member( "scroll", *data.ptr_selected );
+                jsout.end_object();
+                jsout.end_array();
+                jsout.member( "hints" );
+                jsout.start_array();
+                if( data.handle_scrolling ) {
+                    gs::write_fixed_hint( jsout, "PgUp PgDn", _( "Scroll" ) );
+                }
+                gs::write_hint( jsout, "QUIT", "default", _( "Close" ) );
+                jsout.end_array();
+                if( data.any_input ) {
+                    jsout.member( "footer" );
+                    cata::godot_bridge::write_spans( jsout, _( "Any other key closes this too." ), c_dark_gray );
+                }
+            } );
+            return;
+        }
+#endif
         redraw();
     } );
+#if defined(TILES)
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
 
     input_context ctxt;
     if( data.handle_scrolling ) {
@@ -1084,6 +1194,15 @@ input_event draw_item_info( const std::function<catacurses::window()> &init_wind
     while( !exit ) {
         ui_manager::redraw();
         action = ctxt.handle_input();
+#if defined(TILES)
+        // Godot shows a whole page of text, so a key press scrolls several lines.
+        if( native && data.handle_scrolling && ( action == "PAGE_UP" || action == "PAGE_DOWN" ) ) {
+            // Roughly a page of text stays visible at the end.
+            const auto last = std::max( static_cast<int>( folded.size() ) - 20, 0 );
+            *data.ptr_selected = std::clamp( *data.ptr_selected + ( action == "PAGE_UP" ? -8 : 8 ), 0, last );
+            continue;
+        }
+#endif
         if( data.handle_scrolling && action == "PAGE_UP" ) {
             if( *data.ptr_selected > 0 ) {
                 --*data.ptr_selected;

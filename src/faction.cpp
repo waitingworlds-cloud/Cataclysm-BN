@@ -7,6 +7,10 @@
 #include "debug.h"
 #include "game.h"
 #include "game_constants.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "item.h"
 #include "json.h"
@@ -32,6 +36,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <string>
 #include <utility>
@@ -613,6 +618,15 @@ void faction_manager::display() const
     int entries_per_page = 0;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists each tab's entries with the chosen one's details beside them.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "FACTION MANAGER" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+    catacurses::window w_details;
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         const point term( TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 : 0,
                           TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0 );
@@ -623,6 +637,12 @@ void faction_manager::display() const
         entries_per_page = FULL_SCREEN_HEIGHT - 4;
 
         ui.position_from_window( w_missions );
+#if defined(TILES)
+        if( native ) {
+            w_details = cata::godot_bridge::capture_window( FULL_SCREEN_HEIGHT, 72 );
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -663,7 +683,157 @@ void faction_manager::display() const
     std::vector<mtype_id> creatures; // Creatures we've recorded
     mtype_id cur_creature = mtype_id::NULL_ID();
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "FACTION MANAGER" );
+        // The details as the classic screen draws them, without its key help.
+        werase( w_details );
+        auto empty = std::string();
+        switch( tab ) {
+            case tab_mode::TAB_FOLLOWERS:
+                if( guy ) {
+                    const auto retval = guy->faction_display( w_details, 1 );
+                    radio_interactable = retval == 2;
+                    interactable = retval == 1;
+                    mvwprintz( w_details, point( 0, 3 ), c_black, std::string( getmaxx( w_details ), ' ' ) );
+                    mvwprintz( w_details, point( 0, 4 ), c_black, std::string( getmaxx( w_details ), ' ' ) );
+                } else {
+                    empty = _( "You have no followers" );
+                }
+                break;
+            case tab_mode::TAB_OTHERFACTIONS:
+                if( cur_fac ) {
+                    cur_fac->faction_display( w_details, 1 );
+                } else {
+                    empty = _( "You don't know of any factions." );
+                }
+                break;
+            case tab_mode::TAB_LORE:
+                if( snippet != nullptr ) {
+                    fold_and_print( w_details, point( 1, 0 ), getmaxx( w_details ) - 2, c_light_gray,
+                                    SNIPPET.get_snippet_by_id( snippet->first ).value().translated() );
+                } else {
+                    empty = _( "You haven't learned anything about the world." );
+                }
+                break;
+            case tab_mode::TAB_CREATURES:
+                if( active_vec_size > 0 && !cur_creature.is_null() ) {
+                    cur_creature->faction_display( w_details, point( 1, 0 ), getmaxx( w_details ) - 2 );
+                } else {
+                    empty = _( "You haven't recorded sightings of any creatures.  Taking photos can be a good way to keep track of them." );
+                }
+                break;
+            default:
+                break;
+        }
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Factions" ) );
+            jsout.member( "icon", "users" );
+            jsout.member( "size", std::array{ 1340, 820 } );
+            jsout.member( "tabs" );
+            jsout.start_array();
+            const auto tab_names = std::array { _( "Your followers" ), _( "Other factions" ), _( "Lore" ), _( "Creatures" ) };
+            const auto tab_icons = std::array { "users", "flag", "book-open", "paw-print" };
+            const auto counts = std::array { followers.size(), valfac.size(), lore.size(), creatures.size() };
+            for( const auto n : std::views::iota( 0, static_cast<int>( tab_names.size() ) ) ) {
+                gs::write_tab( jsout, {
+                    .text = tab_names[n],
+                    .active = static_cast<int>( tab ) == n,
+                    .pick = gs::tab_pick + n,
+                    .icon = tab_icons[n],
+                    .count = std::to_string( counts[n] ),
+                } );
+            }
+            jsout.end_array();
+            gs::write_tab_keys( jsout, "PREV_TAB", "NEXT_TAB", category );
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", tab_names[static_cast<int>( tab )] );
+            jsout.member( "icon", tab_icons[static_cast<int>( tab )] );
+            jsout.member( "cursor", static_cast<int>( selection ) );
+            jsout.member( "confirm", tab == tab_mode::TAB_FOLLOWERS ? "CONFIRM" : "" );
+            jsout.member( "rows" );
+            jsout.start_array();
+            switch( tab ) {
+                case tab_mode::TAB_FOLLOWERS:
+                    for( const auto *f : followers ) {
+                        gs::write_row( jsout, { .text = { .text = f->disp_name(), .color = c_white } } );
+                    }
+                    break;
+                case tab_mode::TAB_OTHERFACTIONS:
+                    for( const auto *f : valfac ) {
+                        gs::write_row( jsout, { .text = { .text = _( f->name ), .color = c_white } } );
+                    }
+                    break;
+                case tab_mode::TAB_LORE:
+                    for( const auto &entry : lore ) {
+                        gs::write_row( jsout, { .text = { .text = _( entry.second ), .color = c_white } } );
+                    }
+                    break;
+                case tab_mode::TAB_CREATURES:
+                    for( const auto &id : creatures ) {
+                        gs::write_row( jsout, { .text = { .text = id->nname(), .color = c_white },
+                                                .sym = id->sym, .sym_color = string_from_color( id->color )
+                                              } );
+                    }
+                    break;
+                default:
+                    break;
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 640 );
+            jsout.member( "share", 0.55 );
+            if( empty.empty() ) {
+                jsout.member( "mono", tab != tab_mode::TAB_LORE );
+                jsout.member( "body" );
+                cata::godot_bridge::write_window_spans( jsout, w_details, { .left = 1 } );
+            } else {
+                jsout.member( "empty", empty );
+            }
+            if( tab == tab_mode::TAB_FOLLOWERS && guy ) {
+                jsout.member( "buttons" );
+                jsout.start_array();
+                gs::write_button( jsout, { .act = "SWAPTONPC", .text = _( "Take control" ), .icon = "user-round", .category = category,
+                                           .enabled = interactable
+                                         } );
+                const auto on_mission = guy->has_companion_mission();
+                gs::write_button( jsout, {
+                    .act = "CONFIRM",
+                    .text = on_mission ? _( "Call back from mission" ) : radio_interactable ? _( "Talk by radio" ) : _( "Talk" ),
+                    .icon = on_mission ? "undo-2" : radio_interactable ? "radio" : "message-circle",
+                    .category = category,
+                    .primary = true,
+                    .enabled = on_mission || interactable || radio_interactable,
+                } );
+                jsout.end_array();
+            }
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "NEXT_TAB", category, _( "Next tab" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         werase( w_missions );
 
         for( int i = 3; i < FULL_SCREEN_HEIGHT - 1; i++ ) {
@@ -870,6 +1040,23 @@ void faction_manager::display() const
 
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            namespace gs = cata::godot_screen;
+            if( *pick >= gs::tab_pick && *pick < gs::tab_pick + static_cast<int>( tab_mode::NUM_TABS ) ) {
+                tab = static_cast<tab_mode>( *pick - gs::tab_pick );
+                selection = 0;
+                continue;
+            }
+            if( *pick >= 0 && static_cast<size_t>( *pick ) < active_vec_size ) {
+                selection = static_cast<size_t>( *pick );
+                // The row's details are worked out at the top of the loop.
+                if( action != "CONFIRM" ) {
+                    continue;
+                }
+            }
+        }
+#endif
         if( action == "NEXT_TAB" || action == "RIGHT" ) {
             tab = static_cast<tab_mode>( static_cast<int>( tab ) + 1 );
             if( tab >= tab_mode::NUM_TABS ) {

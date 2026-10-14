@@ -2,6 +2,7 @@
 
 #include "avatar.h"
 #include "calendar.h"
+#include "cata_utility.h"
 #include "character_id.h"
 #include "color.h"
 #include "debug.h"
@@ -13,6 +14,10 @@
 #include "game.h"
 #include "game_constants.h"
 #include "game_inventory.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "int_id.h"
 #include "item.h"
@@ -92,12 +97,29 @@ computer_session::computer_session( computer &comp ) : comp( comp ),
 void computer_session::use()
 {
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot shows the terminal's output with buttons for what it waits for.
+    auto view = cata::godot_bridge::native_screens() ?
+                std::make_unique<cata::godot_bridge::native_view>( "screen", this, "YESNOQUIT" ) : nullptr;
+    if( view ) {
+        view->attach( ui );
+    }
+    native = view.get();
+    on_out_of_scope forget_view( [this]() {
+        native = nullptr;
+    } );
+#endif
     ui.on_screen_resize( [this]( ui_adaptor & ui ) {
         const int width = getmaxx( win );
         const int height = getmaxy( win );
         const point p( std::max( 0, ( TERMX - width ) / 2 ), std::max( 0, ( TERMY - height ) / 2 ) );
         win = catacurses::newwin( height, width, p );
         ui.position_from_window( win );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
     ui.on_redraw( [this]( const ui_adaptor & ) {
@@ -1567,8 +1589,10 @@ bool computer_session::query_any( const std::string &text, Args &&... args )
 
 bool computer_session::query_any()
 {
+    prompt = prompt_kind::any_key;
     ui_manager::redraw();
     inp_mngr.wait_for_any_key();
+    prompt = prompt_kind::none;
     return true;
 }
 
@@ -1594,6 +1618,10 @@ computer_session::ynq computer_session::query_ynq( const std::string &text, Args
                          ctxt.describe_key_and_name( "NO", allow_key ),
                          ctxt.describe_key_and_name( "QUIT", allow_key ) );
 
+    prompt = prompt_kind::yes_no_quit;
+    on_out_of_scope clear_prompt( [this]() {
+        prompt = prompt_kind::none;
+    } );
     do {
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
@@ -1611,6 +1639,12 @@ computer_session::ynq computer_session::query_ynq( const std::string &text, Args
 
 void computer_session::refresh()
 {
+#if defined(TILES)
+    if( native ) {
+        publish_native();
+        return;
+    }
+#endif
     werase( win );
     draw_border( win );
     for( size_t i = 0; i < lines.size(); ++i ) {
@@ -1620,6 +1654,47 @@ void computer_session::refresh()
     }
     wnoutrefresh( win );
 }
+
+#if defined(TILES)
+void computer_session::publish_native()
+{
+    namespace gs = cata::godot_screen;
+    const auto category = std::string( "YESNOQUIT" );
+    native->publish( [&]( JsonOut & jsout ) {
+        jsout.member( "title", comp.name );
+        jsout.member( "icon", "monitor" );
+        jsout.member( "size", std::array{ 960, 680 } );
+        jsout.member( "aside" );
+        jsout.start_object();
+        jsout.member( "mono", true );
+        // The terminal's screen: green text unless a line says otherwise.
+        const auto screen = lines
+        | std::views::transform( []( const auto & line ) { return std::string( line.first, ' ' ) + line.second; } )
+        | std::views::join_with( '\n' )
+        | std::ranges::to<std::string>();
+        jsout.member( "body" );
+        gs::write_span( jsout, { .text = screen, .color = c_green } );
+        jsout.member( "buttons" );
+        jsout.start_array();
+        if( prompt == prompt_kind::any_key ) {
+            gs::write_button( jsout, {
+                .act = "CONFIRM", .text = _( "Continue" ), .icon = "chevron-right", .category = category,
+                .primary = true
+            } );
+        } else if( prompt == prompt_kind::yes_no_quit ) {
+            gs::write_button( jsout, {
+                .act = "YES", .text = _( "Yes" ), .icon = "check", .category = category, .primary = true
+            } );
+            gs::write_button( jsout, { .act = "NO", .text = _( "No" ), .icon = "x", .category = category } );
+            gs::write_button( jsout, {
+                .act = "QUIT", .text = _( "Log off" ), .icon = "log-out", .category = category
+            } );
+        }
+        jsout.end_array();
+        jsout.end_object();
+    } );
+}
+#endif
 
 template<typename ...Args>
 void computer_session::print_indented_line( const int indent, const int text_width,

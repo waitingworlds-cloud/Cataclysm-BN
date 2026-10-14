@@ -30,6 +30,10 @@
 #include "flag.h"
 #include "game.h"
 #include "game_constants.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "gun_mode.h"
 #include "input.h"
 #include "item.h"
@@ -82,6 +86,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <string>
 #include <tuple>
@@ -504,6 +509,11 @@ class target_ui
         catacurses::window w_target;
         // Input context
         input_context ctxt;
+#if defined(TILES)
+        // Panel drawn by the Godot front end beside the map, showing what `w_target` would.
+        std::unique_ptr<cata::godot_bridge::native_view> native;
+        void publish_native();
+#endif
 
         /* These members are relevant for TargetMode::Fire */
         // Weapon sight dispersion
@@ -3017,8 +3027,20 @@ target_handler::trajectory target_ui::run()
     g->add_draw_callback( target_ui_cb );
 
     ui_adaptor ui;
+#if defined(TILES)
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", this, "TARGET" );
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         init_window_and_input();
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         ui.position_from_window( w_target );
     } );
     ui.mark_resize();
@@ -3264,7 +3286,18 @@ void target_ui::init_window_and_input()
         }
     }
 
-    w_target = catacurses::newwin( height, width, point( TERMX - width, top ) );
+#if defined(TILES)
+    if( native ) {
+        // The panel beside the map has room for the full layout.
+        narrow = false;
+        compact = false;
+        tiny = false;
+        width = 55;
+        height = 40;
+        w_target = cata::godot_bridge::capture_window( height, width );
+    } else
+#endif
+        w_target = catacurses::newwin( height, width, point( TERMX - width, top ) );
 
     ctxt = input_context( "TARGET" );
     ctxt.set_iso( true );
@@ -4095,11 +4128,23 @@ void target_ui::draw_ui_window()
         }
     }
 
-    draw_border( w_target );
-    draw_window_title();
-    draw_help_notice();
+#if defined(TILES)
+    // The Godot panel has its own title and key hints.
+    if( !native ) {
+#endif
+        draw_border( w_target );
+        draw_window_title();
+        draw_help_notice();
+#if defined(TILES)
+    }
+#endif
 
     int text_y = 1; // Skip top border
+#if defined(TILES)
+    if( native ) {
+        text_y = 0;
+    }
+#endif
 
     panel_cursor_info( text_y );
     text_y += compact ? 0 : 1;
@@ -4130,12 +4175,104 @@ void target_ui::draw_ui_window()
         }
     }
 
+#if defined(TILES)
+    // The Godot panel shows the controls as buttons and key hints instead.
+    if( native ) {
+        publish_native();
+        return;
+    }
+#endif
     if( !narrow ) {
         draw_controls_list( text_y );
     }
 
     wnoutrefresh( w_target );
 }
+
+#if defined(TILES)
+void target_ui::publish_native()
+{
+    namespace gs = cata::godot_screen;
+    const auto category = std::string( "TARGET" );
+    const auto ready = status == Status::Good;
+    const auto gun = mode == TargetMode::Fire || mode == TargetMode::TurretManual ||
+                     ( mode == TargetMode::Shape && relevant->is_gun() );
+    const auto fire_text = [&]() -> std::string {
+        switch( mode )
+        {
+            case TargetMode::Throw:
+            case TargetMode::ThrowBlind:
+            case TargetMode::ThrowCreature:
+                return _( "Throw" );
+            case TargetMode::ThrowVehicle:
+                return _( "Shove" );
+            case TargetMode::Reach:
+                return _( "Attack" );
+            case TargetMode::Spell:
+                return _( "Cast" );
+            default:
+                return _( "Fire" );
+        }
+    };
+    native->publish( [&]( JsonOut & jsout ) {
+        jsout.member( "title", remove_color_tags( uitext_title() ) );
+        jsout.member( "icon", "crosshair" );
+        jsout.member( "dock", "right" );
+        jsout.member( "size" );
+        jsout.start_array();
+        jsout.write( 500 );
+        jsout.write( 0 );
+        jsout.end_array();
+        jsout.member( "quit", "QUIT" );
+        jsout.member( "aside" );
+        jsout.start_object();
+        jsout.member( "mono", true );
+        jsout.member( "body" );
+        cata::godot_bridge::write_window_spans( jsout, w_target, { .left = 1, .width = getmaxx( w_target ) - 2 } );
+        jsout.member( "buttons" );
+        jsout.start_array();
+        if( mode == TargetMode::Fire ) {
+            for( const auto &aim : aim_types | std::views::filter( &ranged::aim_type::has_threshold ) ) {
+                gs::write_button( jsout, { .act = aim.action, .text = aim.name, .icon = "crosshair", .category = category,
+                                           .enabled = ready, .tip = aim.help
+                                         } );
+            }
+            gs::write_button( jsout, { .act = "AIM", .text = _( "Steady aim" ), .icon = "target", .category = category,
+                                       .enabled = ready
+                                     } );
+        }
+        if( gun ) {
+            gs::write_button( jsout, { .act = "SWITCH_MODE", .text = _( "Firing mode" ), .icon = "sliders-horizontal", .category = category } );
+            gs::write_button( jsout, { .act = "SWITCH_AMMO", .text = _( "Switch ammo" ), .icon = "package", .category = category } );
+        }
+        if( mode == TargetMode::Turrets ) {
+            gs::write_button( jsout, { .act = "TOGGLE_TURRET_LINES", .text = draw_turret_lines ? _( "Hide lines of fire" ) : _( "Show lines of fire" ), .icon = "route", .category = category } );
+        }
+        gs::write_button( jsout, { .act = "NEXT_TARGET", .text = _( "Next target" ), .icon = "chevrons-right", .category = category,
+                                   .enabled = !targets.empty()
+                                 } );
+        gs::write_button( jsout, { .act = "CENTER", .text = _( "Target self" ), .icon = "locate-fixed", .category = category } );
+        gs::write_button( jsout, { .act = "FIRE", .text = fire_text(), .icon = "zap", .category = category, .primary = true,
+                                   .enabled = ready
+                                 } );
+        jsout.end_array();
+        jsout.end_object();
+        jsout.member( "hints" );
+        jsout.start_array();
+        gs::write_fixed_hint( jsout, "←↑→↓",
+                              shifting_view ? _( "Shift view" ) : _( "Move cursor" ) );
+        if( is_mouse_enabled() ) {
+            gs::write_fixed_hint( jsout, _( "Click" ), _( "Target" ) );
+            gs::write_fixed_hint( jsout, _( "Right-click" ), _( "Fire" ) );
+        }
+        gs::write_hint( jsout, "TOGGLE_SNAP_TO_TARGET", category,
+                        snap_to_target ? _( "Snap: on" ) : _( "Snap: off" ) );
+        gs::write_hint( jsout, "HELP_KEYBINDINGS", category, _( "All keys" ) );
+        gs::write_hint( jsout, "QUIT", category, _( "Cancel" ) );
+        jsout.end_array();
+    } );
+}
+#endif
 
 std::string target_ui::uitext_title()
 {

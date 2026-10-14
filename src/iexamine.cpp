@@ -61,6 +61,10 @@
 #include "game_constants.h"
 #include "game_inventory.h"
 #include "handle_liquid.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "harvest.h"
 #include "input.h"
 #include "int_id.h"
@@ -944,6 +948,14 @@ void iexamine::vending( player &p, const tripoint_bub_ms &examp )
     catacurses::window w_item_info;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the machine's goods with the chosen one's details beside them.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &w, "VENDING_MACHINE" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         const point padding( std::max( 0, TERMX - FULL_SCREEN_WIDTH ) / 4, std::max( 0,
                              TERMY - FULL_SCREEN_HEIGHT ) / 6 );
@@ -962,6 +974,11 @@ void iexamine::vending( player &p, const tripoint_bub_ms &examp )
                                           padding + point( w_items_w, 0 ) );
 
         ui.position( padding, point( window_w, window_h ) );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -991,7 +1008,86 @@ void iexamine::vending( player &p, const tripoint_bub_ms &examp )
     }
 
     int cur_pos = 0;
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "VENDING_MACHINE" );
+        const auto &cur_item = *item_map[cur_pos].back();
+        const auto cur_price = cur_item.price( false );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Vending machine" ) );
+            jsout.member( "icon", "coins" );
+            jsout.member( "size", std::array{ 1240, 860 } );
+            jsout.member( "stats" );
+            jsout.start_array();
+            gs::write_stat( jsout, {
+                .icon = "coins", .label = _( "Money left" ),
+                .value = { .text = format_money( money ), .color = money > 0 ? c_light_green : c_light_red }
+            } );
+            jsout.end_array();
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "For sale" ) );
+            jsout.member( "icon", "package" );
+            jsout.member( "cursor", cur_pos );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &elem : item_map ) {
+                const auto &shown = *elem.back();
+                const auto price = shown.price( false );
+                gs::write_row( jsout, {
+                    .text = { .text = shown.tname(), .color = shown.color_in_inventory( p ) },
+                    .cells = {
+                        { .text = elem.size() > 1 ? string_format( "x%d", elem.size() ) : std::string() },
+                        { .text = format_money( price ), .color = price > money ? c_light_red : c_light_green },
+                    },
+                    .sym = shown.symbol(),
+                    .sym_color = string_from_color( shown.color() ),
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 460 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = cur_item.display_name(), .color = cur_item.color_in_inventory( p ) } );
+            jsout.member( "subtitle", format_money( cur_price ) );
+            jsout.member( "sym", cur_item.symbol() );
+            jsout.member( "sym_color", string_from_color( cur_item.color() ) );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = cur_item.info_string() } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, {
+                .act = "CONFIRM", .text = _( "Buy" ), .icon = "hand-coins", .category = category,
+                .primary = true, .enabled = cur_price <= money,
+                .tip = cur_price <= money ? std::string() : std::string( _( "You can't afford that item." ) )
+            } );
+            gs::write_button( jsout, { .act = "QUIT", .text = _( "Leave" ), .icon = "log-out", .category = category } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "CONFIRM", category, _( "Buy" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Leave" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         const int num_items = item_map.size();
         const int page_size = std::min( num_items, list_lines );
 
@@ -1068,11 +1164,18 @@ void iexamine::vending( player &p, const tripoint_bub_ms &examp )
 
         const int num_items = item_map.size();
 
+        const std::string &action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &w ) : std::nullopt;
+            pick && *pick >= 0 && *pick < num_items ) {
+            cur_pos = *pick;
+        }
+#endif
+
         // Item info
         auto &cur_items = item_map[static_cast<size_t>( cur_pos )];
         auto &cur_item  = cur_items.back();
 
-        const std::string &action = ctxt.handle_input();
         if( action == "DOWN" ) {
             cur_pos = ( cur_pos + 1 ) % num_items;
         } else if( action == "UP" ) {

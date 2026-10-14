@@ -22,6 +22,9 @@
 #include "faction.h"
 #include "flag.h"
 #include "game.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#endif
 #include "game_constants.h"
 #include "game_inventory.h"
 #include "help.h"
@@ -2199,13 +2202,33 @@ talk_topic dialogue::opt( dialogue_window &d_win, const std::string &npc_name,
 #endif
 
     ui_adaptor ui;
+#if defined(TILES)
+    // The Godot front end draws the conversation; see `dialogue_window::publish_native`.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &d_win, "DEFAULTMODE" ) :
+                  nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         d_win.resize_dialogue( ui );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
         d_win.print_header( npc_name );
+#if defined(TILES)
+        if( native ) {
+            d_win.publish_native( *native, response_lines, selected_response );
+            return;
+        }
+#endif
         d_win.display_responses( response_lines, selected_response );
     } );
 
@@ -2217,6 +2240,21 @@ talk_topic dialogue::opt( dialogue_window &d_win, const std::string &npc_name,
         do {
             ui_manager::redraw();
             ch = inp_mngr.get_input_event().get_first_input();
+#if defined(TILES)
+            // A response clicked once is selected; clicked again it arrives with Enter and is said.
+            if( const auto pick = cata::godot_bridge::take_pick( &d_win ) ) {
+                const auto click = read_dialogue_click( *pick );
+                if( click.key != 0 ) {
+                    ch = click.key;
+                } else if( click.response && *click.response < response_count ) {
+                    selected_response = *click.response;
+                    if( ch != KEY_ENTER && ch != '\n' && ch != '\r' ) {
+                        ch = -1;
+                        continue;
+                    }
+                }
+            }
+#endif
             if( ch == KEY_UP ) {
                 if( selected_response > 0 ) {
                     selected_response -= 1;

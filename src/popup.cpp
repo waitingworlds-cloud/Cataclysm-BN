@@ -6,9 +6,12 @@
 
 #include "cached_options.h"
 #include "catacharset.h"
+#include "godot_bridge.h"
 #include "ime.h"
 #include "input.h"
+#include "json.h"
 #include "output.h"
+#include "point.h"
 #include "sdl_wrappers.h"
 #include "ui_manager.h"
 
@@ -242,6 +245,49 @@ void query_popup::show() const
 std::shared_ptr<ui_adaptor> query_popup::create_or_get_adaptor( bool disable_below )
 {
     std::shared_ptr<ui_adaptor> ui = adaptor.lock();
+#if defined(TILES)
+    if( !ui && cata::godot_bridge::native_screens() ) {
+        if( disable_below ) {
+            ui = std::make_shared<ui_adaptor>( ui_adaptor::disable_uis_below{} );
+        } else {
+            ui = std::make_shared<ui_adaptor>();
+        }
+        adaptor = ui;
+        auto view = std::make_shared<cata::godot_bridge::native_view>( "popup", this, category );
+        view->attach( *ui );
+        ui->on_redraw( [this, view]( const ui_adaptor & ) {
+            using cata::godot_bridge::write_spans;
+            view->publish( [this]( JsonOut & jsout ) {
+                jsout.member( "text" );
+                write_spans( jsout, text, default_text_color );
+                jsout.member( "buttons" );
+                jsout.start_array();
+                const auto ctxt = input_context( category );
+                for( const auto &opt : options ) {
+                    const auto &events = inp_mngr.get_input_for_action( opt.action, category );
+                    const auto key = std::ranges::find_if( events, opt.filter );
+                    jsout.start_object();
+                    jsout.member( "label", ctxt.get_action_name( opt.action ) );
+                    jsout.member( "key", key == events.end() ? std::string() :
+                                  inp_mngr.get_keyname( key->get_first_input(), key->type ) );
+                    jsout.end_object();
+                }
+                jsout.end_array();
+                jsout.member( "cursor", static_cast<int>( cur ) );
+                jsout.member( "anykey", anykey );
+                jsout.member( "cancel", cancel );
+                jsout.member( "top", ontop );
+                jsout.member( "full", fullscr );
+            } );
+        } );
+        ui->on_screen_resize( []( ui_adaptor & ui ) {
+            // Godot draws the popup, so it takes no room in the curses frame.
+            ui.position( point_zero, point_zero );
+        } );
+        ui->mark_resize();
+        return ui;
+    }
+#endif
     if( !ui ) {
         if( disable_below ) {
             ui = std::make_shared<ui_adaptor>( ui_adaptor::disable_uis_below{} );
@@ -323,6 +369,12 @@ query_popup::result query_popup::query_once()
             cur = 0;
         }
     } else if( res.action == "CONFIRM" ) {
+#if defined(TILES)
+        // A button clicked in the Godot popup arrives as a pick followed by CONFIRM.
+        if( const auto pick = cata::godot_bridge::take_pick( this ) ) {
+            cur = static_cast<size_t>( *pick );
+        }
+#endif
         if( cur < options.size() ) {
             res.wait_input = false;
             res.action = options[cur].action;

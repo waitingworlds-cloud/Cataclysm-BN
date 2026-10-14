@@ -50,11 +50,14 @@ class string_editor_window
         bool _show_line_numbers = false;
         int _line_number_min_width = 2;
         int _line_number_width = 0;
+        std::string _title;
 
     public:
         struct string_editor_window_options {
             bool show_line_numbers = false;
             int line_number_min_width = 2;
+            /// Shown above the text where the editor has room for it (the Godot front end).
+            std::string title = {};
         };
 
         string_editor_window( const std::function<catacurses::window()> &create_window,
@@ -80,4 +83,7 @@ class string_editor_window
 
         /*returns line and position in folded text for position in text*/
         point get_line_and_position( const int position, const bool zero_x );
+
+        /// Codepoint index in the text shown at a cell of the folded text.
+        auto position_at( const point &cell ) const -> int;
 };

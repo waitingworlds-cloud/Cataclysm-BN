@@ -7,6 +7,8 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
+#include <ranges>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -36,6 +38,11 @@
 #include "ui_manager.h"
 #include "name.h"
 
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
+
 using namespace std::placeholders;
 
 // single instance of world generator
@@ -46,6 +53,51 @@ std::unique_ptr<worldfactory> world_generator;
   * 0 index is inclusive.
   */
 static const int max_worldname_len = 32;
+
+#if defined(TILES)
+namespace
+{
+namespace gs = cata::godot_screen;
+
+/// The three steps of making a world, as tabs; clicking another step presses the key that goes there.
+auto write_worldgen_steps( JsonOut &jsout, const int current ) -> void
+{
+    const auto steps = std::array{ _( "World Mods" ), _( "World Options" ), _( "Finalize World" ) };
+    jsout.member( "tabs" );
+    jsout.start_array();
+    for( const auto &[i, name] : steps | std::views::enumerate ) {
+        gs::write_tab( jsout, { .text = name, .active = i == current, .pick = gs::tab_pick + static_cast<int>( i ) } );
+    }
+    jsout.end_array();
+}
+
+/// Mods as rows; row `i` is the mod's index in `mods`. A list sorted by category shows them
+/// under category headings, a load order names each mod's category instead.
+auto write_mod_rows( JsonOut &jsout, const std::vector<mod_id> &mods,
+                     const bool load_order = false ) -> void
+{
+    auto last_category = std::optional<std::string>();
+    for( const auto &[i, id] : mods | std::views::enumerate ) {
+        const auto category = id.is_valid() ? std::string( _( id->category.second ) ) :
+                              std::string( _( "MISSING MODS" ) );
+        if( !load_order && category != last_category ) {
+            last_category = category;
+            gs::write_row( jsout, { .text = { .text = category, .color = c_magenta }, .heading = true } );
+        }
+        auto row = gs::row{ .text = { .text = string_format( _( "N/A [%s]" ), id.str() ), .color = c_light_red },
+                            .i = static_cast<int>( i ),
+                            .note = { .text = load_order ? category : id.str(), .color = c_dark_gray } };
+        if( id.is_valid() ) {
+            row.text = { .text = remove_color_tags( id->name() ), .color = id->obsolete ? c_dark_gray : c_white };
+            if( id->obsolete ) {
+                row.tip = _( "Obsolete" );
+            }
+        }
+        gs::write_row( jsout, row );
+    }
+}
+} // namespace
+#endif
 
 worldfactory::worldfactory()
     : active_world( nullptr )
@@ -338,7 +390,86 @@ WORLDINFO *worldfactory::pick_world( bool show_prompt, bool empty_only )
     init_windows( ui );
     ui.on_screen_resize( init_windows );
 
+#if defined(TILES)
+    // The Godot front end lists every world at once, with the chosen world's characters and mods.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "PICK_WORLD_DIALOG" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+        ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+            init_windows( ui );
+            ui.position( point_zero, point_zero );
+        } );
+        ui.position( point_zero, point_zero );
+    }
+    const auto publish_native = [&]() {
+        const auto category = std::string( "PICK_WORLD_DIALOG" );
+        const auto cursor = static_cast<int>( selpage ) * iContentHeight + static_cast<int>( sel );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Pick a world to enter game" ) );
+            jsout.member( "icon", "globe" );
+            jsout.member( "size", std::array{ 980, 640 } );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Worlds" ) );
+            jsout.member( "icon", "globe" );
+            jsout.member( "cursor", cursor );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &name : world_names ) {
+                const auto saves = static_cast<int>( get_world( name )->world_saves.size() );
+                gs::write_row( jsout, { .text = { .text = name, .color = c_white },
+                                        .note = { .text = string_format( vgettext( "%d character", "%d characters", saves ), saves ) },
+                                        .icon = "globe"
+                                      } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            const auto *world = get_world( world_names[cursor] );
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 420 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = world->world_name, .color = c_white } );
+            auto body = colorize( _( "Characters:" ), c_white ) + "\n";
+            for( const auto &save : world->world_saves ) {
+                body += save.decoded_name() + "\n";
+            }
+            if( world->world_saves.empty() ) {
+                body += colorize( _( "None!" ), c_dark_gray ) + "\n";
+            }
+            body += "\n" + colorize( _( "Mods:" ), c_white ) + "\n";
+            for( const auto &mod : world->active_mod_order ) {
+                body += ( mod.is_valid() ? remove_color_tags( mod->name() ) : mod.str() ) + "\n";
+            }
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = body } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Play in this world" ), .icon = "play", .category = category, .primary = true } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "CONFIRM", category, _( "Play" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Cancel" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_border( w_worlds_border, BORDER_COLOR, _( " WORLD SELECTION " ) );
         mvwputch( w_worlds_border, point( 0, 4 ), BORDER_COLOR, LINE_XXXO ); // |-
         mvwputch( w_worlds_border, point( iMinScreenWidth - 1, 4 ), BORDER_COLOR, LINE_XOXX ); // -|
@@ -432,6 +563,14 @@ WORLDINFO *worldfactory::pick_world( bool show_prompt, bool empty_only )
         ui_manager::redraw();
 
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick >= 0 && static_cast<size_t>( *pick ) < world_names.size() ) {
+                selpage = static_cast<size_t>( *pick / iContentHeight );
+                sel = static_cast<size_t>( *pick % iContentHeight );
+            }
+        }
+#endif
 
         if( action == "QUIT" ) {
             break;
@@ -708,7 +847,60 @@ void worldfactory::show_active_world_mods( const std::vector<mod_id> &world_mods
     ctxt.register_action( "CONFIRM" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
+#if defined(TILES)
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "DEFAULT" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+        ui.on_screen_resize( []( ui_adaptor & ui ) { ui.position( point_zero, point_zero ); } );
+        ui.position( point_zero, point_zero );
+    }
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                jsout.member( "title", _( "Active world mods" ) );
+                jsout.member( "icon", "package" );
+                jsout.member( "size", std::array{ 1200, 860 } );
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", _( "Mod Load Order" ) );
+                jsout.member( "count", std::to_string( num_mods ) );
+                jsout.member( "cursor", cursor );
+                jsout.member( "confirm", "" );
+                jsout.member( "empty", _( "--NO ACTIVE MODS--" ) );
+                jsout.member( "rows" );
+                jsout.start_array();
+                write_mod_rows( jsout, world_mods, true );
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+                jsout.member( "aside" );
+                jsout.start_object();
+                jsout.member( "width", 520 );
+                if( static_cast<size_t>( cursor ) < num_mods && world_mods[cursor].is_valid() ) {
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = remove_color_tags( world_mods[cursor]->name() ), .color = c_white } );
+                    jsout.member( "body" );
+                    gs::write_span( jsout, { .text = mman_ui->get_information( &world_mods[cursor].obj() ), .color = c_white } );
+                }
+                jsout.member( "buttons" );
+                jsout.start_array();
+                gs::write_button( jsout, { .act = "QUIT", .text = _( "Close" ), .icon = "x", .category = "DEFAULT", .primary = true } );
+                jsout.end_array();
+                jsout.end_object();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+                gs::write_hint( jsout, "QUIT", "DEFAULT", _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         draw_border( w_border, BORDER_COLOR, _( " ACTIVE WORLD MODS " ) );
         wnoutrefresh( w_border );
 
@@ -721,6 +913,15 @@ void worldfactory::show_active_world_mods( const std::vector<mod_id> &world_mods
         ui_manager::redraw();
 
         const std::string action = ctxt.handle_input();
+
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( const auto row = *pick % gs::row_stride; static_cast<size_t>( row ) < num_mods ) {
+                cursor = row;
+            }
+            continue;
+        }
+#endif
 
         if( action == "UP" ) {
             cursor--;
@@ -1003,7 +1204,147 @@ int worldfactory::show_modselection_window( const catacurses::window &win,
         }
     };
 
+#if defined(TILES)
+    // The Godot front end shows both lists side by side with the selected mod's details.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "MODMANAGER_DIALOG" ) : nullptr;
+    auto suppress = std::optional<cata::godot_bridge::curses_draw_suppression>();
+    if( native ) {
+        native->attach( ui );
+        suppress.emplace();
+        ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+            init_windows( ui );
+            ui.position( point_zero, point_zero );
+        } );
+        ui.position( point_zero, point_zero );
+    }
+    const auto publish_native = [&]() {
+        const auto category = std::string( "MODMANAGER_DIALOG" );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", standalone ? _( "Edit world mods" ) : _( "Create a world" ) );
+            jsout.member( "icon", "package" );
+            jsout.member( "size", std::array{ 1500, 940 } );
+            if( !standalone ) {
+                write_worldgen_steps( jsout, 0 );
+            }
+
+            jsout.member( "subtabs" );
+            jsout.start_array();
+            for( const auto &[i, tab] : get_mod_list_tabs() | std::views::enumerate ) {
+                gs::write_tab( jsout, { .text = _( tab.second ), .active = static_cast<size_t>( i ) == iCurrentTab,
+                                        .pick = gs::subtab_pick + static_cast<int>( i ),
+                                        .count = std::to_string( all_tabs[i].mods.size() )
+                                      } );
+            }
+            jsout.end_array();
+
+            jsout.member( "search" );
+            jsout.start_object();
+            jsout.member( "text", fpopup ? fpopup->text() : current_filter );
+            jsout.member( "typing", fpopup != nullptr );
+            jsout.member( "act", "FILTER" );
+            jsout.member( "key", cata::godot_bridge::key_label( "FILTER", category ) );
+            jsout.member( "placeholder", _( "Filter mods by name" ) );
+            jsout.end_object();
+            jsout.member( "toggles" );
+            jsout.start_array();
+            const auto toggle = [&]( const gs::button & b, const bool on ) {
+                jsout.start_object();
+                jsout.member( "act", b.act );
+                jsout.member( "text", b.text );
+                jsout.member( "icon", b.icon );
+                jsout.member( "key", cata::godot_bridge::key_label( b.act, category ) );
+                jsout.member( "on", on );
+                jsout.member( "enabled", b.enabled );
+                jsout.member( "tip", b.tip );
+                jsout.end_object();
+            };
+            toggle( { .act = "TOGGLE_SHOW_OBSOLETE", .text = _( "Show obsolete" ), .icon = "eye" },
+                    show_obsolete );
+            toggle( { .act = "SAVE_DEFAULT_MODS", .text = _( "Save as default" ), .icon = "save",
+                      .tip = _( "Use these mods for new worlds from now on" ) }, false );
+            jsout.end_array();
+
+            const auto &current_tab = all_tabs[iCurrentTab];
+            jsout.member( "active_pane", static_cast<int>( active_header ) );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", headers[0] );
+            jsout.member( "icon", "layers" );
+            jsout.member( "count", std::to_string( current_tab.mods.size() ) );
+            jsout.member( "cursor", static_cast<int>( cursel[0] ) );
+            jsout.member( "empty", current_tab.mods_unfiltered.empty() ? _( "--NO AVAILABLE MODS--" ) :
+                          _( "--NO MATCHES--" ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            write_mod_rows( jsout, current_tab.mods );
+            jsout.end_array();
+            jsout.end_object();
+            jsout.start_object();
+            jsout.member( "title", headers[1] );
+            jsout.member( "icon", "list-checks" );
+            jsout.member( "count", std::to_string( active_mod_order.size() ) );
+            jsout.member( "cursor", static_cast<int>( cursel[1] ) );
+            jsout.member( "empty", _( "--NO ACTIVE MODS--" ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            write_mod_rows( jsout, active_mod_order, true );
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 480 );
+            jsout.member( "empty", _( "Select a mod to read about it." ) );
+            const auto *selmod = get_selected_mod();
+            if( selmod != nullptr ) {
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = remove_color_tags( selmod->name() ), .color = c_white } );
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = mman_ui->get_information( selmod ), .color = c_white } );
+            }
+            jsout.member( "buttons" );
+            jsout.start_array();
+            if( selmod != nullptr && active_header == 0 ) {
+                gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Add mod" ), .icon = "plus", .category = category } );
+            } else if( selmod != nullptr ) {
+                gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Remove mod" ), .icon = "minus", .category = category } );
+                gs::write_button( jsout, { .act = "ADD_MOD", .text = _( "Load earlier" ), .icon = "arrow-up", .category = category,
+                                           .enabled = mman_ui->can_shift_up( cursel[1], active_mod_order )
+                                         } );
+                gs::write_button( jsout, { .act = "REMOVE_MOD", .text = _( "Load later" ), .icon = "arrow-down", .category = category,
+                                           .enabled = mman_ui->can_shift_down( cursel[1], active_mod_order )
+                                         } );
+            }
+            if( standalone ) {
+                gs::write_button( jsout, { .act = "QUIT", .text = _( "Done" ), .icon = "check", .category = category, .primary = true } );
+            } else {
+                gs::write_button( jsout, { .act = "NEXT_TAB", .text = _( "Next: World Options" ), .icon = "chevron-right", .category = category, .primary = true } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Switch list" ) );
+            gs::write_hint( jsout, "CONFIRM", category, active_header == 0 ? _( "Add" ) : _( "Remove" ) );
+            gs::write_hint( jsout, "NEXT_CATEGORY_TAB", category, _( "Category" ) );
+            gs::write_hint( jsout, "QUIT", category, standalone ? _( "Done" ) : _( "Cancel" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         if( standalone ) {
             draw_empty_worldgen_tabs( win );
         } else {
@@ -1137,6 +1478,38 @@ int worldfactory::show_modselection_window( const catacurses::window &win,
         }
 
         const std::string action = ctxt.handle_input();
+
+#if defined(TILES)
+        // Clicks in Godot: a step, a category, or a mod in either list (the pressed action follows).
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick >= gs::subtab_pick ) {
+                const auto tab = static_cast<size_t>( *pick - gs::subtab_pick );
+                if( tab < all_tabs.size() ) {
+                    active_header = 0;
+                    iCurrentTab = tab;
+                    startsel[0] = 0;
+                    cursel[0] = 0;
+                }
+                continue;
+            }
+            if( *pick >= gs::tab_pick ) {
+                if( !standalone && *pick > gs::tab_pick ) {
+                    tab_output = 1;
+                }
+                continue;
+            }
+            const auto list = static_cast<size_t>( *pick / gs::row_stride );
+            const auto row = static_cast<size_t>( *pick % gs::row_stride );
+            const auto size = list == 0 ? all_tabs[iCurrentTab].mods.size() : active_mod_order.size();
+            if( list > 1 || row >= size ) {
+                continue;
+            }
+            active_header = list;
+            cursel[list] = row;
+            selection = row;
+            last_selection = row;
+        }
+#endif
 
         if( action == "DOWN" ) {
             selection = next_selection;
@@ -1307,7 +1680,80 @@ int worldfactory::show_worldgen_tab_confirm( const catacurses::window &win, WORL
     // do not switch IME mode now, but restore previous mode on return
     ime_sentry sentry( ime_sentry::keep );
 
+#if defined(TILES)
+    // The Godot front end shows the name field, the save format and the step tabs itself.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this,
+                          "WORLDGEN_CONFIRM_DIALOG" ) : nullptr;
+    auto suppress = std::optional<cata::godot_bridge::curses_draw_suppression>();
+    if( native ) {
+        native->attach( ui );
+        suppress.emplace();
+        ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+            init_windows( ui );
+            ui.position( point_zero, point_zero );
+        } );
+        ui.position( point_zero, point_zero );
+    }
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            const auto category = std::string( "WORLDGEN_CONFIRM_DIALOG" );
+            const auto v2 = world->world_save_format == save_format::V2_COMPRESSED_SQLITE3;
+            native->publish( [&]( JsonOut & jsout ) {
+                jsout.member( "title", _( "Create a world" ) );
+                jsout.member( "icon", "globe" );
+                jsout.member( "size", std::array{ 980, 640 } );
+                write_worldgen_steps( jsout, 2 );
+                jsout.member( "search" );
+                jsout.start_object();
+                jsout.member( "text", spopup.text() );
+                jsout.member( "typing", true );
+                jsout.member( "icon", "pencil" );
+                jsout.member( "label", _( "World Name:" ) );
+                jsout.member( "placeholder", noname ? _( "________NO NAME ENTERED!________" ) : "" );
+                jsout.end_object();
+                jsout.member( "toggles" );
+                jsout.start_array();
+                const auto toggle = [&]( const gs::button & b, const bool on ) {
+                    jsout.start_object();
+                    jsout.member( "act", b.act );
+                    jsout.member( "text", b.text );
+                    jsout.member( "icon", b.icon );
+                    jsout.member( "key", cata::godot_bridge::key_label( b.act, category ) );
+                    jsout.member( "on", on );
+                    jsout.end_object();
+                };
+                toggle( { .act = "PICK_RANDOM_WORLDNAME", .text = _( "Random name" ), .icon = "dices" }, false );
+                toggle( { .act = "TOGGLE_V2_SAVE_FORMAT", .text = _( "V2 save format" ), .icon = "save" }, v2 );
+                jsout.end_array();
+                jsout.member( "aside" );
+                jsout.start_object();
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = v2 ? _( "Save Format: V2 (Current)" ) : _( "Save Format: V1 (Legacy)" ), .color = c_white } );
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = _( "<color_light_blue>V2 format shrinks save files and reduces save corruption. "
+                                                    "V1 is the legacy format. You can convert existing V1 worlds to V2 from the main menu. "
+                                                    "V2 worlds cannot currently be converted back to V1.</color>" ), .color = c_light_gray
+                                       } );
+                jsout.member( "buttons" );
+                jsout.start_array();
+                gs::write_button( jsout, { .act = "PREV_TAB", .text = _( "Back" ), .icon = "chevron-left", .category = category } );
+                gs::write_button( jsout, { .act = "NEXT_TAB", .text = _( "Create world" ), .icon = "check", .category = category, .primary = true } );
+                jsout.end_array();
+                jsout.end_object();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_hint( jsout, "NEXT_TAB", category, _( "Create" ) );
+                gs::write_hint( jsout, "PREV_TAB", category, _( "Back" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Cancel" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         draw_worldgen_tabs( win, 2 );
         wnoutrefresh( win );
 
@@ -1353,7 +1799,15 @@ int worldfactory::show_worldgen_tab_confirm( const catacurses::window &win, WORL
         ui_manager::redraw();
 
         worldname = spopup.query_string( false, false, true );
-        const std::string action = ctxt.input_to_action( ctxt.get_raw_input() );
+        auto action = ctxt.input_to_action( ctxt.get_raw_input() );
+#if defined(TILES)
+        // A click on another step goes back (World Mods, World Options) or on (Finalize World).
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick >= gs::tab_pick && *pick < gs::tab_pick + 2 ) {
+                action = "PREV_TAB";
+            }
+        }
+#endif
         if( action == "NEXT_TAB" ) {
             if( worldname.empty() ) {
                 noname = true;

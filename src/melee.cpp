@@ -24,6 +24,9 @@
 #include "game.h"
 #include "game_constants.h"
 #include "game_inventory.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#endif
 #include "item.h"
 #include "item_contents.h"
 #include "itype.h"
@@ -812,6 +815,14 @@ auto technique_unavailable_reason( Character &self, Creature &target,
 
 auto show_technique_reference_popup( const std::string &text ) -> void
 {
+#if defined(TILES)
+    // The Godot front end shows the text in its scrolling card.
+    if( cata::godot_bridge::native_screens() ) {
+        const auto init_window = []() { return new_centered_win( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH ); };
+        scrollable_text( init_window, _( " Technique Reference " ), text );
+        return;
+    }
+#endif
     auto window = catacurses::window();
     auto selected = 0;
     auto text_lines = 0;

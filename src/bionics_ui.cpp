@@ -13,6 +13,10 @@
 #include "enum_conversions.h"
 #include "flat_set.h"
 #include "game.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "inventory.h"
 #include "make_static.h"
@@ -20,6 +24,7 @@
 #include "output.h"
 #include "string_formatter.h"
 #include "string_id.h"
+#include "string_utils.h"
 #include "translations.h"
 #include "ui.h"
 #include "ui_manager.h"
@@ -187,13 +192,13 @@ char get_free_invlet( bionic_collection &bionics )
     return ' ';
 }
 
-static void draw_bionics_titlebar( const catacurses::window &window, Character *who,
-                                   bionic_menu_mode mode )
+namespace
 {
-    input_context ctxt( "BIONICS" );
-    static const flag_id json_flag_PERPETUAL( "PERPETUAL" );
 
-    werase( window );
+/// "Available Fuel: ..." for the fuels the bionics can draw on, or empty when there are none.
+auto bionic_fuel_text( Character *who ) -> std::string
+{
+    static const flag_id json_flag_PERPETUAL( "PERPETUAL" );
     std::string fuel_string;
     bool found_fuel = false;
     fuel_string = _( "Available Fuel: " );
@@ -229,6 +234,12 @@ static void draw_bionics_titlebar( const catacurses::window &window, Character *
     if( !found_fuel ) {
         fuel_string.clear();
     }
+    return fuel_string;
+}
+
+/// Stored bionic power, such as "1.250kJ".
+auto bionic_power_text( Character *who ) -> std::string
+{
     std::string power_string;
     const int curr_power = units::to_joule( who->get_power_level() );
     const int kilo = curr_power / units::to_joule( 1_kJ );
@@ -243,6 +254,19 @@ static void draw_bionics_titlebar( const catacurses::window &window, Character *
         power_string = std::to_string( joule );
         power_string += pgettext( "energy unit: joule", "J" );
     }
+    return power_string;
+}
+
+} // namespace
+
+static void draw_bionics_titlebar( const catacurses::window &window, Character *who,
+                                   bionic_menu_mode mode )
+{
+    input_context ctxt( "BIONICS" );
+
+    werase( window );
+    std::string fuel_string = bionic_fuel_text( who );
+    const std::string power_string = bionic_power_text( who );
 
     const int pwr_str_pos = right_print( window, 1, 1, c_white,
                                          string_format( _( "Bionic Power: <color_light_blue>%s</color>/<color_light_blue>%ikJ</color>" ),
@@ -575,11 +599,26 @@ void show_bionics_ui( Character &who )
 
     bool hide = false;
     ui_adaptor ui;
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    const auto make_native = [&]() {
+        if( cata::godot_bridge::native_screens() ) {
+            native = std::make_unique<cata::godot_bridge::native_view>( "screen", &bionics, "BIONICS" );
+            native->attach( ui );
+        }
+    };
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         if( hide ) {
             ui.position( point_zero, point_zero );
             return;
         }
+#if defined(TILES)
+        if( cata::godot_bridge::native_screens() ) {
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         // Main window
         /** Total required height is:
          * top frame line:                                         + 1
@@ -655,6 +694,125 @@ void show_bionics_ui( Character &who )
         }
 
         sorted_bionics *current_bionic_list = ( tab_mode == TAB_ACTIVE ? &active : &passive );
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                namespace gs = cata::godot_screen;
+                const auto category = std::string( "BIONICS" );
+                jsout.member( "title", _( "Bionics" ) );
+                jsout.member( "icon", "cpu" );
+                jsout.member( "size" );
+                jsout.start_array();
+                jsout.write( 1240 );
+                jsout.write( 860 );
+                jsout.end_array();
+                jsout.member( "subtitle" );
+                gs::write_span( jsout, { .text = menu_mode == REASSIGNING ? _( "Reassigning: choose a bionic to give it another letter." ) : menu_mode == EXAMINING ? _( "Examining: choosing a bionic shows it without using it." ) : _( "Choosing a bionic turns it on or off." ), .color = menu_mode == REASSIGNING ? c_yellow : c_light_gray } );
+                jsout.member( "stats" );
+                jsout.start_array();
+                gs::write_stat( jsout, { .icon = "zap", .label = _( "Power" ), .value = { .text = string_format( "%s / %ikJ", bionic_power_text( &who ), units::to_kilojoule( who.get_max_power_level() ) ), .color = c_light_blue } } );
+                jsout.end_array();
+                jsout.member( "tabs" );
+                jsout.start_array();
+                gs::write_tab( jsout, { .text = _( "Active" ), .active = tab_mode == TAB_ACTIVE, .pick = gs::tab_pick, .icon = "power", .count = std::to_string( active.size() ) } );
+                gs::write_tab( jsout, { .text = _( "Passive" ), .active = tab_mode == TAB_PASSIVE, .pick = gs::tab_pick + 1, .icon = "shield", .count = std::to_string( passive.size() ) } );
+                jsout.end_array();
+                gs::write_tab_keys( jsout, "PREV_TAB", "NEXT_TAB", category );
+                const auto toggle = [&]( const gs::button & b, const bool on ) {
+                    jsout.start_object();
+                    jsout.member( "act", b.act );
+                    jsout.member( "text", b.text );
+                    jsout.member( "icon", b.icon );
+                    jsout.member( "key", cata::godot_bridge::key_label( b.act, category ) );
+                    jsout.member( "on", on );
+                    jsout.end_object();
+                };
+                jsout.member( "toggles" );
+                jsout.start_array();
+                toggle( { .act = "TOGGLE_EXAMINE", .text = _( "Examine mode" ), .icon = "eye" }, menu_mode ==
+                        EXAMINING );
+                toggle( { .act = "REASSIGN", .text = _( "Reassign letter" ), .icon = "keyboard" }, menu_mode ==
+                        REASSIGNING );
+                toggle( { .act = "SORT", .text = string_format( _( "Sort: %s" ), sort_mode_str( uistate.bionic_sort_mode ) ), .icon = "arrow-up-down" },
+                        false );
+                jsout.end_array();
+
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", tab_mode == TAB_ACTIVE ? _( "Active bionics" ) : _( "Passive bionics" ) );
+                jsout.member( "icon", "cpu" );
+                jsout.member( "cursor", cursor );
+                jsout.member( "empty", tab_mode == TAB_ACTIVE ? _( "No activatable bionics installed." ) :
+                              _( "No passive bionics installed." ) );
+                jsout.member( "rows" );
+                jsout.start_array();
+                for( const auto *bio : *current_bionic_list ) {
+                    gs::write_row( jsout, {
+                        .text = { .text = bio->id->name.translated(), .color = get_bionic_text_color( *bio, false ) },
+                        .cells = { { .text = build_bionic_poweronly_string( *bio ) } },
+                        .key = std::string( 1, bio->invlet ),
+                    } );
+                }
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+
+                if( !current_bionic_list->empty() ) {
+                    const auto &bio = *( *current_bionic_list )[cursor];
+                    auto body = std::string( colorize( bio.id->description.translated(), c_light_blue ) );
+                    if( bio.info().has_flag( flag_MULTIINSTALL ) && who.count_bionic_of_type( bio.id ) != 1 ) {
+                        body += "\n\n" + colorize( string_format( _( "You have %s instances of this bionic installed." ),
+                                                   who.count_bionic_of_type( bio.id ) ), c_magenta );
+                    }
+                    if( get_option<bool>( "CBM_SLOTS_ENABLED" ) ) {
+                        body += "\n\n" + list_occupied_bps( bio.id, _( "This bionic occupies the following body parts:" ),
+                                                            true );
+                    }
+                    const auto fueled = !bio.info().fuel_opts.empty() || bio.info().is_remote_fueled;
+                    jsout.member( "aside" );
+                    jsout.start_object();
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = bio.id->name.translated(), .color = c_white } );
+                    jsout.member( "icon", "cpu" );
+                    jsout.member( "subtitle", build_bionic_poweronly_string( bio ) );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_spans( jsout, body, c_light_gray );
+                    jsout.member( "buttons" );
+                    jsout.start_array();
+                    if( menu_mode == ACTIVATING && bio.id->activated ) {
+                        gs::write_button( jsout, { .act = "CONFIRM", .text = bio.powered ? _( "Turn off" ) : _( "Turn on" ), .icon = "power", .category = category, .primary = true } );
+                    }
+                    gs::write_button( jsout, { .act = "TOGGLE_SAFE_FUEL", .text = _( "Fuel saving" ), .icon = "fuel", .category = category, .enabled = fueled } );
+                    gs::write_button( jsout, { .act = "TOGGLE_AUTO_START", .text = _( "Auto start" ), .icon = "timer", .category = category, .enabled = fueled } );
+                    gs::write_button( jsout, { .act = "TOGGLE_SPRITE", .text = bio.show_sprite ? _( "Hide sprite" ) : _( "Show sprite" ), .icon = "user", .category = category } );
+                    jsout.end_array();
+                    jsout.end_object();
+                }
+                if( get_option<bool>( "CBM_SLOTS_ENABLED" ) || !bionic_fuel_text( &who ).empty() ) {
+                    auto slots = std::vector<std::string>();
+                    if( get_option<bool>( "CBM_SLOTS_ENABLED" ) ) {
+                        for( const bodypart_id &bp : who.get_all_body_parts() ) {
+                            const auto total = who.get_total_bionics_slots( bp );
+                            slots.push_back( string_format( "%s %d/%d", body_part_name_as_heading( bp->token, 1 ),
+                                                            total - who.get_free_bionics_slots( bp ), total ) );
+                        }
+                    }
+                    jsout.member( "footer" );
+                    gs::write_span( jsout, { .text = join( slots, "   " ) + ( slots.empty() ? "" : "   " ) + bionic_fuel_text( &who ), .color = c_light_gray } );
+                }
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+                gs::write_hint( jsout, "CONFIRM", category,
+                                menu_mode == ACTIVATING ? _( "Turn on or off" ) : _( "Choose" ) );
+                gs::write_fixed_hint( jsout, "a-z", _( "Bionic by letter" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
 
         werase( wBio );
         draw_border( wBio, BORDER_COLOR, _( " BIONICS " ) );
@@ -729,6 +887,9 @@ void show_bionics_ui( Character &who )
         }
     } );
 
+#if defined(TILES)
+    make_native();
+#endif
     for( ;; ) {
         ui_manager::redraw();
 
@@ -749,6 +910,22 @@ void show_bionics_ui( Character &who )
         const std::string action = ctxt.handle_input();
         const int ch = ctxt.get_raw_input().get_first_input();
         bionic *tmp = nullptr;
+#if defined(TILES)
+        if( const auto pick = cata::godot_bridge::take_pick( &bionics ) ) {
+            namespace gs = cata::godot_screen;
+            if( *pick >= gs::tab_pick ) {
+                const auto picked = *pick == gs::tab_pick ? TAB_ACTIVE : TAB_PASSIVE;
+                if( picked != tab_mode ) {
+                    tab_mode = picked;
+                    cursor = 0;
+                    scroll_position = 0;
+                }
+                continue;
+            }
+            cursor = std::clamp( *pick % gs::row_stride, 0,
+                                 std::max( static_cast<int>( current_bionic_list->size() ) - 1, 0 ) );
+        }
+#endif
 
         if( action == "DOWN" ) {
             if( static_cast<size_t>( cursor ) < current_bionic_list->size() - 1 ) {
@@ -906,6 +1083,9 @@ void show_bionics_ui( Character &who )
                 if( bio_data.activated ) {
                     hide = true;
                     ui.mark_resize();
+#if defined(TILES)
+                    native.reset();
+#endif
                     if( tmp->powered ) {
                         who.deactivate_bionic( *tmp );
                     } else {
@@ -918,6 +1098,9 @@ void show_bionics_ui( Character &who )
                     }
                     hide = false;
                     ui.mark_resize();
+#if defined(TILES)
+                    make_native();
+#endif
                     g->invalidate_main_ui_adaptor();
                     if( who.moves < 0 ) {
                         return;

@@ -7,6 +7,10 @@
 
 #include "character.h"
 #include "enums.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "inventory.h"
 #include "mutation.h"
@@ -209,7 +213,24 @@ detail::mutations_ui_result detail::show_mutations_ui_internal( Character &who )
     };
 
     ui_adaptor ui;
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", &who.my_mutations,
+                 "MUTATIONS" );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            // Godot's lists scroll by themselves.
+            HEIGHT = mutations_count + list_start_y + 1;
+            DESCRIPTION_LINE_Y = HEIGHT;
+            recalc_max_scroll_position();
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         HEIGHT = std::min( TERMY, std::max( FULL_SCREEN_HEIGHT,
                                             TITLE_HEIGHT + mutations_count + DESCRIPTION_HEIGHT + 5 ) );
         WIDTH = FULL_SCREEN_WIDTH + ( TERMX - FULL_SCREEN_WIDTH ) / 2;
@@ -259,6 +280,116 @@ detail::mutations_ui_result detail::show_mutations_ui_internal( Character &who )
     std::optional<trait_id> examine_id;
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                namespace gs = cata::godot_screen;
+                const auto category = std::string( "MUTATIONS" );
+                jsout.member( "title", _( "Mutations" ) );
+                jsout.member( "icon", "dna" );
+                jsout.member( "size" );
+                jsout.start_array();
+                jsout.write( 1240 );
+                jsout.write( 860 );
+                jsout.end_array();
+                jsout.member( "subtitle" );
+                gs::write_span( jsout, { .text = menu_mode == mutation_menu_mode::reassigning ? _( "Reassigning: choose a mutation to give it another letter." ) : menu_mode == mutation_menu_mode::examining ? _( "Examining: choosing a mutation shows it without using it." ) : menu_mode == mutation_menu_mode::hiding ? _( "Hiding: choosing a mutation shows or hides its sprite." ) : _( "Choosing an active mutation starts or stops it." ), .color = menu_mode == mutation_menu_mode::activating ? c_light_gray : c_yellow } );
+                const auto toggle = [&]( const gs::button & b, const bool on ) {
+                    jsout.start_object();
+                    jsout.member( "act", b.act );
+                    jsout.member( "text", b.text );
+                    jsout.member( "icon", b.icon );
+                    jsout.member( "key", cata::godot_bridge::key_label( b.act, category ) );
+                    jsout.member( "on", on );
+                    jsout.end_object();
+                };
+                jsout.member( "toggles" );
+                jsout.start_array();
+                toggle( { .act = "TOGGLE_EXAMINE", .text = _( "Examine mode" ), .icon = "eye" }, menu_mode ==
+                        mutation_menu_mode::examining );
+                toggle( { .act = "REASSIGN", .text = _( "Reassign letter" ), .icon = "keyboard" }, menu_mode ==
+                        mutation_menu_mode::reassigning );
+                toggle( { .act = "TOGGLE_SPRITE", .text = _( "Show or hide sprites" ), .icon = "user" }, menu_mode
+                        == mutation_menu_mode::hiding );
+                jsout.end_array();
+
+                jsout.member( "active_pane", tab_mode == mutation_tab_mode::active ? 1 : tab_mode ==
+                              mutation_tab_mode::passive ? 0 : -1 );
+                jsout.member( "panes" );
+                jsout.start_array();
+                for( const auto is_active : { false, true } ) {
+                    const auto &list = is_active ? active : passive;
+                    jsout.start_object();
+                    jsout.member( "title", is_active ? _( "Active" ) : _( "Passive" ) );
+                    jsout.member( "icon", is_active ? "zap" : "dna" );
+                    jsout.member( "cursor", ( tab_mode == mutation_tab_mode::active ) == is_active ? cursor : -1 );
+                    jsout.member( "empty", _( "None" ) );
+                    jsout.member( "rows" );
+                    jsout.start_array();
+                    for( const auto &id : list ) {
+                        const mutation_branch &md = id.obj();
+                        const char_trait_data &td = who.my_mutations[id];
+                        const auto base = who.has_base_trait( id );
+                        auto color = base ? c_cyan : c_light_cyan;
+                        auto cells = std::vector<gs::span>();
+                        if( is_active ) {
+                            color = td.powered ? ( base ? c_green : c_light_green ) : ( base ? c_red : c_light_red );
+                            auto cost = std::string();
+                            if( md.cost > 0 && md.cooldown > 0 ) {
+                                cost = string_format( _( "%d RU / %d turns" ), md.cost, md.cooldown );
+                            } else if( md.cost > 0 ) {
+                                cost = string_format( _( "%d RU" ), md.cost );
+                            } else if( md.cooldown > 0 ) {
+                                cost = string_format( _( "%d turns" ), md.cooldown );
+                            }
+                            cells.push_back( { .text = cost } );
+                            cells.push_back( { .text = td.powered ? _( "Active" ) : "", .color = c_light_green } );
+                        }
+                        gs::write_row( jsout, {
+                            .text = { .text = md.name(), .color = color },
+                            .cells = cells,
+                            .icon = td.show_sprite ? "" : "eye-off",
+                            .icon_color = "c_cyan",
+                            .tip = td.show_sprite ? "" : _( "Sprite hidden" ),
+                            .key = std::string( 1, td.key ),
+                        } );
+                    }
+                    jsout.end_array();
+                    jsout.end_object();
+                }
+                jsout.end_array();
+
+                const auto &list = tab_mode == mutation_tab_mode::active ? active : passive;
+                if( tab_mode != mutation_tab_mode::none && cursor < static_cast<int>( list.size() ) ) {
+                    const auto &id = list[cursor];
+                    const mutation_branch &md = id.obj();
+                    jsout.member( "aside" );
+                    jsout.start_object();
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = md.name(), .color = c_white } );
+                    jsout.member( "icon", tab_mode == mutation_tab_mode::active ? "zap" : "dna" );
+                    jsout.member( "subtitle", who.has_base_trait( id ) ? _( "Starting trait" ) : _( "Mutation" ) );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_spans( jsout, md.desc(), c_light_blue );
+                    jsout.member( "buttons" );
+                    jsout.start_array();
+                    if( tab_mode == mutation_tab_mode::active && menu_mode == mutation_menu_mode::activating ) {
+                        gs::write_button( jsout, { .act = "CONFIRM", .text = who.my_mutations[id].powered ? _( "Stop using" ) : _( "Use" ), .icon = "power", .category = category, .primary = true } );
+                    }
+                    jsout.end_array();
+                    jsout.end_object();
+                }
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+                gs::write_hint( jsout, "NEXT_TAB", category, _( "Other list" ) );
+                gs::write_fixed_hint( jsout, "a-z", _( "Mutation by letter" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         werase( wBio );
         draw_border( wBio, BORDER_COLOR, _( " MUTATIONS " ) );
         // Draw line under title
@@ -357,6 +488,11 @@ detail::mutations_ui_result detail::show_mutations_ui_internal( Character &who )
         }
     } );
 
+#if defined(TILES)
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     mutations_ui_result ret;
     bool exit = false;
     while( !exit ) {
@@ -364,6 +500,19 @@ detail::mutations_ui_result detail::show_mutations_ui_internal( Character &who )
         ui_manager::redraw();
         bool handled = false;
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = cata::godot_bridge::take_pick( &who.my_mutations ) ) {
+            namespace gs = cata::godot_screen;
+            const auto is_active = *pick / gs::row_stride == 1;
+            const auto &list = is_active ? active : passive;
+            const auto row = *pick % gs::row_stride;
+            if( row < static_cast<int>( list.size() ) ) {
+                tab_mode = is_active ? mutation_tab_mode::active : mutation_tab_mode::passive;
+                cursor = row;
+                examine_id = list[row];
+            }
+        }
+#endif
         const input_event evt = ctxt.get_raw_input();
         if( evt.type == input_event_t::keyboard && !evt.sequence.empty() ) {
             const int ch = evt.get_first_input();

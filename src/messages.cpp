@@ -1,4 +1,5 @@
 #include "messages.h"
+#include "message_log_view.h"
 #include "message_types.h"
 #include "calendar.h"
 #include "catacharset.h"
@@ -25,6 +26,11 @@
 #include <SDL3/SDL.h>
 #endif
 #include "options.h"
+
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 
 #include <algorithm>
 #include <deque>
@@ -319,6 +325,34 @@ bool message_exceeds_ttl( const game_message &message )
 
 } //namespace
 
+auto Messages::sidebar_lines( const std::size_t count ) -> std::vector<log_line>
+{
+    auto lines = std::vector<log_line>();
+    for( auto i = static_cast<int>( player_messages.messages.size() ) - 1;
+         i >= 0 && lines.size() < count; --i ) {
+        const auto &m = player_messages.messages[i];
+        if( message_exceeds_ttl( m ) ) {
+            break;
+        }
+        if( m.is_in_cooldown() ) {
+            continue;
+        }
+        auto text = m.get_with_count();
+        if( !m.is_recent( player_messages.curmes ) ) {
+            text = remove_color_tags( text );
+        }
+        lines.push_back( {
+            .time = to_string_time_of_day( m.turn() ),
+            .text = std::move( text ),
+            .color = m.get_color( player_messages.curmes ),
+            .fresh = m.is_new( player_messages.curmes ),
+        } );
+    }
+    std::ranges::reverse( lines );
+    player_messages.curmes = calendar::turn;
+    return lines;
+}
+
 std::vector<std::pair<std::string, std::string>> Messages::recent_messages( const size_t count )
 {
     return player_messages.recent_messages( count );
@@ -445,6 +479,12 @@ class dialog
         std::optional<ime_sentry> filter_sentry;
 
         bool first_init = true;
+
+#if defined(TILES)
+        /// Set while the Godot front end draws the log.
+        std::unique_ptr<cata::godot_bridge::native_view> native;
+        auto publish_native() -> void;
+#endif
 };
 } // namespace Messages
 
@@ -789,16 +829,140 @@ void Messages::dialog::input( const ui_adaptor &ui )
     }
 }
 
+#if defined(TILES)
+auto Messages::dialog::publish_native() -> void
+{
+    namespace gs = cata::godot_screen;
+    native->publish( [&]( JsonOut & jsout ) {
+        const auto category = std::string( "MESSAGE_LOG" );
+        // One entry per message, in the order the curses log lists their lines.
+        auto shown = std::vector<size_t>();
+        for( const auto folded_ind : folded_filtered ) {
+            const auto msg_ind = folded_all[folded_ind].first;
+            if( shown.empty() || shown.back() != msg_ind ) {
+                shown.push_back( msg_ind );
+            }
+        }
+        const auto total = size();
+        jsout.member( "title", _( "Messages" ) );
+        jsout.member( "icon", "message-square" );
+        jsout.member( "subtitle" );
+        gs::write_span( jsout, { .text = filter_str.empty() ? string_format( _( "%d messages" ), total ) : string_format( _( "%1$d of %2$d messages match" ), shown.size(), total ) } );
+        jsout.member( "size" );
+        jsout.start_array();
+        jsout.write( 1100 );
+        jsout.write( 920 );
+        jsout.end_array();
+
+        jsout.member( "search" );
+        jsout.start_object();
+        jsout.member( "text", filtering ? filter.text() : filter_str );
+        jsout.member( "typing", filtering );
+        jsout.member( "act", "FILTER" );
+        jsout.member( "key", cata::godot_bridge::key_label( "FILTER", category ) );
+        jsout.member( "placeholder", _( "Filter messages, or type:text such as bad:" ) );
+        jsout.end_object();
+        jsout.member( "toggles" );
+        jsout.start_array();
+        const auto toggle = [&]( const std::string & act, const std::string & text,
+        const std::string & icon ) {
+            jsout.start_object();
+            jsout.member( "act", act );
+            jsout.member( "text", text );
+            jsout.member( "icon", icon );
+            jsout.member( "key", cata::godot_bridge::key_label( act, category ) );
+            jsout.end_object();
+        };
+        if( !filter_str.empty() ) {
+            toggle( "RESET_FILTER", _( "Clear filter" ), "x" );
+        }
+        toggle( "COPY_MESSAGE", _( "Copy" ), "scroll-text" );
+        toggle( "ERASE_HISTORY", _( "Erase history" ), "trash" );
+        jsout.end_array();
+
+        jsout.member( "panes" );
+        jsout.start_array();
+        jsout.start_object();
+        jsout.member( "empty", filter_str.empty() ? _( "No messages yet." ) : _( "No messages match." ) );
+        jsout.member( "entries" );
+        jsout.start_array();
+        for( const auto msg_ind : shown ) {
+            const auto &msg = player_messages.history( msg_ind );
+            jsout.start_object();
+            jsout.member( "time", trim( to_string_clipped( calendar::turn - msg.timestamp_in_turns,
+                                        clipped_align::right ) ) );
+            jsout.member( "text" );
+            gs::write_span( jsout, { .text = msg.get_with_count(), .color = msgtype_to_color( msg.type, false ) } );
+            jsout.end_object();
+        }
+        jsout.end_array();
+        // The curses log scrolls by folded lines; show the message at the top line.
+        if( offset < folded_filtered.size() ) {
+            const auto top = folded_all[folded_filtered[offset]].first;
+            const auto at = std::ranges::find( shown, top );
+            jsout.member( "scroll_entry", static_cast<int>( std::distance( shown.begin(), at ) ) );
+        }
+        jsout.member( "scroll_end", !log_from_top && offset + max_lines >= folded_filtered.size() );
+        jsout.end_object();
+        jsout.end_array();
+
+        if( filtering ) {
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 380 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = _( "Filtering" ), .color = c_white } );
+            jsout.member( "icon", "funnel" );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = join( filter_help_text( 200 ), "\n" ), .color = c_cyan } );
+            jsout.end_object();
+        }
+
+        jsout.member( "hints" );
+        jsout.start_array();
+        gs::write_fixed_hint( jsout, "↑↓", _( "Scroll" ) );
+        gs::write_fixed_hint( jsout, "PgUp PgDn", _( "Page" ) );
+        gs::write_hint( jsout, "FILTER", category, _( "Filter" ) );
+        gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+        jsout.end_array();
+    } );
+}
+#endif
+
 void Messages::dialog::run()
 {
     ui_adaptor ui;
+#if defined(TILES)
+    // The filter box is drawn by Godot, so its text field skips curses drawing.
+    auto suppress = std::optional<cata::godot_bridge::curses_draw_suppression>();
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", this, "MESSAGE_LOG" );
+        suppress.emplace();
+    }
+#endif
     ui.on_screen_resize( [this]( ui_adaptor & ui ) {
         init( ui );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
     ui.on_redraw( [this]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         show();
     } );
+#if defined(TILES)
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
 
     while( !errored && !canceled ) {
         ui_manager::redraw();

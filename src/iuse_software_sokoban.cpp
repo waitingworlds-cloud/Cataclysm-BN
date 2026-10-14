@@ -1,6 +1,8 @@
 #include "iuse_software_sokoban.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -11,12 +13,37 @@
 #include "color.h"
 #include "cursesdef.h"
 #include "fstream_utils.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "output.h"
 #include "path_info.h"
 #include "point.h"
+#include "string_formatter.h"
 #include "translations.h"
 #include "ui_manager.h"
+
+#if defined(TILES)
+namespace
+{
+
+/// The move from `from` toward a clicked square, along the longer way, or none for the same square.
+auto step_action( const point from, const point to ) -> std::string
+{
+    const auto d = to - from;
+    if( d == point_zero ) {
+        return {};
+    }
+    if( std::abs( d.x ) >= std::abs( d.y ) ) {
+        return d.x < 0 ? "LEFT" : "RIGHT";
+    }
+    return d.y < 0 ? "UP" : "DOWN";
+}
+
+} // namespace
+#endif
 
 sokoban_game::sokoban_game() = default;
 
@@ -223,12 +250,26 @@ int sokoban_game::start_game()
 
     catacurses::window w_sokoban;
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot draws the level as a board; clicking a square steps toward it.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "SOKOBAN" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ) {
         const point iOffset( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0,
                              TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 : 0 );
         w_sokoban = catacurses::newwin( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH,
                                         iOffset );
         ui.position_from_window( w_sokoban );
+#if defined(TILES)
+        if( native ) {
+            w_sokoban = cata::godot_bridge::capture_window( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH );
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -240,6 +281,63 @@ int sokoban_game::start_game()
     ctxt.register_action( "QUIT" );
     ctxt.register_action( "UNDO" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
+
+#if defined(TILES)
+    // The level alone; its counters become stats and its shortcuts buttons.
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "SOKOBAN" );
+        const auto level_size = point( static_cast<int>( mLevelInfo[iCurrentLevel]["MaxLevelX"] ),
+                                       static_cast<int>( mLevelInfo[iCurrentLevel]["MaxLevelY"] ) );
+        const auto level_at = point( ( FULL_SCREEN_WIDTH - 2 - level_size.x ) / 2,
+                                     ( FULL_SCREEN_HEIGHT - 2 - level_size.y ) / 2 );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Sokoban" ) );
+            jsout.member( "icon", "package" );
+            jsout.member( "size", std::array{ 1180, 780 } );
+            jsout.member( "stats" );
+            jsout.start_array();
+            gs::write_stat( jsout, { .icon = "layers", .label = _( "Level" ), .value = { .text = string_format( "%d/%d", iCurrentLevel + 1, iNumLevel ), .color = c_white } } );
+            gs::write_stat( jsout, { .icon = "trophy", .label = _( "Score" ), .value = { .text = std::to_string( iScore ), .color = c_white } } );
+            gs::write_stat( jsout, { .icon = "footprints", .label = _( "Moves" ), .value = { .text = std::to_string( iMoves ), .color = c_white } } );
+            gs::write_stat( jsout, { .label = _( "Total moves" ), .value = { .text = std::to_string( iTotalMoves ), .color = c_light_gray } } );
+            jsout.end_array();
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "cell", 36 );
+            jsout.member( "square", true );
+            jsout.member( "raised", "$" );
+            jsout.member( "click", "" );
+            jsout.member( "grid" );
+            cata::godot_bridge::write_window_grid( jsout, w_sokoban, { .at = level_at, .size = level_size } );
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 380 );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = _( "You are <color_white>@</color>.  Push every crate <color_white>$</color> onto a highlighted goal square.  Click a square to step toward it." ) } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "UNDO", .text = _( "Undo move" ), .icon = "undo-2", .category = category, .primary = true } );
+            gs::write_button( jsout, { .act = "RESET", .text = _( "Reset" ), .icon = "rotate-ccw", .category = category } );
+            gs::write_button( jsout, { .act = "PREV", .text = _( "Previous level" ), .icon = "skip-back", .category = category } );
+            gs::write_button( jsout, { .act = "NEXT", .text = _( "Next level" ), .icon = "skip-forward", .category = category } );
+            jsout.end_array();
+            jsout.end_object();
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓←→", _( "Move" ) );
+            gs::write_hint( jsout, "UNDO", category, _( "Undo move" ) );
+            gs::write_hint( jsout, "RESET", category, _( "Reset" ) );
+            gs::write_hint( jsout, "PREV", category, _( "Previous level" ) );
+            gs::write_hint( jsout, "NEXT", category, _( "Next level" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Quit" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
         werase( w_sokoban );
@@ -267,6 +365,11 @@ int sokoban_game::start_game()
 
         draw_level( w_sokoban );
         wnoutrefresh( w_sokoban );
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+        }
+#endif
     } );
 
     point pl;
@@ -298,6 +401,12 @@ int sokoban_game::start_game()
             ui_manager::redraw();
             //Check input
             action = ctxt.handle_input();
+#if defined(TILES)
+            // A clicked square: `row * 1000 + column` of the level.
+            if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+                action = step_action( pl, point( *pick % 1000, *pick / 1000 ) );
+            }
+#endif
         }
 
         bMoved = false;
