@@ -53,6 +53,8 @@ static var _fonts := {}
 static var _icons := {}
 static var _theme: Theme
 static var _separator: RegEx
+static var _lead: RegEx
+static var _gaps: RegEx
 
 
 ## Slate color for a game color name such as `c_light_red`, `h_white` or `c_white_red`.
@@ -220,8 +222,13 @@ static func theme() -> Theme:
 ## The game separates sections with "--" lines (sometimes colored); shows them as spacing instead.
 static func tidy_body(bb: String) -> String:
 	if _separator == null:
-		_separator = RegEx.create_from_string("(?m)^(\\[color=[^\\]]*\\])?-{2,}(\\[/color\\])?$")
-	return _separator.sub(bb, "", true).strip_edges()
+		var tag := "(\\[/?color[^\\]]*\\])*"
+		_separator = RegEx.create_from_string("(?m)^" + tag + "-{2,}" + tag + "$")
+		_lead = RegEx.create_from_string("^((?:\\[color=[^\\]]*\\])?)\\s+")
+		_gaps = RegEx.create_from_string("\\n(\\s*\\n){2,}")
+	var out := _separator.sub(bb, "", true)
+	out = _lead.sub(out, "$1")
+	return _gaps.sub(out, "\n\n", true).strip_edges()
 
 
 static func bbcode(spans, fallback := TEXT) -> String:

@@ -68,6 +68,7 @@
 #include "game_ui.h"
 #include "godot_bridge.h"
 #include "godot_hud.h"
+#include "godot_screen.h"
 #include "gamemode.h"
 #include "gates.h"
 #include "harvest.h"
@@ -10033,9 +10034,25 @@ look_around_result game::look_around( bool show_window, tripoint_bub_ms &center,
 
     std::unique_ptr<ui_adaptor> ui;
     catacurses::window w_info;
+#if defined(TILES)
+    // Godot shows the tile info in a panel docked over its sidebar, next to the map.
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+#endif
     if( show_window ) {
         ui = std::make_unique<ui_adaptor>();
+#if defined(TILES)
+        if( cata::godot_bridge::native_screens() ) {
+            native = std::make_unique<cata::godot_bridge::native_view>( "screen", &lp, "LOOK" );
+        }
+#endif
         ui->on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+            if( native ) {
+                w_info = cata::godot_bridge::capture_window( 120, 54 );
+                ui.position( point_zero, point_zero );
+                return;
+            }
+#endif
             int panel_width = panel_manager::get_manager().get_current_layout().begin()->get_width();
 
 #if defined(TILES)
@@ -10128,6 +10145,49 @@ look_around_result game::look_around( bool show_window, tripoint_bub_ms &center,
 
     if( show_window && ui ) {
         ui->on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+            if( native ) {
+                werase( w_info );
+                auto first_line = 0;
+                pre_print_all_tile_info( lp, w_info, first_line, getmaxy( w_info ) - 1, cache );
+                native->publish( [&]( JsonOut & jsout ) {
+                    namespace gs = cata::godot_screen;
+                    const auto category = std::string( "LOOK" );
+                    jsout.member( "title", _( "Look around" ) );
+                    jsout.member( "icon", "eye" );
+                    jsout.member( "dock", "right" );
+                    jsout.member( "size" );
+                    jsout.start_array();
+                    jsout.write( 460 );
+                    jsout.write( 0 );
+                    jsout.end_array();
+                    jsout.member( "subtitle" );
+                    gs::write_span( jsout, { .text = string_format( _( "Cursor At: (%d,%d,%d)" ), lx, ly, lz ) } );
+                    jsout.member( "aside" );
+                    jsout.start_object();
+                    jsout.member( "mono", true );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_window_spans( jsout, w_info );
+                    jsout.member( "buttons" );
+                    jsout.start_array();
+                    gs::write_button( jsout, { .act = "EXTENDED_DESCRIPTION", .text = ctxt.get_action_name( "EXTENDED_DESCRIPTION" ), .icon = "info", .category = category, .primary = true } );
+                    if( !select_zone ) {
+                        gs::write_button( jsout, { .act = "LIST_ITEMS", .text = _( "Items and monsters" ), .icon = "list", .category = category } );
+                    }
+                    gs::write_button( jsout, { .act = "TOGGLE_FAST_SCROLL", .text = fast_scroll ? _( "Fast: on" ) : _( "Fast: off" ), .icon = "zap", .category = category } );
+                    gs::write_button( jsout, { .act = "LEVEL_UP", .text = _( "Level up" ), .icon = "arrow-up", .category = category } );
+                    gs::write_button( jsout, { .act = "LEVEL_DOWN", .text = _( "Level down" ), .icon = "arrow-down", .category = category } );
+                    jsout.end_array();
+                    jsout.end_object();
+                    jsout.member( "hints" );
+                    jsout.start_array();
+                    gs::write_fixed_hint( jsout, "←↑→↓", _( "Move cursor" ) );
+                    gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+                    jsout.end_array();
+                } );
+                return;
+            }
+#endif
             werase( w_info );
             draw_border( w_info );
 
@@ -10166,6 +10226,11 @@ look_around_result game::look_around( bool show_window, tripoint_bub_ms &center,
             draw_look_around_cursor( lp, cache );
         } );
         add_draw_callback( ter_indicator_cb );
+#if defined(TILES)
+        if( native ) {
+            native->attach( *ui );
+        }
+#endif
     }
 
     std::optional<tripoint_abs_ms> zone_start;

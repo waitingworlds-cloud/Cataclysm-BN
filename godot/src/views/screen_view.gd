@@ -9,6 +9,7 @@ extends Control
 ## pick or action the game gave them. Every key still goes to the game.
 
 const SlateButton := preload("res://src/ui/slate_button.gd")
+const Hud := preload("res://src/ui/hud.gd")
 
 const STRIDE := 100000
 const ROW_HEIGHT := 34
@@ -20,6 +21,8 @@ const LINE_HEIGHT := 22.0
 var view_id := 0
 
 var _msg := {}
+var _scrim: ColorRect
+var _center: CenterContainer
 var _card: PanelContainer
 var _badge_icon: TextureRect
 var _title: Label
@@ -46,6 +49,7 @@ var _aside_icon: TextureRect
 var _aside_title: RichTextLabel
 var _aside_subtitle: Label
 var _aside_warn: PanelContainer
+var _aside_rule: ColorRect
 var _aside_warn_text: RichTextLabel
 var _aside_scroll: ScrollContainer
 var _aside_body: RichTextLabel
@@ -64,19 +68,20 @@ var _cursor := Vector2i(-1, -1)
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var scrim := ColorRect.new()
-	scrim.color = Slate.SCRIM
-	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
-	scrim.mouse_filter = Control.MOUSE_FILTER_STOP
-	scrim.gui_input.connect(func(e: InputEvent):
+	_scrim = ColorRect.new()
+	_scrim.color = Slate.SCRIM
+	_scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_scrim.mouse_filter = Control.MOUSE_FILTER_STOP
+	_scrim.gui_input.connect(func(e: InputEvent):
 		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
 			_quit())
-	add_child(scrim)
+	add_child(_scrim)
 
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(center)
+	_center = CenterContainer.new()
+	_center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_center)
+	var center := _center
 
 	_card = PanelContainer.new()
 	var card_style := Slate.card_box(18, 0)
@@ -318,7 +323,8 @@ func _build_aside() -> Control:
 	warn_row.add_child(_aside_warn_text)
 	col.add_child(_aside_warn)
 
-	col.add_child(_rule())
+	_aside_rule = _rule()
+	col.add_child(_aside_rule)
 	_aside_scroll = ScrollContainer.new()
 	_aside_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_aside_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -373,10 +379,40 @@ func _layout() -> void:
 	var viewport := get_viewport_rect().size
 	var most: Array = _msg.get("size", [1440, 920])
 	var target := Vector2(minf(viewport.x - 48, float(most[0])), minf(viewport.y - 48, float(most[1])))
+	# A docked screen sits over the HUD's sidebar and leaves the map visible and clickable
+	# (look around); the others float in the middle over a dimmed backdrop.
+	var docked := String(_msg.get("dock", "")) == "right"
+	_scrim.visible = not docked
+	if docked:
+		var width := minf(float(most[0]), viewport.x * 0.45)
+		var gap := 10.0
+		target = Vector2(width, viewport.y - Hud.HEADER_HEIGHT - Hud.BAR_HEIGHT - 2 * gap)
+		# The card shrinks first: a container is never smaller than its child's minimum size.
+		_card.custom_minimum_size = target
+		_center.set_anchors_preset(Control.PRESET_TOP_LEFT)
+		_center.position = Vector2(viewport.x - width - gap, Hud.HEADER_HEIGHT + gap)
+		_center.size = target
+	else:
+		_center.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_center.offset_left = 0
+		_center.offset_top = 0
+		_center.offset_right = 0
+		_center.offset_bottom = 0
 	_card.custom_minimum_size = target
 	var aside: Dictionary = _msg.get("aside", {})
 	var wanted := float(aside.get("width", 400))
-	_aside.custom_minimum_size.x = clampf(minf(wanted, target.x * 0.4), 260, wanted)
+	var alone := Array(_msg.get("panes", [])).is_empty()
+	_pane_row.visible = not alone
+	var sb := _aside.get_theme_stylebox("panel") as StyleBoxFlat
+	sb.border_width_left = 0 if alone else 1
+	sb.bg_color = Color(0, 0, 0, 0) if alone else Color(1, 1, 1, 0.025)
+	if alone:
+		# Only the side panel: it takes the whole card.
+		_aside.custom_minimum_size.x = 0
+		_aside.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	else:
+		_aside.size_flags_horizontal = Control.SIZE_FILL
+		_aside.custom_minimum_size.x = clampf(minf(wanted, target.x * 0.4), 260, wanted)
 
 
 # --- Updates from the game -----------------------------------------------------------------------
@@ -667,6 +703,7 @@ func _apply_aside(msg: Dictionary) -> void:
 	if icon != "":
 		_aside_icon.texture = Slate.icon(icon, 22)
 	_aside_title.get_parent().visible = has_title
+	_aside_rule.visible = has_title
 	_aside_title.text = Slate.bbcode(aside.get("title", []), Slate.TEXT)
 	_aside_subtitle.text = String(aside.get("subtitle", "")).to_upper()
 	_aside_subtitle.visible = _aside_subtitle.text != ""
@@ -678,6 +715,13 @@ func _apply_aside(msg: Dictionary) -> void:
 	_aside_scroll.visible = body != ""
 	_aside_empty.visible = body == "" and empty != ""
 	_aside_empty.text = empty
+	# Text laid out in columns by the game (look around) keeps its alignment in a fixed-width font.
+	if bool(aside.get("mono", false)):
+		_aside_body.add_theme_font_override("normal_font", Slate.mono())
+		_aside_body.add_theme_font_size_override("normal_font_size", 12)
+	else:
+		_aside_body.remove_theme_font_override("normal_font")
+		_aside_body.add_theme_font_size_override("normal_font_size", 13)
 	if body != _aside_body.text:
 		_aside_body.text = body
 		_aside_scroll.scroll_vertical = 0

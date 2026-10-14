@@ -672,6 +672,72 @@ auto write_spans( JsonOut &jsout, const std::string &text, const nc_color &base 
     jsout.end_array();
 }
 
+auto capture_window( const int lines, const int cols ) -> catacurses::window
+{
+    // Placed right of the visible screen: anything a draw function pushes to the frame is clipped.
+    return catacurses::newwin( lines, cols, point( TERMX + 1, 0 ) );
+}
+
+auto write_window_spans( JsonOut &jsout, const catacurses::window &w ) -> void
+{
+    // Curses names of the 16 base colors; bright ones are `base + 8`.
+    static constexpr auto names = std::array {
+        "c_black", "c_red", "c_green", "c_brown", "c_blue", "c_magenta", "c_cyan", "c_light_gray",
+        "c_dark_gray", "c_light_red", "c_light_green", "c_yellow", "c_light_blue", "c_pink", "c_light_cyan", "c_white",
+    };
+    const auto color_of = []( const cata_cursesport::cursecell & c ) -> std::string {
+        // Highlighted cells (dark text on a colored background) read as the background color.
+        const auto index = c.BG != catacurses::black && c.FG == catacurses::black ? c.BG : c.FG;
+        return names[std::clamp( static_cast<int>( index ), 0, 15 )];
+    };
+    const auto *win = w.get<cata_cursesport::WINDOW>();
+    jsout.start_array();
+    if( win == nullptr ) {
+        jsout.end_array();
+        return;
+    }
+    // Lines without their trailing blanks, then without trailing empty lines.
+    auto rows = std::vector<std::vector<const cata_cursesport::cursecell *>>();
+    for( const auto &line : win->line ) {
+        auto cells = line.chars
+        | std::views::transform( []( const auto & c ) { return &c; } )
+        | std::ranges::to<std::vector>();
+        while( !cells.empty() && ( cells.back()->ch.empty() || cells.back()->ch == " " ) ) {
+            cells.pop_back();
+        }
+        rows.push_back( std::move( cells ) );
+    }
+    while( !rows.empty() && rows.back().empty() ) {
+        rows.pop_back();
+    }
+    auto run = std::string();
+    auto run_color = std::string();
+    const auto flush = [&]() {
+        if( !run.empty() ) {
+            jsout.start_array();
+            jsout.write( run );
+            jsout.write( run_color );
+            jsout.end_array();
+            run.clear();
+        }
+    };
+    for( const auto &[y, cells] : rows | std::views::enumerate ) {
+        if( y > 0 ) {
+            run += "\n";
+        }
+        for( const auto *cell : cells ) {
+            const auto color = color_of( *cell );
+            if( color != run_color && cell->ch != " " ) {
+                flush();
+                run_color = color;
+            }
+            run += cell->ch;
+        }
+    }
+    flush();
+    jsout.end_array();
+}
+
 auto key_label( const std::string &action, const std::string &category ) -> std::string
 {
     const auto key = key_for_action( action, category );

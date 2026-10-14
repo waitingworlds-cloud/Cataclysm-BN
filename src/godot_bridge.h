@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+#include "cursesdef.h"
 #include "point.h"
 
 class JsonOut;
@@ -146,6 +147,14 @@ auto curses_draw_suppressed() -> bool;
 /// Writes `text` as an array of `[text, color]` runs, resolving its color tags. Text outside any
 /// tag uses `base`. Colors are curses color names such as `c_light_red`.
 auto write_spans( JsonOut &jsout, const std::string &text, const nc_color &base ) -> void;
+
+/// A curses window outside the visible screen, for running existing drawing code whose text
+/// is then sent to Godot with `write_window_spans`.
+auto capture_window( int lines, int cols ) -> catacurses::window;
+
+/// Writes the text drawn in `w` as an array of `[text, color]` runs, one line per row, without
+/// trailing blanks or empty lines at the end.
+auto write_window_spans( JsonOut &jsout, const catacurses::window &w ) -> void;
 
 /// Label of the key bound to `action` in `category`, or empty when unbound.
 auto key_label( const std::string &action, const std::string &category ) -> std::string;
