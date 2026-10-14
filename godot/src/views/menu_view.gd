@@ -1,0 +1,500 @@
+extends Control
+## A list menu (the game's `uilist`): a centered card with a title, optional search and category
+## tabs, rows with key hints, and a description panel. The game owns the selection and the
+## filter; clicking a row picks it, which the game handles as if its key had been pressed.
+
+const ROW_HEIGHT := 38
+const MIN_WIDTH := 440.0
+const MAX_WIDTH := 920.0
+
+var view_id := 0
+
+var _entries: Array = []
+var _shown: Array = []
+var _selected := -1
+var _hovered := -1
+var _cancel := false
+var _describe := false
+var _rows := {}
+var _rows_dirty := true
+var _has_keys := false
+
+var _scrim: ColorRect
+var _card: PanelContainer
+var _title: Label
+var _close: Button
+var _text: RichTextLabel
+var _tabs: HBoxContainer
+var _tab_label: Label
+var _search: PanelContainer
+var _search_text: Label
+var _search_key: PanelContainer
+var _scroll: ScrollContainer
+var _list: VBoxContainer
+var _empty: Label
+var _desc_box: PanelContainer
+var _desc: RichTextLabel
+var _footer: RichTextLabel
+var _hints: HBoxContainer
+
+
+func _ready() -> void:
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_scrim = ColorRect.new()
+	_scrim.color = Slate.SCRIM
+	_scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_scrim.mouse_filter = Control.MOUSE_FILTER_STOP
+	_scrim.gui_input.connect(_on_scrim_input)
+	add_child(_scrim)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(center)
+
+	_card = PanelContainer.new()
+	_card.add_theme_stylebox_override("panel", Slate.card_box(18, 0))
+	_card.mouse_filter = Control.MOUSE_FILTER_STOP
+	center.add_child(_card)
+
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 0)
+	_card.add_child(col)
+
+	col.add_child(_build_header())
+	col.add_child(_build_search())
+	col.add_child(_build_list())
+	col.add_child(_build_description())
+	col.add_child(_build_footer())
+	resized.connect(_layout)
+
+
+# --- Building ------------------------------------------------------------------------------------
+
+func _padded(child: Control, left := 20, top := 0, right := 20, bottom := 0) -> MarginContainer:
+	var m := MarginContainer.new()
+	m.add_theme_constant_override("margin_left", left)
+	m.add_theme_constant_override("margin_top", top)
+	m.add_theme_constant_override("margin_right", right)
+	m.add_theme_constant_override("margin_bottom", bottom)
+	m.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	m.add_child(child)
+	return m
+
+
+func _build_header() -> Control:
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	col.add_child(row)
+	_title = Slate.label("", 18, Slate.TEXT, Slate.heavy())
+	_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	row.add_child(_title)
+
+	_tabs = HBoxContainer.new()
+	_tabs.add_theme_constant_override("separation", 4)
+	_tabs.visible = false
+	row.add_child(_tabs)
+	_tabs.add_child(_icon_button("chevron-left", "Previous category", func(): Bridge.press(view_id, "LEFT")))
+	var tab := PanelContainer.new()
+	tab.add_theme_stylebox_override("panel", Slate.pill_box(Color(1, 1, 1, 0.07), 12, 5))
+	tab.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tab_label = Slate.label("", 13, Slate.TEXT, Slate.semibold())
+	tab.add_child(_tab_label)
+	_tabs.add_child(tab)
+	_tabs.add_child(_icon_button("chevron-right", "Next category", func(): Bridge.press(view_id, "RIGHT")))
+
+	_close = _icon_button("x", "Close (Esc)", func(): Bridge.press(view_id, "QUIT"))
+	row.add_child(_close)
+
+	_text = Slate.rich(14)
+	_text.add_theme_color_override("default_color", Slate.MUTED)
+	_text.visible = false
+	col.add_child(_text)
+	return _padded(col, 22, 18, 14, 12)
+
+
+func _icon_button(icon: String, tip: String, action: Callable) -> Button:
+	var b := Button.new()
+	b.icon = Slate.icon(icon, 18)
+	b.tooltip_text = tip
+	b.custom_minimum_size = Vector2(34, 34)
+	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	b.add_theme_color_override("icon_normal_color", Slate.MUTED)
+	b.add_theme_color_override("icon_hover_color", Slate.TEXT)
+	b.pressed.connect(action)
+	return b
+
+
+func _build_search() -> Control:
+	_search = PanelContainer.new()
+	_search.add_theme_stylebox_override("panel", _search_box(false))
+	_search.mouse_filter = Control.MOUSE_FILTER_STOP
+	_search.mouse_default_cursor_shape = Control.CURSOR_IBEAM
+	_search.tooltip_text = "Search this list"
+	_search.gui_input.connect(func(e: InputEvent):
+		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
+			Bridge.press(view_id, "FILTER"))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_search.add_child(row)
+	row.add_child(Slate.icon_rect("search", 16, Slate.MUTED))
+	_search_text = Slate.label("", 14, Slate.FAINT)
+	_search_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_search_text.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	row.add_child(_search_text)
+	_search_key = Slate.key_chip("/")
+	row.add_child(_search_key)
+	var wrap := _padded(_search, 20, 0, 20, 10)
+	wrap.visible = false
+	return wrap
+
+
+func _search_box(active: bool) -> StyleBoxFlat:
+	var sb := Slate.box(Color(1, 1, 1, 0.05), 10, Slate.ACCENT if active else Slate.BORDER, 1)
+	sb.content_margin_left = 12
+	sb.content_margin_right = 8
+	sb.content_margin_top = 7
+	sb.content_margin_bottom = 7
+	return sb
+
+
+func _build_list() -> Control:
+	var stack := VBoxContainer.new()
+	stack.add_theme_constant_override("separation", 0)
+	var line := ColorRect.new()
+	line.color = Slate.BORDER
+	line.custom_minimum_size.y = 1
+	line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_child(line)
+
+	_scroll = ScrollContainer.new()
+	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	stack.add_child(_scroll)
+	_list = VBoxContainer.new()
+	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_list.add_theme_constant_override("separation", 2)
+	_scroll.add_child(_padded(_list, 10, 8, 10, 8))
+	(_list.get_parent() as Control).size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	_empty = Slate.label("Nothing matches.", 14, Slate.FAINT)
+	_empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_empty.custom_minimum_size.y = 60
+	_empty.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_empty.visible = false
+	stack.add_child(_empty)
+	return stack
+
+
+func _build_description() -> Control:
+	_desc_box = PanelContainer.new()
+	var sb := Slate.box(Color(1, 1, 1, 0.035), 0, Slate.BORDER, 0)
+	sb.border_width_top = 1
+	sb.border_color = Slate.BORDER
+	sb.set_content_margin_all(18)
+	sb.content_margin_left = 22
+	sb.content_margin_right = 22
+	_desc_box.add_theme_stylebox_override("panel", sb)
+	_desc_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_desc = Slate.rich(14)
+	_desc.add_theme_color_override("default_color", Slate.SOFT)
+	_desc_box.add_child(_desc)
+	_desc_box.visible = false
+	return _desc_box
+
+
+func _build_footer() -> Control:
+	var bar := PanelContainer.new()
+	var sb := Slate.box(Color(0, 0, 0, 0.18), 0, Slate.BORDER, 0)
+	sb.border_width_top = 1
+	sb.border_color = Slate.BORDER
+	sb.corner_radius_bottom_left = 18
+	sb.corner_radius_bottom_right = 18
+	sb.content_margin_left = 22
+	sb.content_margin_right = 16
+	sb.content_margin_top = 10
+	sb.content_margin_bottom = 10
+	bar.add_theme_stylebox_override("panel", sb)
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 14)
+	bar.add_child(row)
+	_footer = Slate.rich(12)
+	_footer.add_theme_color_override("default_color", Slate.MUTED)
+	_footer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_footer.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(_footer)
+	_hints = HBoxContainer.new()
+	_hints.add_theme_constant_override("separation", 14)
+	row.add_child(_hints)
+	return bar
+
+
+func _hint(key: String, text: String) -> HBoxContainer:
+	var h := HBoxContainer.new()
+	h.add_theme_constant_override("separation", 6)
+	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.add_child(Slate.key_chip(key, 10))
+	h.add_child(Slate.label(text, 12, Slate.MUTED))
+	return h
+
+
+# --- Updates from the game -----------------------------------------------------------------------
+
+func set_entries(entries: Array) -> void:
+	_entries = entries
+	_has_keys = entries.any(func(e): return String(e.get("key", "")) != "")
+	_rows_dirty = true
+	_refresh_rows()
+
+
+func apply(msg: Dictionary) -> void:
+	var title := Slate.plain(msg.get("title", [])).strip_edges()
+	var text: Array = msg.get("text", [])
+	var plain_text := Slate.plain(text).strip_edges()
+	# Many menus only ask a question in their text; a short one reads best as the title.
+	var text_as_title := title == "" and plain_text != "" and plain_text.length() <= 70 and not "\n" in plain_text
+	if text_as_title:
+		_title.text = plain_text
+	else:
+		_title.text = title if title != "" else "Choose an option"
+	_text.text = Slate.bbcode(text, Slate.MUTED).strip_edges()
+	_text.visible = plain_text != "" and not text_as_title
+
+	_cancel = bool(msg.get("cancel", false))
+	_close.visible = _cancel
+
+	var has_tabs := bool(msg.get("categories", false))
+	_tabs.visible = has_tabs
+	_tab_label.text = String(msg.get("category", ""))
+
+	var can_filter := bool(msg.get("can_filter", false))
+	var filtering := bool(msg.get("filtering", false))
+	var filter := String(msg.get("filter", ""))
+	# Short lists don't need a search box; the filter key still works.
+	_search.get_parent().visible = can_filter and (_entries.size() > 8 or filtering or filter != "")
+	_search.add_theme_stylebox_override("panel", _search_box(filtering))
+	if filter != "" or filtering:
+		_search_text.text = filter + ("▏" if filtering else "")
+		_search_text.add_theme_color_override("font_color", Slate.TEXT)
+	else:
+		_search_text.text = "Search"
+		_search_text.add_theme_color_override("font_color", Slate.FAINT)
+	var filter_key := String(msg.get("filter_key", ""))
+	_search_key.visible = filter_key != "" and not filtering
+	(_search_key.get_child(0) as Label).text = filter_key
+
+	_describe = bool(msg.get("describe", false))
+	var footer: Array = msg.get("footer", [])
+	_footer.text = Slate.bbcode(footer, Slate.MUTED).strip_edges()
+	_update_hints(filtering)
+
+	var shown: Array = msg.get("shown", []).map(func(i): return int(i))
+	if shown != _shown:
+		_shown = shown
+		_rows_dirty = true
+	var selected := int(msg.get("selected", -1))
+	var moved := selected != _selected
+	_selected = selected
+	_refresh_rows()
+	if moved:
+		_scroll_to_selected()
+	_update_description()
+
+
+func _update_hints(filtering: bool) -> void:
+	for c in _hints.get_children():
+		c.queue_free()
+	if filtering:
+		_hints.add_child(_hint("Enter", "Done"))
+		_hints.add_child(_hint("Esc", "Clear"))
+		return
+	_hints.add_child(_hint("↑↓", "Move"))
+	_hints.add_child(_hint("Enter", "Select"))
+	if _cancel:
+		_hints.add_child(_hint("Esc", "Close"))
+
+
+# --- Rows ----------------------------------------------------------------------------------------
+
+func _refresh_rows() -> void:
+	if not is_inside_tree():
+		return
+	if _rows_dirty:
+		_rows_dirty = false
+		for c in _list.get_children():
+			c.queue_free()
+		_rows.clear()
+		for index in _shown:
+			if index < 0 or index >= _entries.size():
+				continue
+			var row := MenuRow.new()
+			row.setup(_entries[index], _has_keys)
+			row.clicked.connect(_on_row_clicked.bind(index))
+			row.hovered.connect(_on_row_hovered.bind(index))
+			_list.add_child(row)
+			_rows[index] = row
+		_empty.visible = _rows.is_empty() and not _entries.is_empty()
+		_layout()
+	for index in _rows:
+		_rows[index].set_selected(index == _selected)
+
+
+func _layout() -> void:
+	if _card == null or not is_inside_tree():
+		return
+	var viewport := get_viewport_rect().size
+	var widest := 0.0
+	for e in _entries:
+		var w := Slate.body().get_string_size(Slate.plain(e.get("text", [])).strip_edges(),
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+		if e.has("column"):
+			w += 24 + Slate.body().get_string_size(Slate.plain(e["column"]).strip_edges(),
+					HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+		widest = max(widest, w)
+	var width := clampf(widest + (100.0 if _has_keys else 60.0), MIN_WIDTH, minf(MAX_WIDTH, viewport.x - 80))
+	_card.custom_minimum_size.x = width
+	var rows := maxi(_rows.size(), 1)
+	var reserved := 260.0 + (160.0 if _describe else 0.0)
+	_scroll.custom_minimum_size.y = minf(rows * (ROW_HEIGHT + 2) + 16, maxf(viewport.y - reserved, 160))
+	_scroll.visible = not _rows.is_empty()
+
+
+func _scroll_to_selected() -> void:
+	if not _rows.has(_selected):
+		return
+	var row: Control = _rows[_selected]
+	# Rows lay out on the next frame; wait so the scroll target is right.
+	await get_tree().process_frame
+	if is_instance_valid(row):
+		_scroll.ensure_control_visible(row)
+
+
+func _on_row_clicked(index: int) -> void:
+	if _entries[index].get("enabled", true):
+		Bridge.pick(view_id, index)
+
+
+func _on_row_hovered(index: int, inside: bool) -> void:
+	_hovered = index if inside else -1
+	_update_description()
+
+
+func _update_description() -> void:
+	var index := _hovered if _hovered >= 0 else _selected
+	var desc = []
+	if _describe and index >= 0 and index < _entries.size():
+		desc = _entries[index].get("desc", [])
+	var has_desc := Slate.plain(desc).strip_edges() != ""
+	_desc_box.visible = _describe
+	_desc.text = Slate.bbcode(desc, Slate.SOFT).strip_edges() if has_desc else "[color=#%s]No description.[/color]" % Slate.FAINT.to_html(false)
+
+
+func _on_scrim_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT and _cancel:
+		Bridge.press(view_id, "QUIT")
+
+
+class MenuRow extends PanelContainer:
+	signal clicked
+	signal hovered(inside: bool)
+
+	var _enabled := true
+	var _selected := false
+	var _hover := false
+	var _accent: ColorRect
+	var _text: RichTextLabel
+
+	func setup(entry: Dictionary, has_keys: bool) -> void:
+		_enabled = bool(entry.get("enabled", true))
+		custom_minimum_size.y = 38
+		mouse_filter = Control.MOUSE_FILTER_STOP
+		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if _enabled else Control.CURSOR_ARROW
+		mouse_entered.connect(func():
+			_hover = true
+			_restyle()
+			hovered.emit(true))
+		mouse_exited.connect(func():
+			_hover = false
+			_restyle()
+			hovered.emit(false))
+
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 12)
+		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(row)
+
+		if has_keys:
+			var key := String(entry.get("key", ""))
+			var slot := CenterContainer.new()
+			slot.custom_minimum_size.x = 30
+			slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var chip := Slate.key_chip(key, 11)
+			chip.visible = key != ""
+			slot.add_child(chip)
+			row.add_child(slot)
+
+		_text = Slate.rich(15)
+		_text.autowrap_mode = TextServer.AUTOWRAP_OFF
+		_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_text.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		_text.add_theme_font_override("normal_font", Slate.semibold())
+		_text.text = _trimmed(entry.get("text", []))
+		row.add_child(_text)
+
+		if entry.has("column"):
+			var column := Slate.rich(14)
+			column.autowrap_mode = TextServer.AUTOWRAP_OFF
+			column.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			column.add_theme_color_override("default_color", Slate.MUTED)
+			column.add_theme_font_override("normal_font", Slate.mono())
+			column.text = "[right]%s[/right]" % _trimmed(entry["column"], Slate.MUTED)
+			column.custom_minimum_size.x = Slate.mono().get_string_size(
+					Slate.plain(entry["column"]).strip_edges(), HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x + 4
+			row.add_child(column)
+
+		modulate.a = 1.0 if _enabled else 0.42
+		_restyle()
+
+	## BBCode for runs, without the padding curses menus use for alignment.
+	func _trimmed(spans, fallback := Slate.TEXT) -> String:
+		if typeof(spans) != TYPE_ARRAY or spans.is_empty():
+			return ""
+		var runs: Array = spans.duplicate(true)
+		runs[0][0] = String(runs[0][0]).strip_edges(true, false)
+		runs[-1][0] = String(runs[-1][0]).strip_edges(false, true)
+		return Slate.bbcode(runs, fallback)
+
+	func set_selected(on: bool) -> void:
+		if on != _selected:
+			_selected = on
+			_restyle()
+
+	func _restyle() -> void:
+		var bg := Color(0, 0, 0, 0)
+		if _selected:
+			bg = Color(1, 1, 1, 0.09)
+		elif _hover and _enabled:
+			bg = Color(1, 1, 1, 0.05)
+		var sb := Slate.box(bg, 10, Slate.BORDER, 0)
+		if _selected:
+			# Amber edge on the left marks the row Enter will pick.
+			sb.border_width_left = 3
+			sb.border_color = Slate.ACCENT
+		sb.content_margin_left = 10
+		sb.content_margin_right = 12
+		sb.content_margin_top = 4
+		sb.content_margin_bottom = 4
+		add_theme_stylebox_override("panel", sb)
+
+	func _gui_input(event: InputEvent) -> void:
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			accept_event()
+			if _enabled:
+				clicked.emit()
