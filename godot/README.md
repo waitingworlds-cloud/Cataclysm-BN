@@ -50,7 +50,7 @@ one did.
 
 | Area                | Screens drawn by Godot                                                       |
 | ------------------- | ---------------------------------------------------------------------------- |
-| Playing             | HUD (header, sidebar, action bar, survivor card), message log, look around and descriptions, nearby items, monsters and vehicles, aiming |
+| Playing             | HUD (header, sidebar, action bar, survivor card, map hover card), message log, look around and descriptions, nearby items, monsters and vehicles, aiming |
 | Items               | Inventory and every item list built on it, item actions, item info, comparison, pickup, advanced inventory, sort armor, vending machines, enchanting |
 | Making things       | Crafting, construction                                                       |
 | Character           | Character sheet, morale, bionics, mutations, martial arts and technique details, blood test results, missions, factions, scores, diary |
@@ -85,6 +85,9 @@ the survivor stays centered in what you can see:
   stamina, warmth), body, and stats (attributes, weight, volume, bionic power, mana, armor). Mood,
   focus, speed, move cost and noise are always shown, with chips for injuries, pain, move mode and
   safe mode.
+- **Hover card**: rest the mouse on the map and a card beside it shows what is there (terrain,
+  furniture, items, creatures and their gear), as the game's "Mouse View" box did. It hides when
+  the mouse moves on or a key is pressed.
 
 The HUD options button (or `}`, the sidebar options key) opens the game's sidebar options: turning a
 panel off there hides the matching part of the HUD.
