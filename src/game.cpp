@@ -12238,6 +12238,7 @@ game::vmenu_ret game::list_monsters( const std::vector<Creature *> &monster_list
                     jsout.member( "sym_color", string_from_color( cCurMon->symbol_color() ) );
                     jsout.member( "subtitle", tiles_away( rl_dist( u.bub_pos(), cCurMon->bub_pos() ),
                                                           direction_from( u.bub_pos(), cCurMon->bub_pos() ) ) );
+                    jsout.member( "mono", true );
                     jsout.member( "body" );
                     cata::godot_bridge::write_window_spans( jsout, w_info );
                     jsout.member( "buttons" );
