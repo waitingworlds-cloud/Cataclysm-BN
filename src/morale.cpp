@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <numeric>
+#include <ranges>
 #include <set>
 #include <utility>
 
@@ -29,8 +30,15 @@
 #include "output.h"
 #include "point.h"
 #include "string_formatter.h"
+#include "string_utils.h"
 #include "translations.h"
 #include "ui_manager.h"
+
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#include "json.h"
+#endif
 
 static const efftype_id effect_cold( "cold" );
 static const efftype_id effect_hot( "hot" );
@@ -533,6 +541,137 @@ void player_morale::decay( const time_duration &ticks )
     invalidate();
 }
 
+#if defined(TILES)
+namespace
+{
+
+/// Color of a morale number: green when it helps, light red when it hurts, gray when zero.
+auto morale_color( const int num, const bool higher_is_worse ) -> nc_color
+{
+    if( num == 0 ) {
+        return c_dark_gray;
+    }
+    return ( num > 0 ) != higher_is_worse ? c_green : c_light_red;
+}
+
+auto signed_or_dash( const int num ) -> std::string
+{
+    return num == 0 ? std::string( "-" ) : string_format( "%+d", num );
+}
+
+struct morale_entry {
+    std::string name;
+    int percent;
+    int bonus;
+};
+
+struct native_morale_options {
+    const void *owner;
+    std::vector<morale_entry> positive;
+    std::vector<morale_entry> negative;
+    int level;
+    int total_positive;
+    int total_negative;
+    int focus_eq;
+    int pain_penalty;
+    int fatigue_cap;
+    /// Lines the curses screen scrolls over (both lists with their captions).
+    int scroll_rows;
+};
+
+/// The morale screen drawn by the Godot front end.
+auto display_native( const native_morale_options &opts ) -> void
+{
+    namespace gs = cata::godot_screen;
+    auto offset = 0;
+    auto native = cata::godot_bridge::native_view( "screen", opts.owner, "MORALE" );
+    ui_adaptor ui;
+    ui.on_screen_resize( []( ui_adaptor & ui ) { ui.position( point_zero, point_zero ); } );
+    ui.mark_resize();
+    ui.on_redraw( [&]( const ui_adaptor & ) {
+        native.publish( [&]( JsonOut & jsout ) {
+            const auto level = opts.level;
+            jsout.member( "title", _( "Morale" ) );
+            jsout.member( "icon", level > 0 ? "face-grinning" : level < 0 ? "face-slightly-frowning" :
+                          "face-neutral" );
+            jsout.member( "size" );
+            jsout.start_array();
+            jsout.write( 1000 );
+            jsout.write( 760 );
+            jsout.end_array();
+            const auto label = []( const std::string & s ) { return trim( trim_punctuation_marks( s ) ); };
+            jsout.member( "stats" );
+            jsout.start_array();
+            gs::write_stat( jsout, { .label = label( _( "Total morale:" ) ), .value = { .text = signed_or_dash( level ), .color = morale_color( level, false ) } } );
+            if( opts.pain_penalty != 0 ) {
+                gs::write_stat( jsout, { .label = label( _( "Pain level:" ) ), .value = { .text = signed_or_dash( -opts.pain_penalty ), .color = morale_color( -opts.pain_penalty, false ) } } );
+            }
+            if( opts.fatigue_cap ) {
+                gs::write_stat( jsout, { .label = label( _( "Fatigue Morale Cap:" ) ), .value = { .text = std::to_string( opts.fatigue_cap ), .color = morale_color( opts.fatigue_cap, true ) } } );
+            }
+            gs::write_stat( jsout, { .label = label( _( "Focus trends towards:" ) ), .value = { .text = std::to_string( opts.focus_eq ), .color = c_white } } );
+            jsout.end_array();
+
+            const auto write_pane = [&]( const std::string & title, const int total,
+            const std::vector<morale_entry> &points, const bool bad, const int first_row ) {
+                jsout.start_object();
+                jsout.member( "title", title );
+                jsout.member( "icon", bad ? "face-slightly-frowning" : "face-grinning" );
+                jsout.member( "count", signed_or_dash( total ) );
+                jsout.member( "cursor", -1 );
+                jsout.member( "empty", _( "Nothing affects your morale" ) );
+                jsout.member( "scroll_row", std::max( offset - first_row, 0 ) );
+                jsout.member( "rows" );
+                jsout.start_array();
+                for( const auto &mp : points ) {
+                    gs::write_row( jsout, {
+                        .text = { .text = mp.name, .color = morale_color( mp.percent, bad ) },
+                        .cells = { { .text = string_format( "%d%%", mp.percent ), .color = morale_color( mp.percent, bad ) }, { .text = signed_or_dash( mp.bonus ), .color = c_light_gray } },
+                        .passive = true,
+                    } );
+                }
+                jsout.end_array();
+                jsout.end_object();
+            };
+            // Both lists are read-only; neither has a cursor.
+            jsout.member( "active_pane", -1 );
+            jsout.member( "panes" );
+            jsout.start_array();
+            write_pane( _( "Total positive morale" ), opts.total_positive, opts.positive, false, 1 );
+            write_pane( _( "Total negative morale" ), -opts.total_negative, opts.negative, true,
+                        static_cast<int>( opts.positive.size() ) + 3 );
+            jsout.end_array();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Scroll" ) );
+            gs::write_hint( jsout, "QUIT", "MORALE", _( "Close" ) );
+            jsout.end_array();
+        } );
+    } );
+    native.attach( ui );
+
+    input_context ctxt( "MORALE" );
+    ctxt.register_action( "UP" );
+    ctxt.register_action( "DOWN" );
+    ctxt.register_action( "CONFIRM" );
+    ctxt.register_action( "QUIT" );
+    ctxt.register_action( "HELP_KEYBINDINGS" );
+    auto action = std::string();
+    do {
+        ui_manager::redraw();
+        action = ctxt.handle_input();
+        if( action == "DOWN" && offset < opts.scroll_rows - 1 ) {
+            offset++;
+        } else if( action == "UP" && offset > 0 ) {
+            offset--;
+        }
+        ui.invalidate_ui();
+    } while( action != "CONFIRM" && action != "QUIT" );
+}
+} // namespace
+#endif
+
 void player_morale::display( int focus_eq, int pain_penalty, int fatigue_cap )
 {
     /*calculates the percent contributions of the morale points,
@@ -736,6 +875,24 @@ void player_morale::display( int focus_eq, int pain_penalty, int fatigue_cap )
         morale_line::line_color::normal
     );
     bottom_lines.emplace_back();
+
+#if defined(TILES)
+    if( cata::godot_bridge::native_screens() ) {
+        const auto entries = [&]( const std::vector<morale_point> &points ) {
+            return points | std::views::transform( [&]( const morale_point & mp ) {
+                return morale_entry{ .name = mp.get_name(), .percent = static_cast<int>( mp.get_percent_contribution() ), .bonus = mp.get_net_bonus( mult ) };
+            } ) | std::ranges::to<std::vector>();
+        };
+        display_native( {
+            .owner = this, .positive = entries( positive_morale ), .negative = entries( negative_morale ),
+            .level = get_level(), .total_positive = get_total_positive_value(),
+            .total_negative = get_total_negative_value(), .focus_eq = focus_eq,
+            .pain_penalty = pain_penalty, .fatigue_cap = fatigue_cap,
+            .scroll_rows = static_cast<int>( middle_lines.size() ),
+        } );
+        return;
+    }
+#endif
 
     const auto calc_max_width = []( const int width, const morale_line & ml ) -> int {
         return std::max( width, ml.max_width() );
