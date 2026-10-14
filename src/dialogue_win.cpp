@@ -1,6 +1,7 @@
 #include "dialogue_win.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>

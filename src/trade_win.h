@@ -13,6 +13,13 @@ class npc;
 class string_input_popup;
 class ui_adaptor;
 
+#if defined(TILES)
+namespace cata::godot_bridge
+{
+class native_view;
+} // namespace cata::godot_bridge
+#endif
+
 class trading_window
 {
     public:
@@ -33,6 +40,13 @@ class trading_window
         auto build_filtered_indices( const std::vector<item_pricing> &list,
                                      const std::string &filter ) const -> std::vector<size_t>;
         auto get_var_trade( const item &it, int total_count, int amount_hint ) -> int;
+#if defined(TILES)
+        /// Sends the trade to the Godot front end, which draws it instead of curses.
+        auto publish_native( cata::godot_bridge::native_view &view, npc &np,
+                             const std::string &deal ) -> void;
+        /// Moves the cursor to the row clicked in Godot, if any; true when it did.
+        auto take_native_pick() -> bool;
+#endif
 
         npc_trading::trade_state &state;
         catacurses::window w_head;
