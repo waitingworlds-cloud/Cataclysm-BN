@@ -398,17 +398,21 @@ func _layout() -> void:
 	var most: Array = _msg.get("size", [1440, 920])
 	var target := Vector2(minf(viewport.x - 48, float(most[0])), minf(viewport.y - 48, float(most[1])))
 	# A docked screen sits over the HUD's sidebar and leaves the map visible and clickable
-	# (look around); the others float in the middle over a dimmed backdrop.
-	var docked := String(_msg.get("dock", "")) == "right"
+	# (look around); the others float in the middle over a dimmed backdrop. A "side" dock takes
+	# the window's full height, for screens shown while the HUD is hidden (the overmap).
+	var dock := String(_msg.get("dock", ""))
+	var docked := dock == "right" or dock == "side"
 	_scrim.visible = not docked
 	if docked:
 		var width := minf(float(most[0]), viewport.x * 0.45)
 		var gap := 10.0
-		target = Vector2(width, viewport.y - Hud.HEADER_HEIGHT - Hud.BAR_HEIGHT - 2 * gap)
+		var top := float(Hud.HEADER_HEIGHT) if dock == "right" else 0.0
+		var bottom := float(Hud.BAR_HEIGHT) if dock == "right" else 0.0
+		target = Vector2(width, viewport.y - top - bottom - 2 * gap)
 		# The card shrinks first: a container is never smaller than its child's minimum size.
 		_card.custom_minimum_size = target
 		_center.set_anchors_preset(Control.PRESET_TOP_LEFT)
-		_center.position = Vector2(viewport.x - width - gap, Hud.HEADER_HEIGHT + gap)
+		_center.position = Vector2(viewport.x - width - gap, top + gap)
 		_center.size = target
 	else:
 		_center.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -777,6 +781,9 @@ func _apply_buttons(buttons: Array) -> void:
 		b.set_key(String(spec.get("key", "")))
 		b.set_enabled(bool(spec.get("enabled", true)))
 		b.tooltip_text = String(spec.get("tip", ""))
+		# A button for a setting (a map marker) shows whether it is on.
+		if spec.has("on"):
+			b.set_on(bool(spec["on"]))
 		if spec.has("color"):
 			b.set_text_color(Slate.curses(String(spec["color"])))
 		_connect_action(b, spec)
