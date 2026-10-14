@@ -19,6 +19,7 @@
 #    include "game_ui.h"
 #    include "get_version.h"
 #    include "hash_utils.h"
+#    include "imgui_layer.h"
 #    include "input.h"
 #    include "json.h"
 #    include "make_static.h"
@@ -398,10 +399,13 @@ static void WinCreate()
     } else {
         geometry = std::make_unique<DefaultGeometryRenderer>();
     }
+
+    cata::imgui_layer::init( ::window.get(), renderer.get() );
 }
 
 static void WinDestroy()
 {
+    cata::imgui_layer::shutdown();
 #if defined(__ANDROID__)
     touch_joystick.reset();
 #endif
@@ -525,6 +529,8 @@ void refresh_display()
     draw_quick_shortcuts();
     draw_virtual_joystick();
 #endif
+    // Draw the ImGui layer at native window resolution, over the scaled curses frame.
+    cata::imgui_layer::render();
     SDL_RenderPresent( renderer.get() );
     SetRenderTarget( renderer, display_buffer );
 }
@@ -3217,10 +3223,25 @@ static void CheckMessages()
 
     last_input = input_event();
 
+    // A GUI widget was clicked during the last frame: replay it as the key bound to its action.
+    if( const auto queued = cata::imgui_layer::pop_queued_input() ) {
+        last_input = *queued;
+        return;
+    }
+
     std::optional<point> resize_dims;
     bool render_target_reset = false;
 
     while( SDL_PollEvent( &ev ) ) {
+        if( cata::imgui_layer::is_ready() && ev.type == SDL_EVENT_MOUSE_MOTION ) {
+            // Redraw so hover states in the GUI layer follow the mouse.
+            needupdate = true;
+        }
+        if( cata::imgui_layer::process_event( ev ) ) {
+            // The GUI layer owns this event (e.g. a click on a panel); don't pass it to the game.
+            needupdate = true;
+            continue;
+        }
         switch( ev.type ) {
 #if defined(__ANDROID__)
             // SDL will send a focus lost event whenever the app loses focus (eg. lock screen, switch app focus etc.)

@@ -2450,6 +2450,13 @@ void options_manager::add_options_graphics()
 
     add_empty_line();
 
+    add( "SLATE_GUI", graphics, translate_marker( "Slate GUI" ),
+         translate_marker( "If true, draws the modern Slate interface (survivor card and clickable action dock) over the map." ),
+         true, COPT_CURSES_HIDE
+       );
+
+    add_empty_line();
+
     add( "PIXEL_MINIMAP", graphics, translate_marker( "Pixel minimap" ),
          translate_marker( "If true, shows the pixel-detail minimap in game after the save is loaded.  Use the 'Toggle Pixel Minimap' action key to change its visibility during gameplay." ),
          true, COPT_CURSES_HIDE
