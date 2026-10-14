@@ -686,10 +686,12 @@ auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
         "c_black", "c_red", "c_green", "c_brown", "c_blue", "c_magenta", "c_cyan", "c_light_gray",
         "c_dark_gray", "c_light_red", "c_light_green", "c_yellow", "c_light_blue", "c_pink", "c_light_cyan", "c_white",
     };
-    const auto color_of = []( const cata_cursesport::cursecell & c ) -> std::string {
-        // Highlighted cells (dark text on a colored background) read as the background color.
-        const auto index = c.BG != catacurses::black && c.FG == catacurses::black ? c.BG : c.FG;
-        return names[std::clamp( static_cast<int>( index ), 0, 15 )];
+    const auto name = []( const int index ) -> std::string { return names[std::clamp( index, 0, 15 )]; };
+    // Cells on a colored background (a list's cursor, white on blue) are marked `h_`, with the
+    // text's color, or the background's for dark text.
+    const auto color_of = [&]( const cata_cursesport::cursecell & c ) -> std::string {
+        const auto shown = c.BG != catacurses::black && c.FG == catacurses::black ? c.BG : c.FG;
+        return ( c.BG == catacurses::black ? "c_" : "h_" ) + name( static_cast<int>( shown ) ).substr( 2 );
     };
     const auto *win = w.get<cata_cursesport::WINDOW>();
     jsout.start_array();
@@ -743,7 +745,9 @@ auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
         }
         for( const auto *cell : cells ) {
             const auto color = color_of( *cell );
-            if( color != run_color && cell->ch != " " ) {
+            // A space takes the color around it, except at the edge of a highlight.
+            const auto highlight_edge = color.starts_with( "h_" ) || run_color.starts_with( "h_" );
+            if( color != run_color && ( cell->ch != " " || highlight_edge ) ) {
                 flush();
                 run_color = color;
             }

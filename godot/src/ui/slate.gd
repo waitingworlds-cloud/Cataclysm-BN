@@ -237,8 +237,14 @@ static func bbcode(spans, fallback := TEXT) -> String:
 		return out
 	for run in spans:
 		var text := String(run[0]).replace("[", "[lb]")
-		var color := curses(String(run[1]), fallback) if run.size() > 1 else fallback
-		out += "[color=#%s]%s[/color]" % [color.to_html(false), text]
+		var name := String(run[1]) if run.size() > 1 else ""
+		var color := curses(name, fallback) if name != "" else fallback
+		# Highlighted text (a list's cursor drawn by the game) keeps a tinted background.
+		if name.begins_with("h_"):
+			out += "[bgcolor=#%s][color=#%s]%s[/color][/bgcolor]" % [Color(ACCENT, 0.24).to_html(true),
+					color.lightened(0.3).to_html(false), text]
+		else:
+			out += "[color=#%s]%s[/color]" % [color.to_html(false), text]
 	return out
 
 
