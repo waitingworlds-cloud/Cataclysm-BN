@@ -1604,10 +1604,12 @@ auto publish_legend(cata::godot_bridge::native_view& native, const legend_state&
 
         jsout.member("toggles");
         jsout.start_array();
-        const auto toggle = [&](const std::string& act, const std::string& text,
-                                const std::string& icon, const bool on) {
-            gs::write_toggle(jsout, {.act = act, .text = text, .icon = icon, .category = category}, on);
-        };
+        const auto toggle =
+            [&](const std::string& act, const std::string& text, const std::string& icon,
+                const bool on) {
+                gs::write_toggle(
+                    jsout, {.act = act, .text = text, .icon = icon, .category = category}, on);
+            };
         toggle("TOGGLE_MAP_NOTES", _("Notes"), "sticky-note", uistate.overmap_show_map_notes);
         toggle("TOGGLE_CITY_LABELS", _("City names"), "building", uistate.overmap_show_city_labels);
         toggle("TOGGLE_HORDES", _("Hordes"), "skull", uistate.overmap_show_hordes);
@@ -1616,7 +1618,8 @@ auto publish_legend(cata::godot_bridge::native_view& native, const legend_state&
         toggle("TOGGLE_BLINKING", _("Blink"), "eye", uistate.overmap_blinking);
         toggle("TOGGLE_LAND_USE_CODES", _("Land use"), "map", uistate.overmap_show_land_use_codes);
         toggle("TOGGLE_FOREST_TRAILS", _("Trails"), "trees", uistate.overmap_show_forest_trails);
-        toggle("TOGGLE_OVERMAP_WEATHER", _("Weather"), "cloud-sun", uistate.overmap_visible_weather);
+        toggle("TOGGLE_OVERMAP_WEATHER", _("Weather"), "cloud-sun",
+               uistate.overmap_visible_weather);
         toggle("TOGGLE_FAST_SCROLL", _("Fast scroll"), "fast-forward", st.fast_scroll);
         toggle("TOGGLE_DEFAULT_0", _("Open at ground level"), "arrow-down-to-line",
                uistate.overmap_default_0);
@@ -1637,44 +1640,95 @@ auto publish_legend(cata::godot_bridge::native_view& native, const legend_state&
             }
         };
         const auto has_note = ACTIVE_OVERMAP_BUFFER.has_note(curs);
-        button({.act = "CENTER", .text = _("Back to me"), .icon = "locate-fixed", .category = category});
+        button(
+            {.act = "CENTER",
+             .text = _("Back to me"),
+             .icon = "locate-fixed",
+             .category = category});
         button({.act = "SEARCH", .text = _("Search"), .icon = "search", .category = category});
-        button({.act = "LEVEL_UP", .text = _("Level up"), .icon = "arrow-up", .category = category});
-        button({.act = "LEVEL_DOWN", .text = _("Level down"), .icon = "arrow-down", .category = category});
+        button(
+            {.act = "LEVEL_UP", .text = _("Level up"), .icon = "arrow-up", .category = category});
+        button(
+            {.act = "LEVEL_DOWN",
+             .text = _("Level down"),
+             .icon = "arrow-down",
+             .category = category});
         if (use_tiles && use_tiles_overmap) {
-            button({.act = "ZOOM_IN", .text = _("Zoom in"), .icon = "zoom-in", .category = category});
-            button({.act = "ZOOM_OUT", .text = _("Zoom out"), .icon = "zoom-out", .category = category});
+            button(
+                {.act = "ZOOM_IN", .text = _("Zoom in"), .icon = "zoom-in", .category = category});
+            button(
+                {.act = "ZOOM_OUT",
+                 .text = _("Zoom out"),
+                 .icon = "zoom-out",
+                 .category = category});
         }
-        button({.act = "CREATE_NOTE", .text = has_note ? _("Edit note") : _("Add note"),
-                .icon = "square-pen", .category = category});
-        button({.act = "DELETE_NOTE", .text = _("Delete note"), .icon = "trash", .category = category,
-                .enabled = has_note});
+        button(
+            {.act = "CREATE_NOTE",
+             .text = has_note ? _("Edit note") : _("Add note"),
+             .icon = "square-pen",
+             .category = category});
+        button(
+            {.act = "DELETE_NOTE",
+             .text = _("Delete note"),
+             .icon = "trash",
+             .category = category,
+             .enabled = has_note});
         button({.act = "LIST_NOTES", .text = _("All notes"), .icon = "list", .category = category});
-        button({.act = "MISSIONS", .text = _("Missions"), .icon = "scroll-text", .category = category});
-        button({.act = "TOGGLE_EXPLORED", .text = _("Explored"), .icon = "check", .category = category,
-                .tip = _("Mark this place as explored.")},
-               ACTIVE_OVERMAP_BUFFER.is_explored(curs));
-        button({.act = "TOGGLE_MARK_PATH", .text = _("Path"), .icon = "footprints", .category = category,
-                .tip = _("Mark this place as part of a travel path.")},
-               ACTIVE_OVERMAP_BUFFER.is_path(curs));
-        button({.act = "SET_CUSTOM_WAYPOINT", .text = _("Waypoint"), .icon = "flag", .category = category,
-                .tip = _("Set or clear a waypoint here.")},
-               you.custom_waypoint != nullptr);
+        button(
+            {.act = "MISSIONS", .text = _("Missions"), .icon = "scroll-text", .category = category});
+        button(
+            {.act = "TOGGLE_EXPLORED",
+             .text = _("Explored"),
+             .icon = "check",
+             .category = category,
+             .tip = _("Mark this place as explored.")},
+            ACTIVE_OVERMAP_BUFFER.is_explored(curs));
+        button(
+            {.act = "TOGGLE_MARK_PATH",
+             .text = _("Path"),
+             .icon = "footprints",
+             .category = category,
+             .tip = _("Mark this place as part of a travel path.")},
+            ACTIVE_OVERMAP_BUFFER.is_path(curs));
+        button(
+            {.act = "SET_CUSTOM_WAYPOINT",
+             .text = _("Waypoint"),
+             .icon = "flag",
+             .category = category,
+             .tip = _("Set or clear a waypoint here.")},
+            you.custom_waypoint != nullptr);
         if (st.data.debug_editor) {
-            button({.act = "PLACE_TERRAIN", .text = _("Place terrain"), .icon = "hammer", .category = category});
-            button({.act = "PLACE_SPECIAL", .text = _("Place special"), .icon = "hammer", .category = category});
-            button({.act = "SET_SPECIAL_ARGS", .text = _("Special args"), .icon = "hammer", .category = category});
+            button(
+                {.act = "PLACE_TERRAIN",
+                 .text = _("Place terrain"),
+                 .icon = "hammer",
+                 .category = category});
+            button(
+                {.act = "PLACE_SPECIAL",
+                 .text = _("Place special"),
+                 .icon = "hammer",
+                 .category = category});
+            button(
+                {.act = "SET_SPECIAL_ARGS",
+                 .text = _("Special args"),
+                 .icon = "hammer",
+                 .category = category});
         }
-        button({.act = "CHOOSE_DESTINATION",
-                .text = route_shown ? (driving ? _("Drive there") : _("Travel there"))
-                                    : _("Show route here"),
-                .icon = route_shown ? "navigation" : "route",
-                .category = category,
-                .primary = !choosing_point,
-                .tip = _("Shows the route first; press again to travel.")});
+        button(
+            {.act = "CHOOSE_DESTINATION",
+             .text = route_shown ? (driving ? _("Drive there") : _("Travel there"))
+                                 : _("Show route here"),
+             .icon = route_shown ? "navigation" : "route",
+             .category = category,
+             .primary = !choosing_point,
+             .tip = _("Shows the route first; press again to travel.")});
         if (choosing_point) {
-            button({.act = "CONFIRM", .text = _("Choose this spot"), .icon = "map-pin",
-                    .category = category, .primary = true});
+            button(
+                {.act = "CONFIRM",
+                 .text = _("Choose this spot"),
+                 .icon = "map-pin",
+                 .category = category,
+                 .primary = true});
         }
         jsout.end_array();
         jsout.end_object();
@@ -1831,10 +1885,10 @@ static auto search(const ui_adaptor& om_ui, tripoint_abs_omt& curs, const tripoi
     int search_width = OVERMAP_LEGEND_WIDTH - 1;
 #if defined(TILES)
     // Shown in a panel over the overmap's own, with the cursor on the map.
-    auto native = cata::godot_bridge::native_screens()
-                      ? std::make_unique<cata::godot_bridge::native_view>(
-                            "screen", &ui, "OVERMAP_SEARCH")
-                      : nullptr;
+    auto native =
+        cata::godot_bridge::native_screens()
+            ? std::make_unique<cata::godot_bridge::native_view>("screen", &ui, "OVERMAP_SEARCH")
+            : nullptr;
     if (native) { native->attach(ui); }
 #endif
     ui.on_screen_resize([&](ui_adaptor& ui) {
@@ -1866,7 +1920,8 @@ static auto search(const ui_adaptor& om_ui, tripoint_abs_omt& curs, const tripoi
                 gs::write_span(jsout, {.text = term});
                 jsout.member("aside");
                 jsout.start_object();
-                const auto& ter = ACTIVE_OVERMAP_BUFFER.ter(tripoint_abs_omt(locations[i], curs.z())).obj();
+                const auto& ter =
+                    ACTIVE_OVERMAP_BUFFER.ter(tripoint_abs_omt(locations[i], curs.z())).obj();
                 jsout.member("title");
                 gs::write_span(jsout, {.text = ter.get_name(), .color = c_white});
                 jsout.member("sym", ter.get_symbol());
@@ -1876,7 +1931,8 @@ static auto search(const ui_adaptor& om_ui, tripoint_abs_omt& curs, const tripoi
                     jsout,
                     {.text = string_format(
                          "%s %s\n%s %s",
-                         colorize(locations.size() == 1 ? _("Result:") : _("Results:"), c_light_blue),
+                         colorize(locations.size() == 1 ? _("Result:") : _("Results:"),
+                                  c_light_blue),
                          colorize(string_format("%d/%d", i + 1, locations.size()), c_white),
                          colorize(_("Direction:"), c_light_blue),
                          colorize(string_format("%d %s", static_cast<int>(trig_dist(orig, here)),
@@ -1884,12 +1940,27 @@ static auto search(const ui_adaptor& om_ui, tripoint_abs_omt& curs, const tripoi
                                   c_white))});
                 jsout.member("buttons");
                 jsout.start_array();
-                gs::write_button(jsout, {.act = "PREV_TAB", .text = _("Prev"), .icon = "chevron-left",
-                                         .category = category, .enabled = locations.size() > 1});
-                gs::write_button(jsout, {.act = "NEXT_TAB", .text = _("Next"), .icon = "chevron-right",
-                                         .category = category, .enabled = locations.size() > 1});
-                gs::write_button(jsout, {.act = "CONFIRM", .text = _("Stay here"), .icon = "map-pin",
-                                         .category = category, .primary = true});
+                gs::write_button(
+                    jsout,
+                    {.act = "PREV_TAB",
+                     .text = _("Prev"),
+                     .icon = "chevron-left",
+                     .category = category,
+                     .enabled = locations.size() > 1});
+                gs::write_button(
+                    jsout,
+                    {.act = "NEXT_TAB",
+                     .text = _("Next"),
+                     .icon = "chevron-right",
+                     .category = category,
+                     .enabled = locations.size() > 1});
+                gs::write_button(
+                    jsout,
+                    {.act = "CONFIRM",
+                     .text = _("Stay here"),
+                     .icon = "map-pin",
+                     .category = category,
+                     .primary = true});
                 jsout.end_array();
                 jsout.end_object();
                 jsout.member("hints");
@@ -2000,10 +2071,10 @@ static void place_ter_or_special(
         ui_adaptor ui;
 #if defined(TILES)
         // Shown in a panel over the overmap's own, with the text this box would show.
-        auto native = cata::godot_bridge::native_screens()
-                          ? std::make_unique<cata::godot_bridge::native_view>(
-                                "screen", &ui, "OVERMAP_EDITOR")
-                          : nullptr;
+        auto native =
+            cata::godot_bridge::native_screens()
+                ? std::make_unique<cata::godot_bridge::native_view>("screen", &ui, "OVERMAP_EDITOR")
+                : nullptr;
         if (native) { native->attach(ui); }
 #endif
         ui.on_screen_resize([&](ui_adaptor& ui) {
@@ -2085,7 +2156,8 @@ static void place_ter_or_special(
                 }
                 const auto category = std::string("OVERMAP_EDITOR");
                 native->publish([&](JsonOut& jsout) {
-                    write_side_panel(jsout, terrain ? _("Place terrain") : _("Place special"), "hammer");
+                    write_side_panel(
+                        jsout, terrain ? _("Place terrain") : _("Place special"), "hammer");
                     jsout.member("aside");
                     jsout.start_object();
                     jsout.member("mono", true);
@@ -2093,10 +2165,20 @@ static void place_ter_or_special(
                     cata::godot_bridge::write_window_spans(jsout, w_editor, {.left = 1});
                     jsout.member("buttons");
                     jsout.start_array();
-                    gs::write_button(jsout, {.act = "ROTATE", .text = _("Rotate"), .icon = "rotate-cw",
-                                             .category = category, .enabled = can_rotate});
-                    gs::write_button(jsout, {.act = "CONFIRM", .text = _("Apply"), .icon = "check",
-                                             .category = category, .primary = true});
+                    gs::write_button(
+                        jsout,
+                        {.act = "ROTATE",
+                         .text = _("Rotate"),
+                         .icon = "rotate-cw",
+                         .category = category,
+                         .enabled = can_rotate});
+                    gs::write_button(
+                        jsout,
+                        {.act = "CONFIRM",
+                         .text = _("Apply"),
+                         .icon = "check",
+                         .category = category,
+                         .primary = true});
                     jsout.end_array();
                     jsout.end_object();
                     jsout.member("hints");
@@ -2253,9 +2335,10 @@ static auto display(const tripoint_abs_omt& orig, const draw_data_t& data = draw
     ui_adaptor ui;
 #if defined(TILES)
     // The legend becomes a panel the Godot front end draws over the right of the map.
-    auto native = cata::godot_bridge::native_screens()
-                      ? std::make_unique<cata::godot_bridge::native_view>("screen", &ui, "OVERMAP")
-                      : nullptr;
+    auto native =
+        cata::godot_bridge::native_screens()
+            ? std::make_unique<cata::godot_bridge::native_view>("screen", &ui, "OVERMAP")
+            : nullptr;
     if (native) { native->attach(ui); }
 #endif
     ui.on_screen_resize([&](ui_adaptor& ui) {
@@ -2278,8 +2361,8 @@ static auto display(const tripoint_abs_omt& orig, const draw_data_t& data = draw
         g->w_overmap = catacurses::newwin(OVERMAP_WINDOW_HEIGHT, OVERMAP_WINDOW_WIDTH, point_zero);
 #if defined(TILES)
         if (native) {
-            g->w_omlegend = cata::godot_bridge::capture_window(
-                OVERMAP_WINDOW_TERM_HEIGHT, godot_legend_columns);
+            g->w_omlegend = cata::godot_bridge::
+                capture_window(OVERMAP_WINDOW_TERM_HEIGHT, godot_legend_columns);
         }
 #endif
 
