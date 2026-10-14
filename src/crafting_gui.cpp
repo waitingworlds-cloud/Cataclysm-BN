@@ -56,6 +56,13 @@
 #include <utility>
 #include <vector>
 
+#if defined(TILES)
+#include <memory>
+
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
+
 static const std::string flag_BLIND_NO_EFFECT( "BLIND_NO_EFFECT" );
 static const std::string flag_BLIND_EASY( "BLIND_EASY" );
 static const std::string flag_BLIND_HARD( "BLIND_HARD" );
@@ -781,6 +788,11 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
     catacurses::window w_iteminfo;
     std::vector<std::string> keybinding_tips;
     int keybinding_x = 0;
+#if defined(TILES)
+    const auto drawn_by_godot = cata::godot_bridge::native_screens();
+#else
+    const auto drawn_by_godot = false;
+#endif
     ui_adaptor ui;
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         const int freeWidth = TERMX - FULL_SCREEN_WIDTH;
@@ -848,7 +860,11 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
             w_iteminfo = {};
         }
 
-        ui.position( point( wStart, 0 ), point( width, TERMY ) );
+        if( drawn_by_godot ) {
+            ui.position( point_zero, point_zero );
+        } else {
+            ui.position( point( wStart, 0 ), point( width, TERMY ) );
+        }
     } );
     ui.mark_resize();
 
@@ -918,8 +934,273 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
     }
     const auto &all_recipes = recipe_subset( {}, all_recipes_flat );
 
+#if defined(TILES)
+    namespace gs = cata::godot_screen;
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( drawn_by_godot ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", &line, "CRAFTING" );
+        native->attach( ui );
+    }
+    const auto publish_native = [&]() {
+        const auto has_line = line >= 0 && line < static_cast<int>( current.size() );
+        const auto batch_size = batch ? line + 1 : 1;
+        const auto &shown_recipes = show_unavailable ? all_recipes : available_recipes;
+        const auto label_of = []( const std::string & id ) {
+            return normalized_names.contains( id ) ? normalized_names[id] : id;
+        };
+        const auto category_label = [&]( const recipe & rec ) {
+            const auto sub = label_of( rec.subcategory );
+            return sub.empty() ? label_of( rec.category )
+                   : string_format( "%s / %s", label_of( rec.category ), sub );
+        };
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Crafting" ) );
+            jsout.member( "icon", "hammer" );
+            if( !show_hidden ) {
+                auto hidden = num_hidden == 0
+                              ? string_format( _( "* No hidden recipe - %s in category *" ), num_recipe )
+                              : num_hidden == 1
+                              ? string_format( _( "* %s hidden recipe - %s in category *" ), num_hidden, num_recipe )
+                              : string_format( _( "* %s hidden recipes - %s in category *" ), num_hidden, num_recipe );
+                hidden = trim( trim_punctuation_marks( hidden ) );
+                jsout.member( "subtitle" );
+                cata::godot_bridge::write_spans( jsout, hidden, num_hidden == 0 ? c_green : c_light_red );
+            }
+            jsout.member( "stats" );
+            jsout.start_array();
+            if( has_line ) {
+                const auto &rec = *current[line];
+                const auto speed = crafting_speed_multiplier( crafter, rec, false );
+                const auto [text, color] = lighting_crafting_speed_multiplier( crafter, rec ) <= 0.0f
+                                           ? std::pair{ std::string( _( "too dark to craft" ) ), c_red }
+                                           :
+                                           speed <= 0.0f ? std::pair{ std::string( _( "too sad to craft effectively" ) ), c_red }
+                                           :
+                                           speed < 1.0f ? std::pair{ string_format( _( "crafting is slow %d%%" ), static_cast<int>( speed * 100 ) ), c_yellow }
+                                           :
+                                           std::pair{ std::string( _( "craftable" ) ), c_green };
+                jsout.start_object();
+                jsout.member( "icon", "gauge" );
+                jsout.member( "value" );
+                cata::godot_bridge::write_spans( jsout, text, color );
+                jsout.end_object();
+            }
+            jsout.end_array();
+
+            jsout.member( "tabs" );
+            jsout.start_array();
+            if( batch || !filterstring.empty() ) {
+                jsout.start_object();
+                jsout.member( "text", batch ? std::string( _( "Batch" ) )
+                              : std::string( _( "Searched" ) ) + ( is_filtered_unread ? " ⁺" : "" ) );
+                jsout.member( "active", true );
+                jsout.end_object();
+            } else {
+                for( const auto &[i, cat] : craft_cat_list | std::views::enumerate ) {
+                    jsout.start_object();
+                    jsout.member( "text", label_of( cat ) + ( is_cat_unread[cat] ? " ⁺" : "" ) );
+                    jsout.member( "active", cat == tab.cur() );
+                    jsout.member( "pick", gs::tab_pick + static_cast<int>( i ) );
+                    jsout.end_object();
+                }
+            }
+            jsout.end_array();
+            jsout.member( "tab_keys" );
+            jsout.start_object();
+            jsout.member( "prev", cata::godot_bridge::key_label( "PREV_TAB", "CRAFTING" ) );
+            jsout.member( "next", cata::godot_bridge::key_label( "NEXT_TAB", "CRAFTING" ) );
+            jsout.end_object();
+            jsout.member( "subtabs" );
+            jsout.start_array();
+            if( !batch && filterstring.empty() ) {
+                for( const auto &[i, sub] : craft_subcat_list[tab.cur()] | std::views::enumerate ) {
+                    jsout.start_object();
+                    jsout.member( "text", label_of( sub ) + ( is_subcat_unread[tab.cur()][sub] ? " ⁺" : "" ) );
+                    jsout.member( "active", sub == subtab.cur() );
+                    jsout.member( "enabled", !shown_recipes.empty_category( tab.cur(),
+                                  sub != "CSC_ALL" ? sub : "" ) );
+                    jsout.member( "pick", gs::subtab_pick + static_cast<int>( i ) );
+                    jsout.end_object();
+                }
+            }
+            jsout.end_array();
+
+            jsout.member( "search" );
+            jsout.start_object();
+            jsout.member( "text", filterstring );
+            jsout.member( "act", "FILTER" );
+            jsout.member( "key", cata::godot_bridge::key_label( "FILTER", "CRAFTING" ) );
+            jsout.member( "placeholder", _( "Search recipes" ) );
+            jsout.member( "tip",
+                          _( "Search by name, or use prefixes such as t: tool, c: component, s: skill, q: quality" ) );
+            jsout.end_object();
+            jsout.member( "toggles" );
+            jsout.start_array();
+            const auto toggle = [&]( const std::string & act, const std::string & text,
+            const std::string & icon, bool on ) {
+                jsout.start_object();
+                jsout.member( "act", act );
+                jsout.member( "text", text );
+                jsout.member( "icon", icon );
+                jsout.member( "key", cata::godot_bridge::key_label( act, "CRAFTING" ) );
+                jsout.member( "on", on );
+                jsout.end_object();
+            };
+            if( !filterstring.empty() ) {
+                toggle( "RESET_FILTER", _( "Clear search" ), "x", false );
+            }
+            toggle( "TOGGLE_UNAVAILABLE", _( "Show unavailable" ), "eye", show_unavailable );
+            if( highlight_unread_recipes ) {
+                toggle( "TOGGLE_UNREAD_RECIPES_FIRST", _( "Unread first" ), "sparkles", unread_recipes_first );
+                toggle( "MARK_ALL_RECIPES_READ", _( "Mark all read" ), "check", false );
+            }
+            jsout.end_array();
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", std::string( batch ? _( "Batch size" ) : _( "Recipes" ) ) );
+            jsout.member( "icon", "list" );
+            jsout.member( "stretch", 0.8 );
+            jsout.member( "cursor", line );
+            jsout.member( "empty", _( "No recipes here." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &[i, rec] : current | std::views::enumerate ) {
+                const auto name = batch
+                                  ? string_format( _( "%2dx %s" ), i + 1, rec->result_name( true ) )
+                                  : std::string( indent[i], ' ' ) + rec->result_name( /*decorated=*/true );
+                jsout.start_object();
+                jsout.member( "text" );
+                cata::godot_bridge::write_spans( jsout, name, available[i].color() );
+                if( indent[i] > 0 && !batch ) {
+                    jsout.member( "indent", indent[i] );
+                }
+                const auto known = available_recipes.contains( *rec );
+                if( highlight_unread_recipes && known && !uistate.read_recipes.count( rec->ident() ) ) {
+                    jsout.member( "note" );
+                    cata::godot_bridge::write_spans( jsout, new_recipe_str, new_recipe_str_col );
+                }
+                if( rec->is_nested() ) {
+                    jsout.member( "icon", "folder-open" );
+                }
+                jsout.end_object();
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.start_object();
+            jsout.member( "title", _( "Requirements" ) );
+            jsout.member( "icon", "list-checks" );
+            jsout.member( "stretch", 1.1 );
+            jsout.member( "body" );
+            if( has_line && !current[line]->is_nested() ) {
+                const auto &avail = available[line];
+                const auto qry = trim( filterstring );
+                const auto qry_comps = qry.starts_with( "c:" ) ? qry.substr( 2 ) : std::string();
+                const auto color = avail.color( true );
+                const auto &info = cached_recipe_info( *current[line], avail, crafter, show_unavailable,
+                                                       qry_comps, batch_size, 120, color );
+                recipe_info_scroll = std::clamp( recipe_info_scroll, 0,
+                                                 std::max( 0, static_cast<int>( info.size() ) - 8 ) );
+                cata::godot_bridge::write_spans( jsout, join( info, "\n" ), color );
+                jsout.member( "scroll", recipe_info_scroll );
+            } else {
+                cata::godot_bridge::write_spans( jsout, has_line
+                                                 ? std::string( _( "A group of recipes.  Open it to see them." ) )
+                                                 : std::string(), c_light_gray );
+            }
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "active_pane", 0 );
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 400 );
+            jsout.member( "empty", _( "Pick a recipe to see what it makes." ) );
+            if( has_line ) {
+                const auto &rec = *current[line];
+                jsout.member( "subtitle", category_label( rec ) );
+                if( rec.is_nested() ) {
+                    const auto known_items = std::ranges::count_if( rec.nested_category_data,
+                    [&]( const recipe_id & nested_id ) {
+                        return available_recipes.contains( nested_id.obj() );
+                    } );
+                    const auto origin_name = rec.src.empty() || !rec.src.back().second.is_valid()
+                                             ? std::string( _( "unknown" ) )
+                                             : rec.src.back().second.obj().name();
+                    jsout.member( "title" );
+                    cata::godot_bridge::write_spans( jsout, rec.result_name( false ), c_white );
+                    jsout.member( "icon", "folder-open" );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_spans( jsout, string_format(
+                                                         "%s\n\n%s\n\n%s",
+                                                         string_format( _( "<color_light_blue>Origin: '%s'</color>" ), origin_name ),
+                                                         rec.description.translated(),
+                                                         string_format( _( "Known recipes: <color_light_blue>%d</color>" ), known_items ) ),
+                                                     c_light_gray );
+                } else {
+                    const auto data = item_info_data_from_recipe( &rec, batch_size, item_info_scroll );
+                    const auto &result = *item_info_cache.dummy;
+                    jsout.member( "title" );
+                    cata::godot_bridge::write_spans( jsout, result.tname( batch_size ), result.color_in_inventory() );
+                    jsout.member( "sym", result.symbol() );
+                    jsout.member( "sym_color", string_from_color( result.color() ) );
+                    const auto body = format_item_info( data.get_item_display(), {} );
+                    const auto lines = static_cast<int>( std::ranges::count( body, '\n' ) );
+                    item_info_scroll = std::clamp( item_info_scroll, 0, std::max( 0, lines - 8 ) );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_spans( jsout, body, c_light_gray );
+                    jsout.member( "scroll", item_info_scroll );
+                }
+                jsout.member( "buttons" );
+                jsout.start_array();
+                const auto &avail = available[line];
+                gs::write_button( jsout, {
+                    .act = "CONFIRM",
+                    .text = rec.is_nested() ? _( "Open group" ) : _( "Craft" ),
+                    .icon = rec.is_nested() ? "folder-open" : "hammer",
+                    .category = "CRAFTING",
+                    .primary = true,
+                    .enabled = avail.can_craft || avail.is_nested_category,
+                } );
+                if( !rec.is_nested() ) {
+                    gs::write_button( jsout, { .act = "CYCLE_BATCH", .text = batch ? _( "Single craft" ) : _( "Batch" ), .icon = "layers", .category = "CRAFTING" } );
+                    gs::write_button( jsout, { .act = "TOGGLE_FAVORITE", .text = uistate.favorite_recipes.contains( rec.ident() ) ? _( "Unfavorite" ) : _( "Favorite" ), .icon = "star", .category = "CRAFTING" } );
+                    gs::write_button( jsout, { .act = "COMPARE", .text = _( "Compare" ), .icon = "arrow-left-right", .category = "CRAFTING" } );
+                    gs::write_button( jsout, { .act = "HELP_RECIPE", .text = _( "Full info" ), .icon = "info", .category = "CRAFTING" } );
+                    gs::write_button( jsout, { .act = "RELATED_RECIPES", .text = _( "Related" ), .icon = "external-link", .category = "CRAFTING" } );
+                    gs::write_button( jsout, { .act = "ASSIGN_NPC_CRAFT", .text = _( "Assign NPC" ), .icon = "user-round", .category = "CRAFTING" } );
+                }
+                gs::write_button( jsout, { .act = "HIDE_SHOW_RECIPE", .text = show_hidden ? _( "Unhide" ) : _( "Hide" ), .icon = "eye", .category = "CRAFTING" } );
+                if( highlight_unread_recipes ) {
+                    gs::write_button( jsout, { .act = "TOGGLE_RECIPE_UNREAD", .text = _( "Read / unread" ), .icon = "sparkles", .category = "CRAFTING" } );
+                }
+                jsout.end_array();
+            }
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Move" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Category" ) );
+            gs::write_hint( jsout, "SCROLL_RECIPE_INFO_DOWN", "CRAFTING", _( "Scroll details" ) );
+            gs::write_hint( jsout, "CONFIRM", "CRAFTING", _( "Craft" ) );
+            gs::write_hint( jsout, "HELP_KEYBINDINGS", "CRAFTING", _( "Keys" ) );
+            gs::write_hint( jsout, "QUIT", "CRAFTING", _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     int recipe_scroll_window_min = 0;
     ui.on_redraw( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         int lost_width = 0;
         // Need to do this to get the width
         // But draw tabs removes the text
@@ -1473,6 +1754,21 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
         ui_manager::redraw();
         const int scroll_recipe_info_lines = catacurses::getmaxy( w_iteminfo ) - 4;
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = cata::godot_bridge::take_pick( &line ) ) {
+            if( *pick >= gs::subtab_pick ) {
+                subtab.set_index( *pick - gs::subtab_pick );
+                recalc = true;
+            } else if( *pick >= gs::tab_pick ) {
+                tab.set_index( *pick - gs::tab_pick );
+                subtab = list_circularizer<std::string>( craft_subcat_list[tab.cur()] );
+                recalc = true;
+            } else if( *pick % gs::row_stride < static_cast<int>( current.size() ) ) {
+                line = *pick % gs::row_stride;
+                user_moved_line = highlight_unread_recipes;
+            }
+        }
+#endif
         if( action == "SCROLL_RECIPE_INFO_UP" ) {
             recipe_info_scroll -= dataLines;
             item_info_scroll -= dataLines;
