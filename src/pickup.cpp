@@ -53,6 +53,11 @@
 #include "vehicle/vehicle_selector.h"
 #include "vehicle/vpart_position.h"
 
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -671,6 +676,12 @@ auto pick_up_from_items( const std::vector<item_stack::iterator> &here, const in
         catacurses::window w_pickup;
         catacurses::window w_item_info;
 
+#if defined(TILES)
+        auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+        if( cata::godot_bridge::native_screens() ) {
+            native = std::make_unique<cata::godot_bridge::native_view>( "screen", &getitem, "PICKUP" );
+        }
+#endif
         ui_adaptor ui;
         ui.on_screen_resize( [&]( ui_adaptor & ui ) {
             const int itemsH = std::min( 25, TERMY / 2 );
@@ -713,8 +724,18 @@ auto pick_up_from_items( const std::vector<item_stack::iterator> &here, const in
                                               point( pickupX, pickupH ) );
 
             ui.position( point( pickupX, 0 ), point( pickupW, TERMY ) );
+#if defined(TILES)
+            if( native ) {
+                ui.position( point_zero, point_zero );
+            }
+#endif
         } );
         ui.mark_resize();
+#if defined(TILES)
+        if( native ) {
+            native->attach( ui );
+        }
+#endif
 
         std::optional<int> itemcount;
 
@@ -755,7 +776,174 @@ auto pick_up_from_items( const std::vector<item_stack::iterator> &here, const in
 
         const std::string all_pickup_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:;";
 
+        /// Name of a stack with its count, as the list shows it.
+        const auto stack_name = [&]( const int true_it ) -> std::string {
+            const auto &stack = stacked_here[true_it];
+            const item &this_item = * *stack.front();
+            auto item_name = std::string();
+            if( this_item.is_money() )
+            {
+                //Count charges
+                // TODO: transition to the item_location system used for the inventory
+                unsigned int charges_total = 0;
+                for( const item_stack::iterator &it : stack ) {
+                    charges_total += ( *it )->charges;
+                }
+                //Picking up none or all the cards in a stack
+                if( !getitem[true_it].pick || !getitem[true_it].count ) {
+                    item_name = this_item.display_money( stack.size(), charges_total );
+                } else {
+                    unsigned int charges = 0;
+                    const int item_count = *getitem[true_it].count;
+                    for( const auto &it : stack | std::views::take( item_count ) ) {
+                        charges += ( *it )->charges;
+                    }
+                    item_name = this_item.display_money( item_count, charges_total, charges );
+                }
+            } else
+            {
+                item_name = this_item.display_name( stack.size() );
+            }
+            if( stack.size() > 1 )
+            {
+                item_name = string_format( "%d %s", stack.size(), item_name );
+            }
+            return item_name;
+        };
+
+#if defined(TILES)
+        const auto publish_native = [&]() {
+            namespace gs = cata::godot_screen;
+            const auto category = std::string( "PICKUP" );
+            const auto pickup_chars = ctxt.get_available_single_char_hotkeys( all_pickup_chars );
+            native->publish( [&]( JsonOut & jsout ) {
+                jsout.member( "title", _( "Pick up" ) );
+                jsout.member( "icon", "hand" );
+                jsout.member( "size" );
+                jsout.start_array();
+                jsout.write( 1300 );
+                jsout.write( 900 );
+                jsout.end_array();
+                if( itemcount ) {
+                    jsout.member( "subtitle" );
+                    gs::write_span( jsout, { .text = string_format( _( "Amount: %d (mark an item to use it)" ), *itemcount ), .color = c_yellow } );
+                }
+                jsout.member( "stats" );
+                jsout.start_array();
+                gs::write_stat( jsout, { .icon = "weight", .value = { .text = string_format( "%s / %.1f %s", colorize( string_format( "%.1f", round_up( convert_weight( weight_predict ), 1 ) ), weight_predict > g->u.weight_capacity() ? c_red : c_white ), round_up( convert_weight( g->u.weight_capacity() ), 1 ), weight_units() ), .color = c_light_gray }, .tip = _( "Weight carried after picking up the marked items" ) } );
+                gs::write_stat( jsout, { .icon = "backpack", .value = { .text = string_format( "%s / %s %s", colorize( format_volume( volume_predict ), volume_predict > g->u.volume_capacity() ? c_red : c_white ), format_volume( g->u.volume_capacity() ), volume_units_abbr() ), .color = c_light_gray }, .tip = _( "Volume carried after picking up the marked items" ) } );
+                jsout.end_array();
+
+                jsout.member( "search" );
+                jsout.start_object();
+                jsout.member( "text", filter );
+                jsout.member( "act", "FILTER" );
+                jsout.member( "key", cata::godot_bridge::key_label( "FILTER", category ) );
+                jsout.member( "placeholder", _( "Filter items" ) );
+                jsout.end_object();
+                const auto marked = std::ranges::count_if( getitem, &pickup_count::pick );
+                jsout.member( "toggles" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "act", "SELECT_ALL" );
+                jsout.member( "text", marked == static_cast<long>( getitem.size() ) ? _( "Unmark all" ) :
+                              _( "Mark all" ) );
+                jsout.member( "icon", "list-checks" );
+                jsout.member( "key", cata::godot_bridge::key_label( "SELECT_ALL", category ) );
+                jsout.end_object();
+                jsout.end_array();
+
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", _( "Items here" ) );
+                jsout.member( "icon", "package" );
+                jsout.member( "cursor", selected );
+                jsout.member( "count", string_format( _( "%d marked" ), marked ) );
+                jsout.member( "rows" );
+                jsout.start_array();
+                for( const auto &[n, true_it] : matches | std::views::enumerate ) {
+                    const auto cur = static_cast<int>( n );
+                    const item &this_item = **stacked_here[true_it].front();
+                    const auto &entry = getitem[true_it];
+                    auto key = std::string();
+                    if( cur < static_cast<int>( pickup_chars.size() ) ) {
+                        key = std::string( 1, pickup_chars[cur] );
+                    } else if( cur < static_cast<int>( pickup_chars.size() * ( pickup_chars.size() + 1 ) ) ) {
+                        const auto p = cur - pickup_chars.size();
+                        key = string_format( "`%c%c", pickup_chars[p / pickup_chars.size()],
+                                             pickup_chars[p % pickup_chars.size()] );
+                    }
+                    auto note = gs::span();
+                    if( entry.pick && entry.count ) {
+                        note = { .text = string_format( _( "taking %d" ), *entry.count ), .color = c_light_blue };
+                    } else if( entry.parent ) {
+                        note = { .text = _( "inside the item above" ), .color = c_dark_gray };
+                    }
+                    if( !this_item.is_owned_by( g->u, true ) ) {
+                        note = { .text = note.text.empty() ? std::string( _( "not yours" ) ) : note.text + " · " + _( "not yours" ), .color = c_light_red };
+                    }
+                    gs::write_row( jsout, {
+                        .text = { .text = stack_name( true_it ), .color = this_item.color_in_inventory() },
+                        .note = note,
+                        .sym = this_item.symbol(),
+                        .sym_color = string_from_color( this_item.color() ),
+                        .indent = entry.parent ? 1 : 0,
+                        .mark = entry.pick,
+                        .key = key,
+                        .confirm = entry.pick ? "LEFT" : "RIGHT",
+                        .mark_act = entry.pick ? "LEFT" : "RIGHT",
+                    } );
+                }
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+
+                jsout.member( "aside" );
+                jsout.start_object();
+                jsout.member( "width", 520 );
+                if( selected >= 0 && selected < static_cast<int>( matches.size() ) ) {
+                    const auto true_it = matches[selected];
+                    item *loc = *stacked_here[true_it].front();
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = loc->display_name(), .color = loc->color_in_inventory() } );
+                    jsout.member( "sym", loc->symbol() );
+                    jsout.member( "sym_color", string_from_color( loc->color() ) );
+                    const auto info = loc->info( rot::temp::for_location( get_map(), *loc ) );
+                    jsout.member( "body" );
+                    gs::write_span( jsout, { .text = format_item_info( info, {} ) } );
+                    jsout.member( "scroll", std::max( iScrollPos, 0 ) );
+                    jsout.member( "buttons" );
+                    jsout.start_array();
+                    gs::write_button( jsout, { .act = "CONFIRM", .text = marked > 0 ? string_format( _( "Pick up %d marked" ), marked ) : std::string( _( "Pick up" ) ), .icon = "hand", .category = category, .primary = true, .enabled = marked > 0 } );
+                    const auto pick = getitem[true_it].pick;
+                    gs::write_button( jsout, { .act = pick ? "LEFT" : "RIGHT", .text = pick ? _( "Unmark" ) : _( "Mark" ), .icon = pick ? "minus" : "plus", .category = category } );
+                    gs::write_button( jsout, { .act = "WEAR", .text = _( "Wear" ), .icon = "shirt", .category = category, .enabled = g->u.can_wear( *loc ).success() } );
+                    gs::write_button( jsout, { .act = "WIELD", .text = _( "Wield" ), .icon = "sword", .category = category, .enabled = g->u.can_wield( *loc ).success() } );
+                    jsout.end_array();
+                }
+                jsout.end_object();
+
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Move" ) );
+                gs::write_hint( jsout, "RIGHT", category, _( "Mark" ) );
+                gs::write_hint( jsout, "LEFT", category, _( "Unmark" ) );
+                gs::write_fixed_hint( jsout, "0-9", _( "Amount" ) );
+                gs::write_hint( jsout, "CONFIRM", category, _( "Pick up" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Cancel" ) );
+                jsout.end_array();
+            } );
+        };
+#endif
+
         ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+            if( native ) {
+                publish_native();
+                return;
+            }
+#endif
             const item &selected_item = **stacked_here[matches[selected]].front();
 
             if( selected >= 0 && selected <= static_cast<int>( stacked_here.size() ) - 1 ) {
@@ -827,35 +1015,7 @@ auto pick_up_from_items( const std::vector<item_stack::iterator> &here, const in
                     } else {
                         wprintw( w_pickup, "- " );
                     }
-                    std::string item_name;
-                    if( ( *stacked_here[true_it].front() )->is_money() ) {
-                        //Count charges
-                        // TODO: transition to the item_location system used for the inventory
-                        unsigned int charges_total = 0;
-                        for( const item_stack::iterator &it : stacked_here[true_it] ) {
-                            charges_total += ( *it )->charges;
-                        }
-                        //Picking up none or all the cards in a stack
-                        if( !getitem[true_it].pick || !getitem[true_it].count ) {
-                            item_name = ( *stacked_here[true_it].front() )->display_money( stacked_here[true_it].size(),
-                                        charges_total );
-                        } else {
-                            unsigned int charges = 0;
-                            int item_count = getitem[true_it].count ? *getitem[true_it].count : 0;
-                            int c = item_count;
-                            for( std::list<item_stack::iterator>::const_iterator it = stacked_here[true_it].begin();
-                                 it != stacked_here[true_it].end() && c > 0; ++it, --c ) {
-                                charges += ( **it )->charges;
-                            }
-
-                            item_name = ( *stacked_here[true_it].front() )->display_money( item_count, charges_total, charges );
-                        }
-                    } else {
-                        item_name = this_item.display_name( stacked_here[true_it].size() );
-                    }
-                    if( stacked_here[true_it].size() > 1 ) {
-                        item_name = string_format( "%d %s", stacked_here[true_it].size(), item_name );
-                    }
+                    auto item_name = stack_name( true_it );
                     if( get_option<bool>( "ITEM_SYMBOLS" ) ) {
                         item_name = string_format( "%s %s", this_item.symbol().c_str(),
                                                    item_name );
@@ -1165,6 +1325,17 @@ auto pick_up_from_items( const std::vector<item_stack::iterator> &here, const in
             ui_manager::redraw();
             action = ctxt.handle_input();
             raw_input_char = ctxt.get_raw_input().get_first_input();
+#if defined(TILES)
+            // A clicked row becomes the selection before its action (mark, unmark) applies.
+            if( const auto pick = native ? cata::godot_bridge::take_pick( &getitem ) : std::nullopt ) {
+                const auto row = *pick % cata::godot_screen::row_stride;
+                if( row >= 0 && row < static_cast<int>( matches.size() ) ) {
+                    selected = row;
+                    start = selected - selected % maxitems;
+                    iScrollPos = 0;
+                }
+            }
+#endif
 
         } while( action != "QUIT" && action != "CONFIRM" );
 

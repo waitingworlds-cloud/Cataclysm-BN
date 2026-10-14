@@ -586,15 +586,18 @@ func _build_panes(panes: Array) -> void:
 			var index := int(r.get("i", i))
 			var code := int(r.get("pick", p * STRIDE + index))
 			var at := Vector2i(p, index)
+			# A row may override what clicking it again, or its check box, presses.
+			var row_confirm := String(r.get("confirm", confirm))
+			var mark_act := String(r.get("mark_act", spec.get("mark_act", "")))
 			row.clicked.connect(func():
-				if at != _cursor or confirm == "":
+				if at != _cursor or row_confirm == "":
 					Bridge.pick(view_id, code, "")
 				else:
-					Bridge.pick(view_id, code, confirm))
+					Bridge.pick(view_id, code, row_confirm))
 			row.activated.connect(func():
-				if confirm != "":
-					Bridge.pick(view_id, code, confirm))
-			row.marked.connect(func(): Bridge.pick(view_id, code, String(spec.get("mark_act", ""))))
+				if row_confirm != "":
+					Bridge.pick(view_id, code, row_confirm))
+			row.marked.connect(func(): Bridge.pick(view_id, code, mark_act))
 			pane.add_row(row)
 			_rows[at] = row
 		pane.finish()
@@ -833,6 +836,10 @@ class Pane extends VBoxContainer:
 		_count.text = String(spec.get("count", str(_items) if _items > 0 else ""))
 		if _text != null and spec.has("scroll"):
 			_scroll.scroll_vertical = int(float(spec["scroll"]) * LINE_HEIGHT)
+		if spec.has("scroll_row") and _list.get_child_count() > 0:
+			await get_tree().process_frame
+			var row := _list.get_child(clampi(int(spec["scroll_row"]), 0, _list.get_child_count() - 1)) as Control
+			_scroll.scroll_vertical = int(row.position.y)
 		if not _entries.is_empty() and (spec.has("scroll_entry") or bool(spec.get("scroll_end", false))):
 			await get_tree().process_frame
 			if bool(spec.get("scroll_end", false)):
@@ -903,8 +910,13 @@ class ListRow extends PanelContainer:
 		custom_minimum_size.y = ROW_HEIGHT
 		mouse_filter = Control.MOUSE_FILTER_STOP
 		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if _enabled else Control.CURSOR_ARROW
+		if bool(row.get("passive", false)):
+			# Information only: not clickable, but not dimmed either.
+			mouse_filter = Control.MOUSE_FILTER_PASS
+			mouse_default_cursor_shape = Control.CURSOR_ARROW
+			set_meta("passive", true)
 		mouse_entered.connect(func():
-			_hover = _enabled
+			_hover = _enabled and not has_meta("passive")
 			_restyle())
 		mouse_exited.connect(func():
 			_hover = false
@@ -1056,7 +1068,7 @@ class ListRow extends PanelContainer:
 	func _gui_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 			accept_event()
-			if not _enabled:
+			if not _enabled or has_meta("passive"):
 				return
 			if event.double_click:
 				activated.emit()

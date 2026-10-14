@@ -102,6 +102,16 @@ struct row {
     std::string sym_color = {};
     int indent = 0;
     std::string tip = {};
+    /// Information only: no hover or click, and not dimmed like a disabled row.
+    bool passive = false;
+    /// Check box state, when the list has check boxes.
+    std::optional<bool> mark = std::nullopt;
+    /// Key label shown before the row, such as its hotkey.
+    std::string key = {};
+    /// Action pressed when the selected row is clicked again, instead of the pane's `confirm`.
+    std::optional<std::string> confirm = std::nullopt;
+    /// Action pressed when the check box is clicked, instead of the pane's `mark_act`.
+    std::string mark_act = {};
 };
 
 inline auto write_row( JsonOut &jsout, const row &r ) -> void
@@ -148,6 +158,21 @@ inline auto write_row( JsonOut &jsout, const row &r ) -> void
     }
     if( !r.tip.empty() ) {
         jsout.member( "tip", r.tip );
+    }
+    if( r.passive ) {
+        jsout.member( "passive", true );
+    }
+    if( r.mark ) {
+        jsout.member( "mark", *r.mark );
+    }
+    if( !r.key.empty() ) {
+        jsout.member( "key", r.key );
+    }
+    if( r.confirm ) {
+        jsout.member( "confirm", *r.confirm );
+    }
+    if( !r.mark_act.empty() ) {
+        jsout.member( "mark_act", r.mark_act );
     }
     jsout.end_object();
 }
