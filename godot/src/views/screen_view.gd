@@ -549,8 +549,8 @@ func _apply_panes(panes: Array) -> void:
 
 
 func _pane_hash(pane: Dictionary) -> int:
-	return JSON.stringify([pane.get("rows", []), pane.get("body", []), pane.get("columns", []),
-			pane.get("title", ""), pane.get("empty", "")]).hash()
+	return JSON.stringify([pane.get("rows", []), pane.get("body", []), pane.get("entries", []),
+			pane.get("columns", []), pane.get("title", ""), pane.get("empty", "")]).hash()
 
 
 func _build_panes(panes: Array) -> void:
@@ -733,6 +733,7 @@ class Pane extends VBoxContainer:
 	var _scroll: ScrollContainer
 	var _list: VBoxContainer
 	var _text: RichTextLabel
+	var _entries: Array[Control] = []
 	var _items := 0
 	var _empty := ""
 
@@ -796,11 +797,49 @@ class Pane extends VBoxContainer:
 			text_pad.add_child(_text)
 			_list.add_child(text_pad)
 			_items = -1
+		elif spec.has("entries"):
+			_add_entries(spec["entries"])
+
+	## A log: wrapped entries, each with a time shown only where it changes (the message log).
+	func _add_entries(entries: Array) -> void:
+		var prev_time := ""
+		for e in entries:
+			var time := String(e.get("time", ""))
+			var line := HBoxContainer.new()
+			line.add_theme_constant_override("separation", 14)
+			line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var stamp := Slate.label(time if time != prev_time else "", 11, Slate.curses("c_light_blue"), Slate.mono())
+			stamp.custom_minimum_size.x = 104
+			stamp.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			stamp.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+			stamp.add_theme_constant_override("line_spacing", 0)
+			line.add_child(stamp)
+			var text := Slate.rich(14)
+			text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			text.text = Slate.bbcode(e.get("text", []), Slate.TEXT)
+			line.add_child(text)
+			var box := MarginContainer.new()
+			box.add_theme_constant_override("margin_left", 4)
+			box.add_theme_constant_override("margin_right", 10)
+			box.add_theme_constant_override("margin_top", 10 if time != prev_time and not _entries.is_empty() else 2)
+			box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			box.add_child(line)
+			_list.add_child(box)
+			_entries.append(box)
+			prev_time = time
+		_items = entries.size()
 
 	func apply_state(spec: Dictionary) -> void:
 		_count.text = String(spec.get("count", str(_items) if _items > 0 else ""))
 		if _text != null and spec.has("scroll"):
 			_scroll.scroll_vertical = int(float(spec["scroll"]) * LINE_HEIGHT)
+		if not _entries.is_empty() and (spec.has("scroll_entry") or bool(spec.get("scroll_end", false))):
+			await get_tree().process_frame
+			if bool(spec.get("scroll_end", false)):
+				_scroll.scroll_vertical = int(_scroll.get_v_scroll_bar().max_value)
+			else:
+				var at := clampi(int(spec["scroll_entry"]), 0, _entries.size() - 1)
+				_scroll.scroll_vertical = int(_entries[at].position.y)
 
 	func add_heading(r: Dictionary, widths: Array) -> void:
 		var row := HBoxContainer.new()
