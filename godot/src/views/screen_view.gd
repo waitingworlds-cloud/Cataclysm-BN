@@ -26,6 +26,7 @@ var _center: CenterContainer
 var _card: PanelContainer
 var _badge_icon: TextureRect
 var _title: Label
+var _close: Button
 var _subtitle: RichTextLabel
 var _stats: HBoxContainer
 var _tab_bar: Control
@@ -121,7 +122,9 @@ func _ready() -> void:
 
 
 func _quit() -> void:
-	Bridge.press(view_id, String(_msg.get("quit", "QUIT")))
+	var act := String(_msg.get("quit", "QUIT"))
+	if act != "":
+		Bridge.press(view_id, act)
 
 
 # --- Building ------------------------------------------------------------------------------------
@@ -177,6 +180,7 @@ func _build_header() -> Control:
 	row.add_child(_stats)
 
 	var close := Button.new()
+	_close = close
 	close.icon = Slate.icon("x", 18)
 	close.tooltip_text = "Close"
 	close.focus_mode = Control.FOCUS_NONE
@@ -441,6 +445,8 @@ func apply(msg: Dictionary) -> void:
 	_msg = msg
 	_badge_icon.texture = Slate.icon(String(msg.get("icon", "list")), 20)
 	_title.text = String(msg.get("title", ""))
+	# Screens that can't be left with a key (a conversation) have no close button.
+	_close.visible = String(msg.get("quit", "QUIT")) != ""
 	var subtitle: Array = msg.get("subtitle", [])
 	_subtitle.text = Slate.bbcode(subtitle, Slate.FAINT).strip_edges()
 	_subtitle.visible = _subtitle.text != ""
@@ -880,6 +886,7 @@ class Pane extends VBoxContainer:
 	## A log: wrapped entries, each with a time shown only where it changes (the message log).
 	func _add_entries(entries: Array) -> void:
 		var prev_time := ""
+		var timed := entries.any(func(e): return String(e.get("time", "")) != "")
 		for e in entries:
 			var time := String(e.get("time", ""))
 			var line := HBoxContainer.new()
@@ -887,6 +894,7 @@ class Pane extends VBoxContainer:
 			line.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			var stamp := Slate.label(time if time != prev_time else "", 11, Slate.curses("c_light_blue"), Slate.mono())
 			stamp.custom_minimum_size.x = 104
+			stamp.visible = timed
 			stamp.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 			stamp.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 			stamp.add_theme_constant_override("line_spacing", 0)
