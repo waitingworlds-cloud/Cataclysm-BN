@@ -436,7 +436,8 @@ func _layout() -> void:
 		_aside.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	else:
 		_aside.size_flags_horizontal = Control.SIZE_FILL
-		_aside.custom_minimum_size.x = clampf(minf(wanted, target.x * 0.4), 260, wanted)
+		# The side panel takes up to 40% of the card unless the screen says otherwise (help text).
+		_aside.custom_minimum_size.x = clampf(minf(wanted, target.x * float(aside.get("share", 0.4))), 260, wanted)
 
 
 # --- Updates from the game -----------------------------------------------------------------------

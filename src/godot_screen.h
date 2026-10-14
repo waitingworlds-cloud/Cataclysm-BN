@@ -232,6 +232,33 @@ inline auto write_stat( JsonOut &jsout, const stat &s ) -> void
     jsout.end_object();
 }
 
+/// A menu label with its shortcut marked as in `shortcut_print`: `<a|A>: Topic` or `<N|n>ew Game`.
+struct shortcut_label {
+    /// First key of the shortcut, such as `a`.
+    std::string key = {};
+    /// The label without the marks: `Topic`, `New Game`.
+    std::string text = {};
+};
+
+inline auto split_shortcut( const std::string &label ) -> shortcut_label
+{
+    const auto open = label.find( '<' );
+    const auto close = open == std::string::npos ? std::string::npos : label.find( '>', open );
+    if( close == std::string::npos ) {
+        return { .text = label };
+    }
+    const auto inside = label.substr( open + 1, close - open - 1 );
+    const auto key = inside.substr( 0, inside.find( '|' ) );
+    auto rest = label.substr( close + 1 );
+    // A shortcut set apart before the label (`<a|A>: Topic`) is shown only as the key.
+    if( open == 0 && rest.starts_with( ":" ) ) {
+        rest = rest.substr( rest.find_first_not_of( ": " ) == std::string::npos ? rest.size() :
+                            rest.find_first_not_of( ": " ) );
+        return { .key = key, .text = rest };
+    }
+    return { .key = key, .text = label.substr( 0, open ) + key + rest };
+}
+
 /// Writes `tab_keys`: the keys that switch to the previous and next tab.
 inline auto write_tab_keys( JsonOut &jsout, const std::string &prev, const std::string &next,
                             const std::string &category ) -> void

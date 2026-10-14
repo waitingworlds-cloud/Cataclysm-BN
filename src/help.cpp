@@ -28,6 +28,11 @@
 #include "ui_manager.h"
 #include "path_display.h"
 
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
+
 help &get_help()
 {
     static help single_instance;
@@ -164,9 +169,107 @@ void help::display_help()
     // for the menu shortcuts
     ctxt.register_action( "ANY_INPUT" );
 
+    // The text of topic `i`, with key bindings filled in.
+    const auto topic_text = [&]( const size_t i ) -> std::string {
+        std::vector<std::string> i18n_help_texts;
+        i18n_help_texts.reserve( help_texts[i].second.size() );
+        std::transform( help_texts[i].second.begin(), help_texts[i].second.end(),
+                        std::back_inserter( i18n_help_texts ), [&]( std::string & line )
+        {
+            std::string line_proc = _( line );
+            size_t pos = line_proc.find( "<press_", 0, 7 );
+            while( pos != std::string::npos ) {
+                size_t pos2 = line_proc.find( ">", pos, 1 );
+
+                std::string action = line_proc.substr( pos + 7, pos2 - pos - 7 );
+                auto replace = "<color_light_blue>" + press_x( look_up_action( action ), "", "" ) + "</color>";
+
+                if( replace.empty() ) {
+                    debugmsg( "Help json: Unknown action: %s", action );
+                } else {
+                    line_proc = replace_all( line_proc, "<press_" + action + ">", replace );
+                }
+
+                pos = line_proc.find( "<press_", pos2, 7 );
+            }
+            return line_proc;
+        } );
+        if( i18n_help_texts.empty() )
+        {
+            return std::string();
+        }
+        return std::accumulate( i18n_help_texts.begin() + 1, i18n_help_texts.end(),
+                                i18n_help_texts.front(),
+                                []( const std::string & lhs, const std::string & rhs )
+        {
+            return lhs + "\n\n" + rhs;
+        } );
+    };
+
+#if defined(TILES)
+    // The Godot front end shows the topics beside the selected one's text instead of opening
+    // each topic on its own screen.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "default" ) : nullptr;
+    auto topic = size_t{ 0 };
+    auto scroll = 0;
+    if( native ) {
+        native->attach( ui );
+        ctxt.register_action( "PAGE_UP" );
+        ctxt.register_action( "PAGE_DOWN" );
+        ui.on_screen_resize( []( ui_adaptor & ui ) { ui.position( point_zero, point_zero ); } );
+        ui.position( point_zero, point_zero );
+    }
+#endif
+
     std::string action;
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            namespace gs = cata::godot_screen;
+            native->publish( [&]( JsonOut & jsout ) {
+                jsout.member( "title", _( "Help" ) );
+                jsout.member( "icon", "circle-question-mark" );
+                jsout.member( "size", std::array{ 1320, 900 } );
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", _( "Topics" ) );
+                jsout.member( "icon", "book-open" );
+                jsout.member( "cursor", static_cast<int>( topic ) );
+                jsout.member( "stretch", 0.7 );
+                jsout.member( "rows" );
+                jsout.start_array();
+                for( const auto &[i, entry] : help_texts ) {
+                    const auto label = gs::split_shortcut( _( entry.first ) );
+                    gs::write_row( jsout, { .text = { .text = label.text, .color = c_white }, .i = i, .key = label.key, .confirm = "" } );
+                }
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+                jsout.member( "aside" );
+                jsout.start_object();
+                jsout.member( "width", 860 );
+                jsout.member( "share", 0.66 );
+                if( help_texts.contains( static_cast<int>( topic ) ) ) {
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = gs::split_shortcut( _( help_texts[topic].first ) ).text, .color = c_white } );
+                    jsout.member( "body" );
+                    gs::write_span( jsout, { .text = topic_text( topic ) } );
+                    jsout.member( "scroll", scroll );
+                }
+                jsout.end_object();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Topic" ) );
+                gs::write_hint( jsout, "PAGE_DOWN", "default", _( "Scroll" ) );
+                gs::write_hint( jsout, "QUIT", "default", _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         draw_border( w_help_border, BORDER_COLOR, _( " HELP " ), c_black_white );
         wnoutrefresh( w_help_border );
         draw_menu( w_help );
@@ -177,33 +280,39 @@ void help::display_help()
 
         action = ctxt.handle_input();
         std::string sInput = ctxt.get_raw_input().text;
+#if defined(TILES)
+        if( native ) {
+            const auto count = help_texts.size();
+            const auto select = [&]( const size_t t ) {
+                topic = t;
+                scroll = 0;
+            };
+            if( const auto pick = cata::godot_bridge::take_pick( this ) ) {
+                select( static_cast<size_t>( *pick % cata::godot_screen::row_stride ) % count );
+            } else if( action == "UP" ) {
+                select( ( topic + count - 1 ) % count );
+            } else if( action == "DOWN" ) {
+                select( ( topic + 1 ) % count );
+            } else if( action == "PAGE_UP" ) {
+                scroll = std::max( 0, scroll - 15 );
+            } else if( action == "PAGE_DOWN" ) {
+                const auto lines = static_cast<int>( std::ranges::count( topic_text( topic ), '\n' ) );
+                scroll = std::min( scroll + 15, lines );
+            } else {
+                for( size_t i = 0; i < hotkeys.size(); ++i ) {
+                    if( std::ranges::contains( hotkeys[i], sInput ) ) {
+                        select( i );
+                    }
+                }
+            }
+            continue;
+        }
+#endif
         for( size_t i = 0; i < hotkeys.size(); ++i ) {
             for( const std::string &hotkey : hotkeys[i] ) {
                 if( sInput == hotkey ) {
-                    std::vector<std::string> i18n_help_texts;
-                    i18n_help_texts.reserve( help_texts[i].second.size() );
-                    std::transform( help_texts[i].second.begin(), help_texts[i].second.end(),
-                    std::back_inserter( i18n_help_texts ), [&]( std::string & line ) {
-                        std::string line_proc = _( line );
-                        size_t pos = line_proc.find( "<press_", 0, 7 );
-                        while( pos != std::string::npos ) {
-                            size_t pos2 = line_proc.find( ">", pos, 1 );
-
-                            std::string action = line_proc.substr( pos + 7, pos2 - pos - 7 );
-                            auto replace = "<color_light_blue>" + press_x( look_up_action( action ), "", "" ) + "</color>";
-
-                            if( replace.empty() ) {
-                                debugmsg( "Help json: Unknown action: %s", action );
-                            } else {
-                                line_proc = replace_all( line_proc, "<press_" + action + ">", replace );
-                            }
-
-                            pos = line_proc.find( "<press_", pos2, 7 );
-                        }
-                        return line_proc;
-                    } );
-
-                    if( !i18n_help_texts.empty() ) {
+                    const auto text = topic_text( i );
+                    if( !text.empty() ) {
                         ui.on_screen_resize( nullptr );
 
                         const auto get_w_help_border = [&]() {
@@ -211,12 +320,7 @@ void help::display_help()
                             return w_help_border;
                         };
 
-                        scrollable_text( get_w_help_border, _( " HELP " ),
-                                         std::accumulate( i18n_help_texts.begin() + 1, i18n_help_texts.end(),
-                                                          i18n_help_texts.front(),
-                        []( const std::string & lhs, const std::string & rhs ) {
-                            return lhs + "\n\n" + rhs;
-                        } ) );
+                        scrollable_text( get_w_help_border, _( " HELP " ), text );
 
                         ui.on_screen_resize( init_windows );
                     }

@@ -34,6 +34,7 @@
 #include "rng.h"
 #include "string_formatter.h"
 #include "string_input_popup.h"
+#include "string_utils.h"
 #include "ui_manager.h"
 #include "units.h"
 #include "units_utility.h"
@@ -391,6 +392,14 @@ void scrollable_text( const std::function<catacurses::window()> &init_window,
     int max_beg_line = 0;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // The Godot front end shows the text in a scrolling card.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &text, "SCROLLABLE_TEXT" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     const auto screen_resize_cb = [&]( ui_adaptor & ui ) {
         w = init_window();
 
@@ -403,10 +412,42 @@ void scrollable_text( const std::function<catacurses::window()> &init_window,
         max_beg_line = std::max( 0, static_cast<int>( lines.size() ) - text_h );
 
         ui.position_from_window( w );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     };
     screen_resize_cb( ui );
     ui.on_screen_resize( screen_resize_cb );
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            namespace gs = cata::godot_screen;
+            native->publish( [&]( JsonOut & jsout ) {
+                const auto heading = trim( title );
+                jsout.member( "title", heading.empty() ? std::string( _( "Read" ) ) : heading );
+                jsout.member( "icon", "scroll-text" );
+                jsout.member( "size", std::array{ 900, 820 } );
+                jsout.member( "aside" );
+                jsout.start_object();
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = text, .color = c_white } );
+                jsout.member( "scroll", std::min( beg_line, max_beg_line ) );
+                jsout.member( "buttons" );
+                jsout.start_array();
+                gs::write_button( jsout, { .act = "QUIT", .text = _( "Close" ), .icon = "x", .category = "SCROLLABLE_TEXT" } );
+                jsout.end_array();
+                jsout.end_object();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Scroll" ) );
+                gs::write_hint( jsout, "PAGE_DOWN", "SCROLLABLE_TEXT", _( "Page" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         werase( w );
         draw_border( w, BORDER_COLOR, title, c_black_white );
         for( int line = beg_line, pos_y = text2.y; line < std::min<int>( beg_line + text_h, lines.size() );
