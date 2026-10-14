@@ -722,6 +722,10 @@ auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
     while( !rows.empty() && rows.back().empty() ) {
         rows.pop_back();
     }
+    // Drawing code that starts below a title it no longer draws leaves blank lines on top.
+    const auto blank_top = std::ranges::distance( rows | std::views::take_while(
+                               &std::vector<const cata_cursesport::cursecell *>::empty ) );
+    rows.erase( rows.begin(), rows.begin() + blank_top );
     auto run = std::string();
     auto run_color = std::string();
     const auto flush = [&]() {
