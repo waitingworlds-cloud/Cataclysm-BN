@@ -1740,6 +1740,7 @@ bool game::cleanup_at_end()
         }
 
         center_print( w_rip, iInfoLine++, c_white, sTemp );
+        [[maybe_unused]] const auto survived_text = sTemp;
 
         const int iTotalKills = get_kill_tracker().monster_kill_count();
 
@@ -1763,10 +1764,70 @@ bool game::cleanup_at_end()
                    sTemp );
 
         int iStartX = FULL_SCREEN_WIDTH / 2 - ( ( iMaxWidth - 4 ) / 2 );
-        std::string sLastWords = string_input_popup()
-                                 .window( w_rip, point( iStartX, iNameLine ), iStartX + iMaxWidth - 4 - 1 )
-                                 .max_length( iMaxWidth - 4 - 1 )
-                                 .query_string();
+        std::string sLastWords;
+#if defined(TILES)
+        if( cata::godot_bridge::native_screens() ) {
+            // Godot shows the tombstone as a board, with the last words typed into a field above it.
+            namespace gs = cata::godot_screen;
+            const auto category = std::string( "STRING_INPUT" );
+            const auto w_words = cata::godot_bridge::capture_window( 1, iMaxWidth );
+            auto last_words = string_input_popup();
+            last_words.window( w_words, point_zero, iMaxWidth - 4 - 1 ).max_length( iMaxWidth - 4 - 1 );
+            auto ui = ui_adaptor();
+            auto rip = cata::godot_bridge::native_view( "screen", &w_rip, category );
+            rip.attach( ui );
+            ui.on_screen_resize( []( ui_adaptor & ui ) { ui.position( point_zero, point_zero ); } );
+            ui.mark_resize();
+            ui.on_redraw( [&]( const ui_adaptor & ) {
+                rip.publish( [&]( JsonOut & jsout ) {
+                    jsout.member( "title", u.name );
+                    jsout.member( "icon", "skull" );
+                    jsout.member( "quit", "" );
+                    jsout.member( "size", std::array{ 1240, 800 } );
+                    jsout.member( "search" );
+                    jsout.start_object();
+                    jsout.member( "text", last_words.text() );
+                    jsout.member( "typing", true );
+                    jsout.member( "icon", "pencil" );
+                    jsout.member( "label", _( "Last Words:" ) );
+                    jsout.end_object();
+                    jsout.member( "panes" );
+                    jsout.start_array();
+                    jsout.start_object();
+                    jsout.member( "cell", 20 );
+                    jsout.member( "grid" );
+                    cata::godot_bridge::write_window_grid( jsout, w_rip, { .at = point_south_east, .size = point( FULL_SCREEN_WIDTH - 2, FULL_SCREEN_HEIGHT - 2 ) } );
+                    jsout.end_object();
+                    jsout.end_array();
+                    jsout.member( "aside" );
+                    jsout.start_object();
+                    jsout.member( "width", 320 );
+                    jsout.member( "body" );
+                    gs::write_span( jsout, { .text = string_format( "%s %s\n%s %s", _( "Survived:" ), colorize( survived_text, c_white ), _( "Kills:" ), colorize( std::to_string( iTotalKills ), c_magenta ) ) } );
+                    jsout.member( "buttons" );
+                    jsout.start_array();
+                    gs::write_button( jsout, { .act = "TEXT.CONFIRM", .text = _( "Done" ), .icon = "check", .category = category, .primary = true } );
+                    jsout.end_array();
+                    jsout.end_object();
+                    jsout.member( "hints" );
+                    jsout.start_array();
+                    gs::write_hint( jsout, "TEXT.CONFIRM", category, _( "Done" ) );
+                    jsout.end_array();
+                } );
+            } );
+            do {
+                ui_manager::redraw();
+                last_words.query( false );
+            } while( !last_words.confirmed() && !last_words.canceled() );
+            sLastWords = last_words.text();
+        } else
+#endif
+        {
+            sLastWords = string_input_popup()
+                         .window( w_rip, point( iStartX, iNameLine ), iStartX + iMaxWidth - 4 - 1 )
+                         .max_length( iMaxWidth - 4 - 1 )
+                         .query_string();
+        }
         death_screen();
         const bool is_suicide = uquit == QUIT_SUICIDE;
         events().send<event_type::game_over>( is_suicide, sLastWords );
