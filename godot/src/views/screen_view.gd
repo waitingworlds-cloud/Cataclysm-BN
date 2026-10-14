@@ -863,9 +863,9 @@ class ListRow extends PanelContainer:
 		_enabled = bool(row.get("enabled", true))
 		custom_minimum_size.y = ROW_HEIGHT
 		mouse_filter = Control.MOUSE_FILTER_STOP
-		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if _enabled else Control.CURSOR_ARROW
 		mouse_entered.connect(func():
-			_hover = true
+			_hover = _enabled
 			_restyle())
 		mouse_exited.connect(func():
 			_hover = false
@@ -1017,6 +1017,8 @@ class ListRow extends PanelContainer:
 	func _gui_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 			accept_event()
+			if not _enabled:
+				return
 			if event.double_click:
 				activated.emit()
 			else:
