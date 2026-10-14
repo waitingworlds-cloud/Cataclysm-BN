@@ -39,6 +39,10 @@
 #include "flag.h"
 #include "fungal_effects.h"
 #include "game.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "game_constants.h"
 #include "int_id.h"
 #include "item_contents.h"
@@ -2446,15 +2450,63 @@ void Character::conduct_blood_analysis() const
     size_t win_h = 0;
     catacurses::window w;
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the results, good ones marked apart from bad ones.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &w, "BLOOD_TEST_RESULTS" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         win_h = std::min( static_cast<size_t>( TERMY ),
                           std::max<size_t>( 1, effect_descriptions.size() ) + 2 );
         w = catacurses::newwin( win_h, win_w,
                                 point( ( TERMX - win_w ) / 2, ( TERMY - win_h ) / 2 ) );
         ui.position_from_window( w );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            namespace gs = cata::godot_screen;
+            native->publish( [&]( JsonOut & jsout ) {
+                jsout.member( "title", _( "Blood Test Results" ) );
+                jsout.member( "icon", "droplet" );
+                jsout.member( "size", std::array{ 760, 560 } );
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", _( "Effects" ) );
+                jsout.member( "icon", "flask-conical" );
+                jsout.member( "empty", _( "No effects." ) );
+                jsout.member( "rows" );
+                jsout.start_array();
+                for( const auto &[description, color] : std::views::zip( effect_descriptions, colors ) ) {
+                    const auto good = color == c_green;
+                    gs::write_row( jsout, {
+                        .text = { .text = description, .color = good ? c_light_green : c_light_red },
+                        .icon = good ? "circle-check" : "circle-alert",
+                        .icon_color = good ? "c_light_green" : "c_light_red",
+                        .passive = true,
+                    } );
+                }
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_hint( jsout, "CONFIRM", "BLOOD_TEST_RESULTS", _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         draw_border( w, c_red, string_format( " %s ", _( "Blood Test Results" ) ) );
         if( effect_descriptions.empty() ) {
             trim_and_print( w, point( 2, 1 ), win_w - 3, c_white, _( "No effects." ) );
