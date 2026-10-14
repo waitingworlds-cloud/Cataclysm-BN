@@ -36,6 +36,11 @@
 #include "color.h"
 #include "point.h"
 
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
+
 using std::min; // from <algorithm>
 using std::max;
 
@@ -1163,8 +1168,26 @@ action_id input_context::display_menu( const bool permit_execute_action )
         .context( ctxt );
         ui.position_from_window( w_help );
     };
-    recalc_size( ui );
-    ui.on_screen_resize( recalc_size );
+#if defined(TILES)
+    // The Godot front end draws the list, the filter box and the mode buttons.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &ctxt, "HELP_KEYBINDINGS" ) : nullptr;
+    auto suppress_curses = std::optional<cata::godot_bridge::curses_draw_suppression> {};
+    if( native ) {
+        native->attach( ui );
+        suppress_curses.emplace();
+    }
+    const auto place = [&]( ui_adaptor & ui ) {
+        recalc_size( ui );
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+    };
+#else
+    const auto &place = recalc_size;
+#endif
+    place( ui );
+    ui.on_screen_resize( place );
 
     // has the user changed something?
     bool changed = false;
@@ -1207,7 +1230,101 @@ action_id input_context::display_menu( const bool permit_execute_action )
     std::string action;
     int raw_input_char = 0;
 
+#if defined(TILES)
+    // Mode buttons send these picks; rows send their index.
+    constexpr auto mode_pick = cata::godot_screen::tab_pick;
+    const auto modes = std::array { s_remove, s_add, s_add_global, s_execute };
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Keybindings" ) );
+            jsout.member( "icon", "keyboard" );
+            jsout.member( "size", std::array{ 1100, 900 } );
+            jsout.member( "subtitle" );
+            gs::write_span( jsout, { .text = string_format( "%s   %s   %s", colorize( _( "Unbound keys" ), unbound_key ),
+                                             colorize( _( "Keybinding active only on this screen" ), local_key ),
+                                             colorize( _( "Keybinding active globally" ), global_key ) )
+                                   } );
+            jsout.member( "search" );
+            jsout.start_object();
+            jsout.member( "text", filter_phrase );
+            jsout.member( "typing", status == s_show );
+            jsout.member( "placeholder", _( "Type to filter actions" ) );
+            jsout.end_object();
+            jsout.member( "toggles" );
+            jsout.start_array();
+            const auto mode_toggle = [&]( const size_t i, const std::string & text, const std::string & icon,
+            const fallback_action key ) {
+                jsout.start_object();
+                jsout.member( "text", text );
+                jsout.member( "icon", icon );
+                jsout.member( "key", std::string( 1, static_cast<char>( fallback_keys.at( key ) ) ) );
+                jsout.member( "on", status == modes[i] );
+                jsout.member( "pick", mode_pick + static_cast<int>( i ) );
+                jsout.member( "act", "" );
+                jsout.end_object();
+            };
+            mode_toggle( 0, _( "Remove a key" ), "minus", fallback_action::remove );
+            mode_toggle( 1, _( "Add a key here" ), "plus", fallback_action::add_local );
+            mode_toggle( 2, _( "Add a key everywhere" ), "plus", fallback_action::add_global );
+            if( permit_execute_action ) {
+                mode_toggle( 3, _( "Run an action" ), "play", fallback_action::execute );
+            }
+            jsout.end_array();
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", status == s_remove ? _( "Pick the action to remove a key from" ) :
+                          status == s_add ? _( "Pick the action to add a key to, on this screen" ) :
+                          status == s_add_global ? _( "Pick the action to add a key to, everywhere" ) :
+                          status == s_execute ? _( "Pick the action to run" ) : _( "Actions" ) );
+            jsout.member( "icon", status == s_show ? "list" : "mouse-pointer-click" );
+            jsout.member( "scroll_row", static_cast<int>( scroll_offset ) );
+            jsout.member( "confirm", status == s_show ? "" : "CONFIRM" );
+            jsout.member( "empty", _( "No actions match the filter." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &[i, action_id] : filtered_registered_actions | std::views::enumerate ) {
+                bool overwrite_default;
+                const action_attributes &attributes = inp_mngr.get_action_attributes( action_id, category,
+                                                      &overwrite_default );
+                const auto color = attributes.input_events.empty() ? unbound_key : overwrite_default ? local_key :
+                                   global_key;
+                const auto slot = static_cast<size_t>( i ) - scroll_offset;
+                const auto keyed = status != s_show && static_cast<size_t>( i ) >= scroll_offset &&
+                                   slot < hotkeys.size();
+                gs::write_row( jsout, {
+                    .text = { .text = get_action_name( action_id ), .color = color },
+                    .cells = { { .text = get_desc( action_id ), .color = color } },
+                    .enabled = !( status == s_add_global && overwrite_default ),
+                    .key = keyed ? std::string( 1, hotkeys[slot] ) : std::string(),
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "hints" );
+            jsout.start_array();
+            if( status == s_show ) {
+                gs::write_fixed_hint( jsout, "↑↓", _( "Scroll" ) );
+            } else {
+                gs::write_fixed_hint( jsout, "a-z", _( "Pick an action" ) );
+            }
+            gs::write_hint( jsout, "QUIT", "HELP_KEYBINDINGS",
+                            status == s_show ? _( "Close" ) : _( "Cancel" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     const auto redraw = [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            spopup.text( filter_phrase );
+            publish_native();
+            return;
+        }
+#endif
         werase( w_help );
         draw_border( w_help, BORDER_COLOR, _( "Keybindings" ), c_light_red );
         draw_scrollbar( w_help, scroll_offset, display_height,
@@ -1285,6 +1402,26 @@ action_id input_context::display_menu( const bool permit_execute_action )
         if( scroll_offset > filtered_registered_actions.size() ) {
             scroll_offset = 0;
         }
+#if defined(TILES)
+        // A mode button switches the mode (or back when it is on); a row clicked while picking an
+        // action counts as its letter.
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &ctxt ) : std::nullopt ) {
+            if( *pick >= mode_pick ) {
+                const auto mode = modes[std::min<size_t>( *pick - mode_pick, modes.size() - 1 )];
+                status = status == mode ? s_show : mode;
+                continue;
+            }
+            const auto index = static_cast<size_t>( *pick % cata::godot_screen::row_stride );
+            if( status == s_show || index >= filtered_registered_actions.size() || hotkeys.empty() ) {
+                continue;
+            }
+            if( index < scroll_offset || index >= scroll_offset + hotkeys.size() ) {
+                scroll_offset = index;
+            }
+            raw_input_char = hotkeys[index - scroll_offset];
+            action.clear();
+        }
+#endif
 
         // In addition to the modifiable hotkeys, we also check for hardcoded
         // keys, e.g. '+', '-', '=', '.' in order to prevent the user from
