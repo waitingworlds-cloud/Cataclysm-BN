@@ -46,7 +46,7 @@ Set `BN_BRIDGE_DEBUG=1` to print every message the game sends (except the HUD) t
 
 | Screen                                  | Status                                |
 | --------------------------------------- | ------------------------------------- |
-| HUD: survivor card, time and place, stats, message log, action dock | Godot |
+| HUD: survivor card, time and place, map and threats, message log, action dock | Godot |
 | List menus (`uilist`): search, categories, descriptions | Godot                    |
 | Questions and notices (`query_popup`, `popup`, `query_yn`) | Godot                  |
 | Text prompts (`string_input_popup`)     | Godot                                 |
@@ -55,6 +55,29 @@ Set `BN_BRIDGE_DEBUG=1` to print every message the game sends (except the HUD) t
 
 When the game shows one of its old-style screens, Godot shows it as the game drew it, so nothing is
 ever unreachable.
+
+## The HUD
+
+The HUD replaces the game's sidebar and shows everything the sidebar shows, following the same rules
+(health as bars unless the health style is numbers, a clock only with a watch, and so on):
+
+- **Survivor card**, top left: a body figure colored by each limb's health, with bleeding, bites,
+  infections and breaks outlined. Click a limb, or open the body tab, to see its health, injuries and
+  outer armor. Tabs switch between needs (thirst, hunger, rest, stamina, warmth), body, and stats
+  (attributes, weight, volume, bionic power, mana, armor). Mood, focus, speed, move cost and noise
+  are always shown, with chips for injuries, pain, move mode and safe mode.
+- **Time and place**, top center: season and day, time, weather, temperature, light and place. Click
+  it for wind, moon, coordinates and more. A second pill shows the vehicle you are driving.
+- **Map and threats**, top right: the pixel minimap or the nearby overmap, and every creature in
+  view with its threat level and direction (the sidebar compass).
+- **Message log**, bottom left, **action dock**, bottom center, and zoom and HUD options, bottom right.
+
+The HUD options button (or `}`, the sidebar options key) opens the game's sidebar options: turning a
+panel off there hides the matching part of the HUD. Lua sidebar widgets from mods appear as cards
+under the threats.
+
+Every key still goes to the game first: the HUD never takes keyboard focus, and its buttons press
+the key bound to their action.
 
 ## How it works
 
@@ -71,6 +94,8 @@ Game to Godot: `[u32 length, little endian][u8 kind][payload]`
   - `view {id, kind, ...}`: state of a native screen. `kind` is `menu`, `popup` or `text_input`.
   - `entries {id, entries}`: a menu's rows, sent only when they change.
   - `close {id}`: the screen is gone.
+- kind 3, minimap: same layout as a frame; the game's pixel minimap, sent when it changes while
+  the HUD shows the map.
 
 Godot to game: `[u32 length][JSON]`
 
