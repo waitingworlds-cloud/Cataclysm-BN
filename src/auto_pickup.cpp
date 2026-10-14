@@ -13,6 +13,10 @@
 #include "filesystem.h"
 #include "fstream_utils.h"
 #include "game.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "item.h"
 #include "item_factory.h"
@@ -52,6 +56,45 @@ auto_pickup::player_settings &get_auto_pickup()
     return single_instance;
 }
 
+namespace
+{
+
+auto rule_help() -> std::string
+{
+    return _(
+               "* is used as a Wildcard.  A few Examples:\n"
+               "\n"
+               "wooden arrow    matches the itemname exactly\n"
+               "wooden ar*      matches items beginning with wood ar\n"
+               "*rrow           matches items ending with rrow\n"
+               "*avy fle*fi*arrow     multiple * are allowed\n"
+               "heAVY*woOD*arrOW      case insensitive search\n"
+               "\n"
+               "Pickup using:\n"
+               "c:food          matches item in category food\n"
+               "m:kevlar        matches items made of Kevlar\n"
+               "M:copper        matches items made purely of copper\n"
+               "q:drilling      matches items with drilling qualites\n"
+               "k:fabrication   matches books that teach fabrication\n"
+               "b:c:food;*meat* matches conditions c:food and *meat*" );
+}
+
+#if defined(TILES)
+/// Picks for the Godot buttons that choose what Enter does to the chosen rule, then do it.
+constexpr auto edit_rule_pick = cata::godot_screen::tab_pick + 1000;
+constexpr auto switch_exclude_pick = edit_rule_pick + 1;
+
+/// A tab's name without the shortcut marks and brackets it is drawn with: `[<Global>]`.
+auto plain_tab_title( const std::string &title ) -> std::string
+{
+    return title
+    | std::views::filter( []( const char c ) { return c != '[' && c != ']' && c != '<' && c != '>'; } )
+    | std::ranges::to<std::string>();
+}
+#endif
+
+} // namespace
+
 void user_interface::show()
 {
     if( tabs.empty() ) {
@@ -67,6 +110,14 @@ void user_interface::show()
     catacurses::window w;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the rules with what can be done to the chosen one beside them.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "AUTO_PICKUP" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
 
     const auto init_windows = [&]( ui_adaptor & ui ) {
         iContentHeight = FULL_SCREEN_HEIGHT - 2 - iHeaderHeight;
@@ -81,6 +132,11 @@ void user_interface::show()
                                 iOffset + point( 1, iHeaderHeight + 1 ) );
 
         ui.position_from_window( w_border );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     };
     init_windows( ui );
     ui.on_screen_resize( init_windows );
@@ -89,8 +145,166 @@ void user_interface::show()
     int iLine = 0;
     int iColumn = 1;
     int iStartPos = 0;
+    const bool allow_swapping = tabs.size() == 2;
+
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "AUTO_PICKUP" );
+        const rule_list &cur_rules = tabs[iTab].new_rules;
+        const auto have_rule = iLine >= 0 && iLine < static_cast<int>( cur_rules.size() );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", trim( title ) );
+            jsout.member( "icon", is_autopickup ? "hand" : "list-checks" );
+            jsout.member( "size", std::array{ 1180, 800 } );
+            if( tabs.size() > 1 ) {
+                jsout.member( "tabs" );
+                jsout.start_array();
+                for( const auto &[i, t] : tabs | std::views::enumerate ) {
+                    gs::write_tab( jsout, {
+                        .text = plain_tab_title( t.title ),
+                        .active = static_cast<size_t>( i ) == iTab,
+                        .pick = gs::tab_pick + static_cast<int>( i ),
+                        .count = std::to_string( t.new_rules.size() ),
+                    } );
+                }
+                jsout.end_array();
+                gs::write_tab_keys( jsout, "PREV_TAB", "NEXT_TAB", category );
+            }
+            if( is_autopickup ) {
+                jsout.member( "toggles" );
+                jsout.start_array();
+                gs::write_toggle( jsout, {
+                    .act = "SWITCH_AUTO_PICKUP_OPTION", .text = _( "Auto pickup" ), .icon = "power",
+                    .category = category
+                }, get_option<bool>( "AUTO_PICKUP" ) );
+                jsout.end_array();
+            }
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Rules" ) );
+            jsout.member( "icon", "list" );
+            jsout.member( "cursor", iLine );
+            jsout.member( "empty", _( "No rules yet.  Add one to get started." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &r : cur_rules ) {
+                const auto color = r.bActive ? c_white : c_dark_gray;
+                gs::write_row( jsout, {
+                    .text = { .text = r.sRule.empty() ? _( "<empty rule>" ) : r.sRule, .color = color },
+                    .cells = { {
+                            .text = r.bExclude ? _( "Exclude" ) : _( "Include" ),
+                            .color = !r.bActive ? c_dark_gray : r.bExclude ? c_light_red : c_light_green
+                        }
+                    },
+                    .tip = r.bActive ? "" : _( "Disabled" ),
+                    .mark = r.bActive,
+                    .mark_act = r.bActive ? "DISABLE_RULE" : "ENABLE_RULE",
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 460 );
+            if( have_rule ) {
+                const auto &r = cur_rules[iLine];
+                jsout.member( "title" );
+                gs::write_span( jsout, {
+                    .text = r.sRule.empty() ? _( "<empty rule>" ) : r.sRule, .color = c_white
+                } );
+                jsout.member( "subtitle", string_format( "%s · %s", r.bExclude ? _( "Exclude" ) : _( "Include" ),
+                              r.bActive ? _( "Enabled" ) : _( "Disabled" ) ) );
+            }
+            jsout.member( "sections" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "How rules match" ) );
+            jsout.member( "mono", true );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = rule_help() } );
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "buttons" );
+            jsout.start_array();
+            // Enter edits the rule, or switches include and exclude after moving right.
+            const auto edit = gs::button {
+                .act = iColumn == 1 ? "CONFIRM" : "", .text = _( "Edit rule" ), .icon = "pencil",
+                .category = category, .primary = iColumn == 1, .enabled = have_rule, .pick = edit_rule_pick
+            };
+            const auto other = have_rule && cur_rules[iLine].bExclude ? _( "Switch to include" ) :
+                               _( "Switch to exclude" );
+            const auto flip = gs::button {
+                .act = iColumn == 2 ? "CONFIRM" : "", .text = other, .icon = "arrow-left-right",
+                .category = category, .primary = iColumn == 2, .enabled = have_rule,
+                .pick = switch_exclude_pick
+            };
+            const auto last = static_cast<int>( cur_rules.size() ) - 1;
+            const auto active = have_rule && cur_rules[iLine].bActive;
+            const auto buttons = std::vector<gs::button> {
+                iColumn == 1 ? edit : flip,
+                { .act = "ADD_RULE", .text = _( "Add rule" ), .icon = "plus", .category = category },
+                iColumn == 1 ? flip : edit,
+                {
+                    .act = active ? "DISABLE_RULE" : "ENABLE_RULE", .text = active ? _( "Disable" ) : _( "Enable" ),
+                    .icon = active ? "circle-x" : "circle-check", .category = category, .enabled = have_rule
+                },
+                { .act = "COPY_RULE", .text = _( "Copy" ), .icon = "copy", .category = category, .enabled = have_rule },
+                {
+                    .act = "REMOVE_RULE", .text = _( "Remove" ), .icon = "trash", .category = category,
+                    .enabled = have_rule
+                },
+                // The actions are named for the rule's number: "up" moves it down the list.
+                {
+                    .act = "MOVE_RULE_DOWN", .text = _( "Move up" ), .icon = "arrow-up", .category = category,
+                    .enabled = have_rule && iLine > 0
+                },
+                {
+                    .act = "MOVE_RULE_UP", .text = _( "Move down" ), .icon = "arrow-down", .category = category,
+                    .enabled = have_rule && iLine < last
+                },
+            };
+            for( const auto &b : buttons ) {
+                gs::write_button( jsout, b );
+            }
+            if( !g->u.name.empty() ) {
+                gs::write_button( jsout, {
+                    .act = "TEST_RULE", .text = _( "Test rule" ), .icon = "flask-conical", .category = category,
+                    .enabled = have_rule
+                } );
+            }
+            if( allow_swapping ) {
+                gs::write_button( jsout, {
+                    .act = "SWAP_RULE_GLOBAL_CHAR",
+                    .text = string_format( _( "Move to %s" ), plain_tab_title( tabs[( iTab + 1 ) % 2].title ) ),
+                    .icon = "arrow-right-left", .category = category, .enabled = have_rule
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Rule or include/exclude" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         // Redraw the border
         draw_border( w_border, BORDER_COLOR, title );
         // |-
@@ -215,7 +429,6 @@ void user_interface::show()
     ctxt.register_action( "TEST_RULE" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
-    const bool allow_swapping = tabs.size() == 2;
     if( allow_swapping ) {
         ctxt.register_action( "SWAP_RULE_GLOBAL_CHAR" );
     }
@@ -231,7 +444,30 @@ void user_interface::show()
 
         ui_manager::redraw();
 
-        const std::string action = ctxt.handle_input();
+        std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            namespace gs = cata::godot_screen;
+            if( *pick >= gs::tab_pick && *pick < gs::tab_pick + static_cast<int>( tabs.size() ) ) {
+                iTab = *pick - gs::tab_pick;
+                iLine = 0;
+                continue;
+            }
+            if( *pick == switch_exclude_pick ) {
+                if( !cur_rules.empty() ) {
+                    cur_rules[iLine].bExclude = !cur_rules[iLine].bExclude;
+                    bStuffChanged = true;
+                }
+                continue;
+            }
+            if( *pick == edit_rule_pick ) {
+                iColumn = 1;
+                action = "CONFIRM";
+            } else if( *pick >= 0 && *pick < static_cast<int>( cur_rules.size() ) ) {
+                iLine = *pick;
+            }
+        }
+#endif
 
         if( action == "NEXT_TAB" ) {
             iTab++;
@@ -294,6 +530,12 @@ void user_interface::show()
             if( iColumn == 1 || action == "ADD_RULE" ) {
                 ui_adaptor help_ui;
                 catacurses::window w_help;
+#if defined(TILES)
+                // Godot shows the examples with the text field.
+                const auto help_in_prompt = native != nullptr;
+#else
+                const auto help_in_prompt = false;
+#endif
                 const auto init_help_window = [&]( ui_adaptor & help_ui ) {
                     const point iOffset( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0,
                                          TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 : 0 );
@@ -301,36 +543,26 @@ void user_interface::show()
                                                  FULL_SCREEN_WIDTH * 3 / 4,
                                                  iOffset + point( 19 / 2, 7 + FULL_SCREEN_HEIGHT / 2 / 2 ) );
                     help_ui.position_from_window( w_help );
+                    if( help_in_prompt ) {
+                        help_ui.position( point_zero, point_zero );
+                    }
                 };
                 init_help_window( help_ui );
                 help_ui.on_screen_resize( init_help_window );
 
                 help_ui.on_redraw( [&]( const ui_adaptor & ) {
+                    if( help_in_prompt ) {
+                        return;
+                    }
                     // NOLINTNEXTLINE(cata-use-named-point-constants)
-                    fold_and_print( w_help, point( 1, 1 ), 999, c_white,
-                                    _(
-                                        "* is used as a Wildcard.  A few Examples:\n"
-                                        "\n"
-                                        "wooden arrow    matches the itemname exactly\n"
-                                        "wooden ar*      matches items beginning with wood ar\n"
-                                        "*rrow           matches items ending with rrow\n"
-                                        "*avy fle*fi*arrow     multiple * are allowed\n"
-                                        "heAVY*woOD*arrOW      case insensitive search\n"
-                                        "\n"
-                                        "Pickup using:\n"
-                                        "c:food          matches item in category food\n"
-                                        "m:kevlar        matches items made of Kevlar\n"
-                                        "M:copper        matches items made purely of copper\n"
-                                        "q:drilling      matches items with drilling qualites\n"
-                                        "k:fabrication   matches books that teach fabrication\n"
-                                        "b:c:food;*meat* matches conditions c:food and *meat*" )
-                                  );
+                    fold_and_print( w_help, point( 1, 1 ), 999, c_white, rule_help() );
 
                     draw_border( w_help );
                     wnoutrefresh( w_help );
                 } );
                 const std::string r = string_input_popup()
                                       .title( _( "Pickup Rule:" ) )
+                                      .description( help_in_prompt ? rule_help() : std::string() )
                                       .width( 30 )
                                       .text( cur_rules[iLine].sRule )
                                       .query_string();
