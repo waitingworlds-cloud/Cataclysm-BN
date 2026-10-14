@@ -5,6 +5,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <vector>
 
 #include "cached_options.h"
@@ -290,6 +291,17 @@ void ui_adaptor::reset()
     on_screen_resize( nullptr );
     on_redraw( nullptr );
     position( point_zero, point_zero );
+}
+
+auto ui_adaptor::position_on_stack( const ui_adaptor *ui ) -> stack_position
+{
+    const auto found = std::ranges::find_if( ui_stack, [ui]( const ui_adaptor & entry ) { return &entry == ui; } );
+    if( found == ui_stack.end() ) {
+        return stack_position::absent;
+    }
+    const auto draws = []( const ui_adaptor & entry ) { return entry.dimensions.p_min.x < entry.dimensions.p_max.x && entry.dimensions.p_min.y < entry.dimensions.p_max.y; };
+    const auto above = std::ranges::subrange( std::next( found ), ui_stack.end() );
+    return std::ranges::any_of( above, draws ) ? stack_position::covered : stack_position::visible;
 }
 
 void ui_adaptor::invalidate( const rectangle<point> &rect, const bool reenable_uis_below )

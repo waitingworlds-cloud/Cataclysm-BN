@@ -18,6 +18,7 @@
 #    include "game.h"
 #    include "game_ui.h"
 #    include "get_version.h"
+#    include "godot_bridge.h"
 #    include "hash_utils.h"
 #    include "input.h"
 #    include "json.h"
@@ -177,7 +178,13 @@ static void InitSDL()
 {
     SDL_InitFlags init_flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO;
 
+    // Inside the Godot front end the game renders off screen and Godot shows the frames.
+    if( cata::godot_bridge::connect() ) {
+        SDL_SetHint( SDL_HINT_VIDEO_DRIVER, "offscreen" );
+    }
+
     throwErrorIf( !SDL_Init( init_flags ), "SDL_Init failed" );
+    cata::godot_bridge::start();
     throwErrorIf( !TTF_Init(), "TTF_Init failed" );
     printErrorIf( !SDL_InitSubSystem( SDL_INIT_JOYSTICK ), "Initializing joystick subsystem failed" );
 
@@ -216,13 +223,20 @@ static void WinCreate()
     WindowHeight = TERMINAL_HEIGHT * fontheight * scaling_factor;
     window_flags |= SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 
+    if( cata::godot_bridge::is_active() ) {
+        WindowWidth = cata::godot_bridge::window_size().x;
+        WindowHeight = cata::godot_bridge::window_size().y;
+    }
+
 #if !defined(__ANDROID__)
     const auto screen_mode = get_option<std::string>( "FULLSCREEN" );
     const auto minimize = get_option<bool>( "MINIMIZE_ON_FOCUS_LOSS" );
 
     SDL_SetHint( SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, minimize ? "1" : "0" );
 
-    if( screen_mode == "fullscreen" ) {
+    if( cata::godot_bridge::is_active() ) {
+        // Godot owns the real window; the game's window is never shown.
+    } else if( screen_mode == "fullscreen" ) {
         window_flags |= SDL_WINDOW_FULLSCREEN;
         fullscreen = true;
     } else if( screen_mode == "windowedbl" ) {
@@ -278,6 +292,10 @@ static void WinCreate()
         TERMINAL_HEIGHT = WindowHeight / fontheight / scaling_factor;
     }
 #endif
+    if( cata::godot_bridge::is_active() ) {
+        TERMINAL_WIDTH = WindowWidth / fontwidth / scaling_factor;
+        TERMINAL_HEIGHT = WindowHeight / fontheight / scaling_factor;
+    }
     // Initialize framebuffer caches
     terminal_framebuffer.resize( TERMINAL_HEIGHT );
     for( int i = 0; i < TERMINAL_HEIGHT; i++ ) {
@@ -294,7 +312,9 @@ static void WinCreate()
 
     int renderer_id = -1;
 #if !defined(__ANDROID__)
-    bool software_renderer = get_option<std::string>( "RENDERER" ).empty();
+    // Frames are read back for Godot every refresh, which is cheapest from system memory.
+    bool software_renderer = get_option<std::string>( "RENDERER" ).empty() ||
+                             cata::godot_bridge::is_active();
     std::string renderer_name;
     if( software_renderer ) {
         renderer_name = "software";
@@ -506,6 +526,11 @@ void refresh_display()
     lastupdate = SDL_GetTicks();
 
     if( test_mode ) {
+        return;
+    }
+
+    if( cata::godot_bridge::is_active() ) {
+        cata::godot_bridge::send_frame( renderer.get(), display_buffer.get() );
         return;
     }
 
@@ -3221,6 +3246,14 @@ static void CheckMessages()
     bool render_target_reset = false;
 
     while( SDL_PollEvent( &ev ) ) {
+        const auto bridged = cata::godot_bridge::translate_event( ev );
+        if( bridged == cata::godot_bridge::event_result::consumed ) {
+            continue;
+        }
+        if( bridged == cata::godot_bridge::event_result::input ) {
+            last_input = cata::godot_bridge::take_input();
+            break;
+        }
         switch( ev.type ) {
 #if defined(__ANDROID__)
             // SDL will send a focus lost event whenever the app loses focus (eg. lock screen, switch app focus etc.)
@@ -3619,6 +3652,9 @@ static void CheckMessages()
     if( needupdate ) {
         try_sdl_update();
     }
+    if( cata::godot_bridge::is_active() ) {
+        cata::godot_bridge::sync_screens();
+    }
     if( quit ) {
         exit_handler( 0 );
     }
@@ -4000,7 +4036,9 @@ input_event input_manager::get_input_event()
         CheckMessages();
     }
 
-    if( last_input.type == input_event_t::mouse ) {
+    if( last_input.type == input_event_t::mouse && cata::godot_bridge::is_active() ) {
+        last_input.mouse_pos = cata::godot_bridge::mouse_position();
+    } else if( last_input.type == input_event_t::mouse ) {
         float mx, my;
         SDL_GetMouseState( &mx, &my );
         last_input.mouse_pos.x = static_cast<int>( mx );
