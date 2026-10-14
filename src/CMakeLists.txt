@@ -152,6 +152,22 @@ if (TILES)
     # Tiles-specific setup
     target_compile_definitions(cataclysm-bn-tiles-common PUBLIC TILES)
     link_sdl_core(cataclysm-bn-tiles-common)
+
+    # Dear ImGui, vendored in third-party/imgui, drawn over the tiles display (see imgui_layer.h)
+    set(CATA_IMGUI_DIR ${CMAKE_SOURCE_DIR}/src/third-party/imgui)
+    add_library(cata_imgui STATIC
+            ${CATA_IMGUI_DIR}/imgui.cpp
+            ${CATA_IMGUI_DIR}/imgui_demo.cpp
+            ${CATA_IMGUI_DIR}/imgui_draw.cpp
+            ${CATA_IMGUI_DIR}/imgui_tables.cpp
+            ${CATA_IMGUI_DIR}/imgui_widgets.cpp
+            ${CATA_IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+            ${CATA_IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp)
+    target_include_directories(cata_imgui SYSTEM PUBLIC ${CATA_IMGUI_DIR} ${CATA_IMGUI_DIR}/backends)
+    set_target_properties(cata_imgui PROPERTIES CXX_CLANG_TIDY "")
+    target_compile_options(cata_imgui PRIVATE -w)
+    link_sdl_core(cata_imgui)
+    target_link_libraries(cataclysm-bn-tiles-common PUBLIC cata_imgui)
     if (DYNAMIC_ATLAS)
         target_compile_definitions(cataclysm-bn-tiles-common PUBLIC DYNAMIC_ATLAS)
     endif()
