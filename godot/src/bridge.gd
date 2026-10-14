@@ -110,6 +110,10 @@ func _launch(opts: Dictionary, port: int) -> void:
 	var args := PackedStringArray(["--basepath", root.path_join("")])
 	if opts.has("userdir"):
 		args.append_array(["--userdir", String(opts["userdir"]).path_join("")])
+	elif OS.get_name() == "Windows":
+		# On Windows the game keeps saves and settings in its own folder. It finds that folder
+		# from the working directory, which is wrong when the app is started from a shortcut.
+		args.append_array(["--userdir", root.path_join("")])
 	if opts.has("world"):
 		args.append_array(["--world", opts["world"]])
 	OS.set_environment("BN_GODOT_BRIDGE", "127.0.0.1:%d" % port)
