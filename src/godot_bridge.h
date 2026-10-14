@@ -165,6 +165,17 @@ struct window_columns {
 auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
 const window_columns &columns = {} ) -> void;
 
+/// Part of a window: `size` cells from `at`; a zero size runs to the window's edge.
+struct window_area {
+    point at = point_zero;
+    point size = point_zero;
+};
+
+/// Writes the cells of `w` in `area` as rows of `[text, color]` runs, every cell in its place
+/// (blanks too), for boards Godot draws as a grid of squares (the minigames).
+auto write_window_grid( JsonOut &jsout, const catacurses::window &w,
+const window_area &area = {} ) -> void;
+
 /// Copies the cells of `from` into `to` with its top left corner at `at`, for drawing code that
 /// makes its own window beside a captured one.
 auto copy_window( const catacurses::window &from, const catacurses::window &to, point at ) -> void;

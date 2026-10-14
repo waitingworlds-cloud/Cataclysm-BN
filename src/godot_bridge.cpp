@@ -678,21 +678,29 @@ auto capture_window( const int lines, const int cols ) -> catacurses::window
     return catacurses::newwin( lines, cols, point( TERMX + 1, 0 ) );
 }
 
-auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
-                         const window_columns &columns ) -> void
+namespace
+{
+
+/// Color name of a drawn cell. Cells on a colored background (a list's cursor, white on blue) are
+/// marked `h_`, with the text's color, or the background's for dark text.
+auto cell_color( const cata_cursesport::cursecell &c ) -> std::string
 {
     // Curses names of the 16 base colors; bright ones are `base + 8`.
     static constexpr auto names = std::array {
-        "c_black", "c_red", "c_green", "c_brown", "c_blue", "c_magenta", "c_cyan", "c_light_gray",
-        "c_dark_gray", "c_light_red", "c_light_green", "c_yellow", "c_light_blue", "c_pink", "c_light_cyan", "c_white",
+        "black", "red", "green", "brown", "blue", "magenta", "cyan", "light_gray",
+        "dark_gray", "light_red", "light_green", "yellow", "light_blue", "pink", "light_cyan", "white",
     };
-    const auto name = []( const int index ) -> std::string { return names[std::clamp( index, 0, 15 )]; };
-    // Cells on a colored background (a list's cursor, white on blue) are marked `h_`, with the
-    // text's color, or the background's for dark text.
-    const auto color_of = [&]( const cata_cursesport::cursecell & c ) -> std::string {
-        const auto shown = c.BG != catacurses::black && c.FG == catacurses::black ? c.BG : c.FG;
-        return ( c.BG == catacurses::black ? "c_" : "h_" ) + name( static_cast<int>( shown ) ).substr( 2 );
-    };
+    const auto shown = c.BG != catacurses::black && c.FG == catacurses::black ? c.BG : c.FG;
+    return std::string( c.BG == catacurses::black ? "c_" : "h_" ) +
+           names[std::clamp( static_cast<int>( shown ), 0, 15 )];
+}
+
+} // namespace
+
+auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
+                         const window_columns &columns ) -> void
+{
+    const auto color_of = &cell_color;
     const auto *win = w.get<cata_cursesport::WINDOW>();
     jsout.start_array();
     if( win == nullptr ) {
@@ -755,6 +763,52 @@ auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
         }
     }
     flush();
+    jsout.end_array();
+}
+
+auto write_window_grid( JsonOut &jsout, const catacurses::window &w,
+                        const window_area &area ) -> void
+{
+    jsout.start_array();
+    const auto *win = w.get<cata_cursesport::WINDOW>();
+    if( win == nullptr ) {
+        jsout.end_array();
+        return;
+    }
+    const auto lines = static_cast<int>( win->line.size() );
+    const auto bottom = area.size.y > 0 ? std::min( lines, area.at.y + area.size.y ) : lines;
+    for( const auto y : std::views::iota( std::max( area.at.y, 0 ), std::max( bottom, 0 ) ) ) {
+        const auto &chars = win->line[y].chars;
+        const auto width = static_cast<int>( chars.size() );
+        const auto right = area.size.x > 0 ? std::min( width, area.at.x + area.size.x ) : width;
+        jsout.start_array();
+        auto run = std::string();
+        auto run_color = std::string();
+        const auto flush = [&]() {
+            if( !run.empty() ) {
+                jsout.start_array();
+                jsout.write( run );
+                jsout.write( run_color );
+                jsout.end_array();
+                run.clear();
+            }
+        };
+        for( const auto x : std::views::iota( std::max( area.at.x, 0 ), std::max( right, 0 ) ) ) {
+            const auto &cell = chars[x];
+            // Wide glyphs leave an empty cell after them, which is not a square of its own.
+            if( cell.ch.empty() ) {
+                continue;
+            }
+            const auto color = cell_color( cell );
+            if( color != run_color ) {
+                flush();
+                run_color = color;
+            }
+            run += cell.ch;
+        }
+        flush();
+        jsout.end_array();
+    }
     jsout.end_array();
 }
 

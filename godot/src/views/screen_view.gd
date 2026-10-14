@@ -635,7 +635,7 @@ func _apply_panes(panes: Array) -> void:
 
 func _pane_hash(pane: Dictionary) -> int:
 	return JSON.stringify([pane.get("rows", []), pane.get("body", []), pane.get("entries", []),
-			pane.get("columns", []), pane.get("title", ""), pane.get("empty", "")]).hash()
+			pane.get("columns", []), pane.get("title", ""), pane.get("empty", ""), pane.has("grid")]).hash()
 
 
 func _build_panes(panes: Array) -> void:
@@ -653,6 +653,8 @@ func _build_panes(panes: Array) -> void:
 		pane.size_flags_stretch_ratio = float(spec.get("stretch", 1.0))
 		_pane_row.add_child(pane)
 		pane.setup(spec)
+		if pane.board != null:
+			_connect_board(pane.board, p, spec)
 		_panes.append(pane)
 		_pane_hashes.append(_pane_hash(spec))
 		var rows: Array = spec.get("rows", [])
@@ -686,6 +688,15 @@ func _build_panes(panes: Array) -> void:
 			pane.add_row(row)
 			_rows[at] = row
 		pane.finish()
+
+
+## A board's squares send their pick, `pane * STRIDE + row * 1000 + column`, with the action the
+## game gave for that mouse button (none only moves its cursor there).
+func _connect_board(board: Board, p: int, spec: Dictionary) -> void:
+	var acts := {MOUSE_BUTTON_LEFT: String(spec.get("click", "")), MOUSE_BUTTON_RIGHT: String(spec.get("right_click", ""))}
+	board.cell_clicked.connect(func(row: int, column: int, button: int):
+		if acts.has(button):
+			Bridge.pick(view_id, p * STRIDE + row * 1000 + column, acts[button]))
 
 
 ## Width of each extra column: as wide as its widest value or title, up to a limit.
@@ -867,6 +878,7 @@ func _apply_hints(hints: Array) -> void:
 
 ## One list: an optional header with its name and count, then its rows (or a block of text).
 class Pane extends VBoxContainer:
+	var board: Board
 	var _title: Label
 	var _count: Label
 	var _note: RichTextLabel
@@ -949,6 +961,13 @@ class Pane extends VBoxContainer:
 			_items = -1
 		elif spec.has("entries"):
 			_add_entries(spec["entries"])
+		elif spec.has("grid"):
+			board = Board.new()
+			board.setup(spec)
+			_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+			(_list.get_parent() as Control).size_flags_vertical = Control.SIZE_EXPAND_FILL
+			_list.add_child(board)
+			_items = -1
 
 	## A log: wrapped entries, each with a time shown only where it changes (the message log).
 	func _add_entries(entries: Array) -> void:
@@ -982,6 +1001,8 @@ class Pane extends VBoxContainer:
 		_items = entries.size()
 
 	func apply_state(spec: Dictionary) -> void:
+		if board != null:
+			board.setup(spec)
 		_count.text = String(spec.get("count", str(_items) if _items > 0 else ""))
 		_title.text = String(spec.get("title", ""))
 		_note.text = Slate.bbcode(spec.get("note", []), Slate.FAINT).strip_edges()
@@ -1232,3 +1253,137 @@ class ListRow extends PanelContainer:
 				activated.emit()
 			else:
 				clicked.emit()
+
+
+## A board of character squares (the minigames) in the game's colors, as large as fits. Text
+## boards draw each cell as a mono glyph. Square boards (`square`) draw a tile per cell: `lit`
+## characters as lit tiles, `raised` ones as raised tiles, `hide` ones with no glyph on top.
+## On any board, `fill` characters become solid blocks and `dot` ones round dots, in their color.
+## Highlighted cells (the cursor) get a ring, unless the board is `plain` (colored backgrounds
+## that mean nothing).
+class Board extends Control:
+	signal cell_clicked(row: int, column: int, button: int)
+
+	const PAD := 10.0
+	const GAP := 2.0
+	## Line drawing characters as the arms they join (up 1, right 2, down 4, left 8), drawn as
+	## strokes so walls meet across squares.
+	const LINES := {"─": 10, "│": 5, "┌": 6, "┐": 12, "└": 3, "┘": 9, "├": 7, "┤": 13, "┬": 14,
+			"┴": 11, "┼": 15}
+
+	var _back := Slate.box(Color(1, 1, 1, 0.03), 8, Slate.BORDER, 1)
+	var _flat_box := Slate.box(Color(1, 1, 1, 0.04), 5, Color(0, 0, 0, 0), 0)
+	var _raised_box := Slate.box(Color(1, 1, 1, 0.13), 5, Color(1, 1, 1, 0.2), 1)
+	var _lit_box := Slate.box(Slate.ACCENT, 6, Slate.ACCENT.lightened(0.35), 1)
+	var _ring_box := Slate.box(Color(Slate.ACCENT, 0.16), 5, Slate.ACCENT, 2)
+	var _boom_box := Slate.box(Color(Slate.DANGER, 0.35), 5, Slate.DANGER, 2)
+	var _rows: Array = []
+	var _columns := 0
+	var _font: Font
+	var _want := 22
+	var _square := false
+	var _raised := ""
+	var _hide := ""
+	var _lit := ""
+	var _fill := ""
+	var _dot := ""
+	var _plain := false
+	var _cell := Vector2(14, 28)
+	var _font_size := 22
+	var _origin := Vector2.ZERO
+
+	func setup(spec: Dictionary) -> void:
+		_font = Slate.mono()
+		_want = int(spec.get("cell", 22))
+		_square = bool(spec.get("square", false))
+		_raised = String(spec.get("raised", ""))
+		_hide = String(spec.get("hide", ""))
+		_lit = String(spec.get("lit", ""))
+		_fill = String(spec.get("fill", ""))
+		_dot = String(spec.get("dot", ""))
+		_plain = bool(spec.get("plain", false))
+		_rows = []
+		_columns = 0
+		for runs in spec.get("grid", []):
+			var cells := []
+			for run in runs:
+				var name := String(run[1]) if run.size() > 1 else ""
+				for ch in String(run[0]):
+					cells.append([ch, name])
+			_columns = maxi(_columns, cells.size())
+			_rows.append(cells)
+		custom_minimum_size = Vector2(_columns, _rows.size()) * 6 + Vector2(PAD, PAD) * 2
+		size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		size_flags_vertical = Control.SIZE_EXPAND_FILL
+		mouse_filter = Control.MOUSE_FILTER_STOP
+		queue_redraw()
+
+	## Cell size and font size for the room there is: as asked for, or smaller to fit.
+	func _layout() -> void:
+		var glyph := _font.get_string_size("M", HORIZONTAL_ALIGNMENT_LEFT, -1, 100).x / 100.0
+		var want := Vector2(_want, _want) if _square else Vector2(ceilf(_want * glyph), ceilf(_want * 1.3))
+		var room := size - Vector2(PAD, PAD) * 2
+		var scale := 1.0
+		if _columns > 0 and not _rows.is_empty():
+			scale = minf(1.0, minf(room.x / (want.x * _columns), room.y / (want.y * _rows.size())))
+		_cell = (want * scale).floor().max(Vector2(3, 3))
+		_font_size = maxi(6, int((_want * 0.55 if _square else float(_want)) * scale))
+		_origin = ((size - _cell * Vector2(_columns, _rows.size())) / 2).floor()
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_RESIZED:
+			queue_redraw()
+
+	func _draw() -> void:
+		_layout()
+		draw_style_box(_back, Rect2(_origin, _cell * Vector2(_columns, _rows.size())).grow(PAD))
+		var baseline := (_cell.y - _font.get_height(_font_size)) / 2 + _font.get_ascent(_font_size)
+		for y in _rows.size():
+			var cells: Array = _rows[y]
+			for x in cells.size():
+				var ch := String(cells[x][0])
+				var name := String(cells[x][1])
+				var at := _origin + Vector2(x * _cell.x, y * _cell.y)
+				var lit := name.begins_with("h_")
+				if lit:
+					name = "c_" + name.substr(2)
+					lit = not _plain
+				var color := Slate.curses(name, Slate.TEXT)
+				if _square:
+					var tile := Rect2(at, _cell).grow(-GAP)
+					if _lit.contains(ch):
+						draw_style_box(_lit_box, tile)
+					elif _raised.contains(ch):
+						draw_style_box(_raised_box, tile)
+					elif ch != " " and not LINES.has(ch):
+						draw_style_box(_flat_box, tile)
+					if lit:
+						draw_style_box(_boom_box if name == "c_red" else _ring_box, tile)
+				elif lit:
+					draw_rect(Rect2(at, _cell), Color(Slate.ACCENT, 0.3))
+					color = color.lightened(0.25)
+				if LINES.has(ch):
+					_draw_lines(at, int(LINES[ch]), color)
+				elif _fill.contains(ch):
+					draw_rect(Rect2(at, _cell).grow(-1), color)
+				elif _dot.contains(ch):
+					draw_circle(at + _cell / 2, minf(_cell.x, _cell.y) * 0.42, color)
+				elif ch != " " and not _hide.contains(ch):
+					var left := (_cell.x - _font.get_string_size(ch, HORIZONTAL_ALIGNMENT_LEFT, -1, _font_size).x) / 2
+					draw_string(_font, at + Vector2(left, baseline), ch, HORIZONTAL_ALIGNMENT_LEFT, -1, _font_size, color)
+
+	func _draw_lines(at: Vector2, arms: int, color: Color) -> void:
+		var mid := at + _cell / 2
+		var width := maxf(2.0, roundf(minf(_cell.x, _cell.y) / 7.0))
+		var ends := [Vector2(0, -_cell.y / 2), Vector2(_cell.x / 2, 0), Vector2(0, _cell.y / 2), Vector2(-_cell.x / 2, 0)]
+		for i in 4:
+			if arms & (1 << i):
+				draw_line(mid, mid + ends[i], color, width)
+		draw_rect(Rect2(mid - Vector2(width, width) / 2, Vector2(width, width)), color)
+
+	func _gui_input(event: InputEvent) -> void:
+		if event is InputEventMouseButton and event.pressed:
+			var cell := Vector2i(((event.position - _origin) / _cell).floor())
+			if cell.y >= 0 and cell.y < _rows.size() and cell.x >= 0 and cell.x < _columns:
+				accept_event()
+				cell_clicked.emit(cell.y, cell.x, event.button_index)
