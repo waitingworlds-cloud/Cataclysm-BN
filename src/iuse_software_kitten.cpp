@@ -398,6 +398,7 @@ robot_finds_kitten::robot_finds_kitten()
             } else {
                 // The grand cinema scene, large: robot and kitten meet in the middle.
                 jsout.member( "cell", 48 );
+                jsout.member( "plain", true );
                 jsout.member( "grid" );
                 cata::godot_bridge::write_window_grid( jsout, w, { .at = point( rfkCOLS / 2 - 5, 1 ), .size = point( 10, 1 ) } );
             }
