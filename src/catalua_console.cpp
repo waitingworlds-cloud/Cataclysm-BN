@@ -154,7 +154,7 @@ void show_lua_console_impl()
     ctxt.register_action( "HELP_KEYBINDINGS" );
     ctxt.register_action( "EDIT" );
     ctxt.register_action( "QUIT" );
-    ctxt.register_action( "LUA_RELOAD" );
+    ctxt.register_action( "RELOAD" );
     ctxt.register_action( "TOGGLE_EXPANDED" );
     ctxt.register_action( "HISTORY_UP" );
     ctxt.register_action( "HISTORY_DOWN" );
@@ -402,7 +402,7 @@ void show_lua_console_impl()
                 // Canceled, save input for later use
                 current_input = res.second;
             }
-        } else if( act == "LUA_RELOAD" ) {
+        } else if( act == "RELOAD" ) {
             ui.invalidate_ui();
             log_invalidated = true;
             reload_lua_code();
