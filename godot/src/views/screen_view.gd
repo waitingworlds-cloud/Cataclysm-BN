@@ -39,7 +39,9 @@ var _toolbar: Control
 var _search: PanelContainer
 var _search_text: Label
 var _search_key: PanelContainer
-var _toggles: HBoxContainer
+var _toggles: HFlowContainer
+var _toolbar_row: BoxContainer
+var _body: BoxContainer
 var _body_rule: ColorRect
 var _pane_row: HBoxContainer
 var _aside: PanelContainer
@@ -102,13 +104,15 @@ func _ready() -> void:
 	col.add_child(_toolbar)
 	_body_rule = _rule()
 	col.add_child(_body_rule)
-	var body := HBoxContainer.new()
+	var body := BoxContainer.new()
+	_body = body
 	body.add_theme_constant_override("separation", 0)
 	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	col.add_child(body)
 	_pane_row = HBoxContainer.new()
 	_pane_row.add_theme_constant_override("separation", 0)
 	_pane_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_pane_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	body.add_child(_pane_row)
 	body.add_child(_build_aside())
 	col.add_child(_build_footer())
@@ -217,7 +221,9 @@ func _build_subtabs() -> Control:
 
 
 func _build_toolbar() -> Control:
-	var row := HBoxContainer.new()
+	# Side by side, or the toggles below the search box in a docked (narrow) screen.
+	var row := BoxContainer.new()
+	_toolbar_row = row
 	row.add_theme_constant_override("separation", 10)
 	_search = PanelContainer.new()
 	_search.add_theme_stylebox_override("panel", _search_box(false))
@@ -241,8 +247,10 @@ func _build_toolbar() -> Control:
 	_search_key = Slate.key_chip("", 10)
 	search_row.add_child(_search_key)
 	row.add_child(_search)
-	_toggles = HBoxContainer.new()
-	_toggles.add_theme_constant_override("separation", 8)
+	_toggles = HFlowContainer.new()
+	_toggles.add_theme_constant_override("h_separation", 8)
+	_toggles.add_theme_constant_override("v_separation", 8)
+	_toggles.alignment = FlowContainer.ALIGNMENT_END
 	_toggles.size_flags_horizontal = Control.SIZE_SHRINK_END
 	row.add_child(_toggles)
 	return _margin(row, 22, 0, 22, 14)
@@ -403,11 +411,19 @@ func _layout() -> void:
 	var wanted := float(aside.get("width", 400))
 	var alone := Array(_msg.get("panes", [])).is_empty()
 	_pane_row.visible = not alone
+	# A docked screen is narrow: lists above the side panel, toggles below the search box.
+	_body.vertical = docked
+	_toolbar_row.vertical = docked
+	_toggles.alignment = FlowContainer.ALIGNMENT_BEGIN if docked else FlowContainer.ALIGNMENT_END
+	_toggles.size_flags_horizontal = Control.SIZE_FILL if docked else Control.SIZE_SHRINK_END
 	var sb := _aside.get_theme_stylebox("panel") as StyleBoxFlat
-	sb.border_width_left = 0 if alone else 1
+	sb.border_width_left = 0 if alone or docked else 1
+	sb.border_width_top = 1 if docked and not alone else 0
 	sb.bg_color = Color(0, 0, 0, 0) if alone else Color(1, 1, 1, 0.025)
-	if alone:
-		# Only the side panel: it takes the whole card.
+	_aside.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_aside.size_flags_stretch_ratio = 1.8 if docked else 1.0
+	if alone or docked:
+		# Only the side panel, or stacked under the lists: it takes the card's width.
 		_aside.custom_minimum_size.x = 0
 		_aside.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	else:

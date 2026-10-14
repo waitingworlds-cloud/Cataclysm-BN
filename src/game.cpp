@@ -10894,6 +10894,64 @@ static auto find_visible_vehicles( avatar &viewer, map &here, int radius ) -> ve
     return vehicles;
 }
 
+#if defined(TILES)
+namespace
+{
+
+/// How many entries each tab of the item, monster and vehicle lists has, for the tabs Godot draws.
+struct vmenu_counts {
+    int items = 0;
+    int monsters = 0;
+    int vehicles = 0;
+};
+auto vmenu_tab_counts = vmenu_counts {};
+
+/// Width in cells the lists take when Godot draws them, for keeping the map's focus beside them.
+constexpr auto vmenu_native_width = 70;
+
+/// Writes the members the item, monster and vehicle lists share: title, tabs and docking.
+auto write_vmenu_frame( JsonOut &jsout, const int active_tab, const std::string &category ) -> void
+{
+    namespace gs = cata::godot_screen;
+    jsout.member( "title", _( "Around you" ) );
+    jsout.member( "icon", "binoculars" );
+    jsout.member( "dock", "right" );
+    jsout.member( "size" );
+    jsout.start_array();
+    jsout.write( 560 );
+    jsout.write( 0 );
+    jsout.end_array();
+    const auto counts = std::array{ vmenu_tab_counts.items, vmenu_tab_counts.monsters, vmenu_tab_counts.vehicles };
+    const auto names = std::array{ _( "Items" ), _( "Monsters" ), _( "Vehicles" ) };
+    const auto icons = std::array{ "package", "skull", "car" };
+    jsout.member( "tabs" );
+    jsout.start_array();
+    for( auto tab = 0; tab < 3; ++tab ) {
+        gs::write_tab( jsout, { .text = names[tab], .active = tab == active_tab, .pick = gs::tab_pick + tab, .enabled = counts[tab] > 0 || tab == active_tab, .icon = icons[tab], .count = std::to_string( counts[tab] ) } );
+    }
+    jsout.end_array();
+    gs::write_tab_keys( jsout, "PREV_TAB", "NEXT_TAB", category );
+}
+
+/// "3 tiles north" for the selected entry's side panel.
+auto tiles_away( const int dist, const direction dir ) -> std::string
+{
+    return string_format( vgettext( "%d tile %s", "%d tiles %s", dist ), dist, direction_name( dir ) );
+}
+
+/// Turns a click on another tab into the step `list_items_monsters` takes to reach it.
+auto vmenu_tab_step( const int pick, const int active_tab ) -> std::optional<int>
+{
+    const auto tab = pick - cata::godot_screen::tab_pick;
+    if( tab < 0 || tab > 2 || tab == active_tab ) {
+        return std::nullopt;
+    }
+    return ( tab - active_tab + 3 ) % 3 == 1 ? 1 : -1;
+}
+
+} // namespace
+#endif
+
 static auto list_vehicles( const vehicle_list_t &vehicle_list ) -> vehicle_menu_ret
 {
     avatar &viewer = get_avatar();
@@ -10912,7 +10970,23 @@ static auto list_vehicles( const vehicle_list_t &vehicle_list ) -> vehicle_menu_
     bool hide_ui = false;
 
     ui_adaptor ui;
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", &vehicle_list,
+                 "LIST_VEHICLES" );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            if( cur_vehicle ) {
+                centerlistview( active_pos, vmenu_native_width );
+            }
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         if( hide_ui ) {
             ui.position( point_zero, point_zero );
         } else {
@@ -10952,6 +11026,84 @@ static auto list_vehicles( const vehicle_list_t &vehicle_list ) -> vehicle_menu_
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
     ui.on_redraw( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                namespace gs = cata::godot_screen;
+                const auto category = std::string( "LIST_VEHICLES" );
+                write_vmenu_frame( jsout, 2, category );
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", _( "Vehicles" ) );
+                jsout.member( "icon", "car" );
+                jsout.member( "count", std::to_string( vehicle_list.size() ) );
+                jsout.member( "cursor", iActive );
+                jsout.member( "confirm", "" );
+                jsout.member( "empty", _( "You don't see any vehicles around you!" ) );
+                jsout.member( "rows" );
+                jsout.start_array();
+                for( const auto &entry : vehicle_list ) {
+                    gs::write_row( jsout, {
+                        .text = { .text = entry.veh->name },
+                        .cells = { { .text = string_format( "%d %s", entry.dist, direction_name_short( direction_from( viewer.bub_pos(), entry.pos ) ) ) } },
+                    } );
+                }
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+                if( cur_vehicle ) {
+                    const auto yes_no = []( const bool v ) { return v ? pgettext( "vehicle status value", "yes" ) : pgettext( "vehicle status value", "no" ); };
+                    const auto [status_text, status_color] = cur_vehicle->vehicle_damage_summary();
+                    auto total_cargo = 0_ml;
+                    auto free_cargo = 0_ml;
+                    for( const vpart_reference &vp : cur_vehicle->get_any_parts( "CARGO" ) ) {
+                        total_cargo += cur_vehicle->max_volume( vp.part_index() );
+                        free_cargo += cur_vehicle->free_volume( vp.part_index() );
+                    }
+                    static const itype_id fuel_type_battery( "battery" );
+                    const auto parts = cur_vehicle->get_all_parts();
+                    const auto leaking_fuel = std::ranges::any_of( parts, []( const vpart_reference & vpr ) {
+                        const vehicle_part &part = vpr.part();
+                        return part.is_leaking() && part.ammo_remaining() > 0 && part.ammo_current() != fuel_type_battery;
+                    } );
+                    auto lines = std::vector<std::string> {
+                        colorize( string_format( "[%s]", cur_vehicle->type.str() ), c_light_blue ),
+                        string_format( "%s%s", _( "Speed: " ), colorize( string_format( _( "%d %s" ), static_cast<int>( convert_velocity( cur_vehicle->velocity, VU_VEHICLE ) ), velocity_units( VU_VEHICLE ) ), c_light_green ) ),
+                        string_format( "%s%s", _( "Engine: " ), colorize( cur_vehicle->engine_on ? _( "on" ) : _( "off" ), cur_vehicle->engine_on ? c_light_green : c_light_red ) ),
+                        string_format( _( "Moving: %s" ), yes_no( cur_vehicle->is_moving() ) ),
+                        colorize( cur_vehicle->sufficient_wheel_config() ? _( "This vehicle has enough wheels." ) : _( "This vehicle does not have enough wheels." ), cur_vehicle->sufficient_wheel_config() ? c_light_green : c_light_red ),
+                        string_format( "%s%s", _( "Status: " ), colorize( status_text, status_color ) ),
+                        string_format( "%s%s", _( "Cargo: " ), colorize( string_format( _( "%s / %s %s" ), format_volume( total_cargo - free_cargo ), format_volume( total_cargo ), volume_units_abbr() ), c_yellow ) ),
+                    };
+                    if( leaking_fuel ) {
+                        lines.push_back( colorize( _( "This vehicle is leaking fuel." ), c_light_red ) );
+                    }
+                    if( !cur_vehicle->floating.empty() ) {
+                        const auto can_float = cur_vehicle->can_float();
+                        lines.push_back( colorize( can_float ? _( "This vehicle can float." ) :
+                                                   _( "This vehicle can't float." ), can_float ? c_light_green : c_light_red ) );
+                    }
+                    jsout.member( "aside" );
+                    jsout.start_object();
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = cur_vehicle->name, .color = c_white } );
+                    jsout.member( "icon", "car" );
+                    jsout.member( "subtitle", tiles_away( vehicle_list[iActive].dist, direction_from( viewer.bub_pos(),
+                                                          vehicle_list[iActive].pos ) ) );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_spans( jsout, join( lines, "\n" ), c_light_gray );
+                    jsout.end_object();
+                }
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         if( hide_ui ) {
             return;
         }
@@ -11111,8 +11263,25 @@ static auto list_vehicles( const vehicle_list_t &vehicle_list ) -> vehicle_menu_
     shared_ptr_fast<game::draw_callback_t> trail_cb = create_trail_callback( trail_start, trail_end,
             trail_end_x );
     g->add_draw_callback( trail_cb );
+#if defined(TILES)
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
 
     do {
+#if defined(TILES)
+        if( const auto pick = cata::godot_bridge::take_pick( &vehicle_list ) ) {
+            if( const auto step = vmenu_tab_step( *pick, 2 ) ) {
+                vmenu_tab_delta = *step;
+                viewer.view_offset = stored_view_offset;
+                return vehicle_menu_ret::CHANGE_TAB;
+            }
+            if( *pick < cata::godot_screen::tab_pick ) {
+                iActive = *pick % cata::godot_screen::row_stride;
+            }
+        }
+#endif
         if( action == "UP" ) {
             iActive--;
             if( iActive < 0 ) {
@@ -11207,6 +11376,9 @@ void game::list_items_monsters()
         }
     }
 
+#if defined(TILES)
+    vmenu_tab_counts = { .items = static_cast<int>( items.size() ), .monsters = static_cast<int>( mons.size() ), .vehicles = static_cast<int>( vehicles.size() ) };
+#endif
     temp_exit_fullscreen();
     game::vmenu_ret ret;
     while( true ) {
@@ -11276,7 +11448,23 @@ game::vmenu_ret game::list_items( const std::vector<map_item_stack> &item_list )
     catacurses::window w_item_info;
 
     ui_adaptor ui;
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", &ground_items, "LIST_ITEMS" );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            width = vmenu_native_width;
+            if( activeItem ) {
+                centerlistview( active_pos, width );
+            }
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         iInfoHeight = std::min( 25, TERMY / 2 );
         iMaxRows = TERMY - iInfoHeight - 2;
 
@@ -11360,6 +11548,147 @@ game::vmenu_ret game::list_items( const std::vector<map_item_stack> &item_list )
     std::optional<item_filter_type> filter_type;
 
     ui.on_redraw( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                namespace gs = cata::godot_screen;
+                const auto category = std::string( "LIST_ITEMS" );
+                write_vmenu_frame( jsout, 0, category );
+                jsout.member( "subtitle" );
+                gs::write_span( jsout, { .text = sort_radius ? _( "Sorted by distance" ) : _( "Sorted by category" ) } );
+                jsout.member( "search" );
+                jsout.start_object();
+                jsout.member( "text", sFilter );
+                jsout.member( "typing", false );
+                jsout.member( "act", "FILTER" );
+                jsout.member( "key", cata::godot_bridge::key_label( "FILTER", category ) );
+                jsout.member( "placeholder", _( "Filter items" ) );
+                jsout.end_object();
+                const auto toggle = [&]( const gs::button & b, const bool on ) {
+                    jsout.start_object();
+                    jsout.member( "act", b.act );
+                    jsout.member( "text", b.text );
+                    jsout.member( "icon", b.icon );
+                    jsout.member( "key", cata::godot_bridge::key_label( b.act, category ) );
+                    jsout.member( "on", on );
+                    jsout.member( "tip", b.tip );
+                    jsout.end_object();
+                };
+                jsout.member( "toggles" );
+                jsout.start_array();
+                if( !sFilter.empty() ) {
+                    toggle( { .act = "RESET_FILTER", .text = _( "Clear filter" ), .icon = "x" }, false );
+                }
+                toggle( { .act = "SORT", .text = sort_radius ? _( "By distance" ) : _( "By category" ), .icon = "arrow-up-down", .tip = _( "Switch between sorting by distance and by category" ) },
+                        false );
+                toggle( { .act = "PRIORITY_INCREASE", .text = _( "High priority" ), .icon = "chevrons-up", .tip = list_item_upvote },
+                        !list_item_upvote.empty() );
+                toggle( { .act = "PRIORITY_DECREASE", .text = _( "Low priority" ), .icon = "chevrons-down", .tip = list_item_downvote },
+                        !list_item_downvote.empty() );
+                jsout.end_array();
+
+                const auto category_at = [&]( const int row ) -> std::string {
+                    const auto found = mSortCategory.find( row );
+                    return found == mSortCategory.end() ? std::string() : found->second;
+                };
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", _( "Items" ) );
+                jsout.member( "icon", "package" );
+                jsout.member( "count", std::to_string( iItemNum - iCatSortNum ) );
+                jsout.member( "cursor", iActive );
+                jsout.member( "confirm", "EXAMINE" );
+                jsout.member( "empty", ground_items.empty() ? _( "You don't see any items around you!" ) :
+                              _( "No items match the filter." ) );
+                jsout.member( "rows" );
+                jsout.start_array();
+                auto iter = filtered_items.begin();
+                auto index = 0;
+                auto cat_offset = 0;
+                for( auto row = 0; row < iItemNum && iter != filtered_items.end(); ++row ) {
+                    if( const auto cat = category_at( row ); !cat.empty() ) {
+                        cat_offset++;
+                        gs::write_row( jsout, { .text = { .text = cat }, .heading = true } );
+                        continue;
+                    }
+                    const auto page = row == iActive ? page_num : 0;
+                    auto text = std::string();
+                    if( iter->vIG.size() > 1 ) {
+                        text += string_format( "[%d/%d] (%d) ", page + 1, iter->vIG.size(), iter->totalcount );
+                    }
+                    text += iter->example->tname();
+                    if( iter->vIG[page].count > 1 ) {
+                        text += string_format( " [%d]", iter->vIG[page].count );
+                    }
+                    const auto color = highPEnd > 0 && index < highPEnd + cat_offset ? c_yellow :
+                                       index >= lowPStart + cat_offset ? c_red : iter->example->color_in_inventory();
+                    const auto pos = iter->vIG[page].pos.xy();
+                    auto cells = std::vector<gs::span>();
+                    if( highlight_unread_items && !uistate.read_items.contains( iter->example->typeId() ) ) {
+                        cells.push_back( { .text = item_new_str, .color = item_new_col } );
+                    } else {
+                        cells.push_back( {} );
+                    }
+                    cells.push_back( { .text = string_format( "%d %s", rl_dist( point_rel_ms::zero(), pos ), direction_name_short( direction_from( point_rel_ms::zero(), pos ) ) ) } );
+                    gs::write_row( jsout, {
+                        .text = { .text = text, .color = color },
+                        .cells = cells,
+                        .sym = iter->example->symbol(),
+                        .sym_color = string_from_color( iter->example->color() ),
+                    } );
+                    ++iter;
+                    ++index;
+                }
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+
+                if( filter_type ) {
+                    jsout.member( "aside" );
+                    jsout.start_object();
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = _( "Filter rules" ), .color = c_white } );
+                    jsout.member( "icon", "funnel" );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_spans( jsout, item_filter_rules_text( *filter_type ), c_light_gray );
+                    jsout.end_object();
+                } else if( activeItem ) {
+                    const auto &example = *activeItem->example;
+                    const auto info = example.info( rot::temp::for_location( m, example ) );
+                    jsout.member( "aside" );
+                    jsout.start_object();
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = example.display_name(), .color = example.color_in_inventory() } );
+                    jsout.member( "sym", example.symbol() );
+                    jsout.member( "sym_color", string_from_color( example.color() ) );
+                    jsout.member( "subtitle", tiles_away( rl_dist( point_rel_ms::zero(), active_pos.xy() ),
+                                                          direction_from( point_rel_ms::zero(), active_pos.xy() ) ) );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_spans( jsout, format_item_info( info, {} ), c_light_gray );
+                    jsout.member( "scroll", iScrollPos );
+                    jsout.member( "buttons" );
+                    jsout.start_array();
+                    gs::write_button( jsout, { .act = "EXAMINE", .text = _( "Examine" ), .icon = "info", .category = category, .primary = true } );
+                    gs::write_button( jsout, { .act = "COMPARE", .text = _( "Compare" ), .icon = "scale", .category = category } );
+                    gs::write_button( jsout, { .act = "TRAVEL_TO", .text = _( "Travel to" ), .icon = "footprints", .category = category } );
+                    jsout.end_array();
+                    jsout.end_object();
+                }
+
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+                if( activeItem && activeItem->vIG.size() > 1 ) {
+                    gs::write_fixed_hint( jsout, "←→", _( "Other piles" ) );
+                }
+                gs::write_hint( jsout, "PAGE_DOWN", category, _( "Scroll info" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         reset_item_list_state( w_items_border, iInfoHeight, sort_radius );
 
         int iStartPos = 0;
@@ -11483,9 +11812,32 @@ game::vmenu_ret game::list_items( const std::vector<map_item_stack> &item_list )
     shared_ptr_fast<draw_callback_t> trail_cb = create_trail_callback( trail_start, trail_end,
             trail_end_x );
     add_draw_callback( trail_cb );
+#if defined(TILES)
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
 
     do {
         bool recalc_unread = false;
+#if defined(TILES)
+        if( const auto pick = cata::godot_bridge::take_pick( &ground_items ) ) {
+            if( const auto step = vmenu_tab_step( *pick, 0 ) ) {
+                vmenu_tab_delta = *step;
+                u.view_offset = stored_view_offset;
+                return game::vmenu_ret::CHANGE_TAB;
+            }
+            if( *pick < cata::godot_screen::tab_pick && *pick % cata::godot_screen::row_stride != iActive ) {
+                iActive = *pick % cata::godot_screen::row_stride;
+                page_num = 0;
+                iScrollPos = 0;
+                recalc_unread = highlight_unread_items;
+            }
+        }
+        if( native ) {
+            iScrollPos = std::max( iScrollPos, 0 );
+        }
+#endif
         if( action == "COMPARE" && activeItem ) {
             game_menus::inv::compare( u, active_pos );
             recalc_unread = highlight_unread_items;
@@ -11729,7 +12081,26 @@ game::vmenu_ret game::list_monsters( const std::vector<Creature *> &monster_list
     bool hide_ui = false;
 
     ui_adaptor ui;
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    const auto make_native = [&]() {
+        if( cata::godot_bridge::native_screens() ) {
+            native = std::make_unique<cata::godot_bridge::native_view>( "screen", &monster_list,
+                     "LIST_MONSTERS" );
+            native->attach( ui );
+        }
+    };
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( cata::godot_bridge::native_screens() ) {
+            if( cCurMon && !hide_ui ) {
+                centerlistview( iActivePos, vmenu_native_width );
+            }
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         if( hide_ui ) {
             ui.position( point_zero, point_zero );
         } else {
@@ -11791,6 +12162,108 @@ game::vmenu_ret game::list_monsters( const std::vector<Creature *> &monster_list
     }
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                namespace gs = cata::godot_screen;
+                const auto category = std::string( "LIST_MONSTERS" );
+                write_vmenu_frame( jsout, 1, category );
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", _( "Monsters" ) );
+                jsout.member( "icon", "skull" );
+                jsout.member( "count", std::to_string( monster_list.size() ) );
+                jsout.member( "cursor", iActive );
+                jsout.member( "confirm", "" );
+                jsout.member( "empty", _( "You don't see any monsters around you!" ) );
+                jsout.member( "rows" );
+                jsout.start_array();
+                for( auto idx = 0; idx < static_cast<int>( monster_list.size() ); ++idx ) {
+                    const auto critter = monster_list[idx];
+                    // Grouped by attitude, as in `mSortCategory`.
+                    if( player_knows && ( idx == 0 ||
+                                          critter->attitude_to( u ) != monster_list[idx - 1]->attitude_to( u ) ) ) {
+                        gs::write_row( jsout, { .text = { .text = Creature::get_attitude_ui_data( critter->attitude_to( u ) ).first.translated() }, .heading = true } );
+                    }
+                    const auto *mon = dynamic_cast<const monster *>( critter );
+                    const auto *guy = dynamic_cast<const npc *>( critter );
+                    auto hp_color = c_white;
+                    auto hp_text = std::string();
+                    if( mon != nullptr ) {
+                        mon->get_HP_Bar( hp_color, hp_text );
+                    } else {
+                        std::tie( hp_text, hp_color ) = ::get_hp_bar( critter->get_hp(), critter->get_hp_max(), false );
+                    }
+                    auto att_text = std::string();
+                    auto att_color = c_white;
+                    if( mon != nullptr ) {
+                        const auto att = mon->get_attitude();
+                        att_text = att.first;
+                        att_color = att.second;
+                    } else if( guy != nullptr ) {
+                        att_text = npc_attitude_name( guy->get_attitude() );
+                        att_color = guy->symbol_color();
+                    }
+                    const auto dist = rl_dist( u.bub_pos(), critter->bub_pos() );
+                    auto cells = std::vector<gs::span>();
+                    if( player_knows ) {
+                        cells.push_back( { .text = hp_text, .color = hp_color } );
+                    }
+                    cells.push_back( { .text = att_text, .color = att_color } );
+                    cells.push_back( { .text = string_format( "%d %s", dist, direction_name_short( direction_from( u.bub_pos(), critter->bub_pos() ) ) ) } );
+                    const auto sees_you = player_knows && critter->sees( u );
+                    gs::write_row( jsout, {
+                        .text = { .text = mon != nullptr ? mon->name() : critter->disp_name(), .color = critter->basic_symbol_color() },
+                        .cells = cells,
+                        .i = idx,
+                        .icon = sees_you ? "eye" : "",
+                        .icon_color = "c_yellow",
+                        .tip = sees_you ? _( "It can see you." ) : "",
+                    } );
+                }
+                jsout.end_array();
+                jsout.end_object();
+                jsout.end_array();
+
+                if( cCurMon ) {
+                    auto w_info = cata::godot_bridge::capture_window( 40, 60 );
+                    cCurMon->print_info( w_info, 0, 39, 0 );
+                    const auto *mon = dynamic_cast<const monster *>( cCurMon );
+                    jsout.member( "aside" );
+                    jsout.start_object();
+                    jsout.member( "title" );
+                    gs::write_span( jsout, { .text = mon != nullptr ? mon->name() : cCurMon->disp_name(), .color = cCurMon->basic_symbol_color() } );
+                    jsout.member( "sym", cCurMon->symbol() );
+                    jsout.member( "sym_color", string_from_color( cCurMon->symbol_color() ) );
+                    jsout.member( "subtitle", tiles_away( rl_dist( u.bub_pos(), cCurMon->bub_pos() ),
+                                                          direction_from( u.bub_pos(), cCurMon->bub_pos() ) ) );
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_window_spans( jsout, w_info );
+                    jsout.member( "buttons" );
+                    jsout.start_array();
+                    if( bVMonsterLookFire ) {
+                        gs::write_button( jsout, { .act = "fire", .text = _( "Shoot" ), .icon = "crosshair", .category = category, .primary = true, .enabled = rl_dist( u.bub_pos(), cCurMon->bub_pos() ) <= max_gun_range, .tip = _( "Out of range of your weapon." ) } );
+                        gs::write_button( jsout, { .act = "look", .text = _( "Look around" ), .icon = "eye", .category = category } );
+                    }
+                    if( !get_safemode().empty() ) {
+                        const auto name = mon != nullptr ? mon->name() : get_safemode().npc_type_name();
+                        const auto listed = get_safemode().has_rule( name, Attitude::A_ANY );
+                        gs::write_button( jsout, { .act = listed ? "SAFEMODE_BLACKLIST_REMOVE" : "SAFEMODE_BLACKLIST_ADD", .text = listed ? _( "Remove from safe mode blacklist" ) : _( "Add to safe mode blacklist" ), .icon = "shield", .category = category } );
+                    }
+                    jsout.end_array();
+                    jsout.end_object();
+                }
+
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         if( !hide_ui ) {
             draw_custom_border( w_monsters_border, true, true, true, true, true, true, LINE_XOXO, LINE_XOXO );
             draw_custom_border( w_monster_info_border, true, true, true, true, LINE_XXXO, LINE_XOXX, true,
@@ -11968,8 +12441,23 @@ game::vmenu_ret game::list_monsters( const std::vector<Creature *> &monster_list
     shared_ptr_fast<draw_callback_t> trail_cb = create_trail_callback( trail_start, trail_end,
             trail_end_x );
     add_draw_callback( trail_cb );
+#if defined(TILES)
+    make_native();
+#endif
 
     do {
+#if defined(TILES)
+        if( const auto pick = cata::godot_bridge::take_pick( &monster_list ) ) {
+            if( const auto step = vmenu_tab_step( *pick, 1 ) ) {
+                vmenu_tab_delta = *step;
+                u.view_offset = stored_view_offset;
+                return game::vmenu_ret::CHANGE_TAB;
+            }
+            if( *pick < cata::godot_screen::tab_pick ) {
+                iActive = *pick % cata::godot_screen::row_stride;
+            }
+        }
+#endif
         if( action == "UP" ) {
             iActive--;
             if( iActive < 0 ) {
@@ -12006,7 +12494,13 @@ game::vmenu_ret game::list_monsters( const std::vector<Creature *> &monster_list
         } else if( action == "look" ) {
             hide_ui = true;
             ui.mark_resize();
+#if defined(TILES)
+            native.reset();
+#endif
             look_around();
+#if defined(TILES)
+            make_native();
+#endif
             hide_ui = false;
             ui.mark_resize();
         } else if( action == "fire" ) {
