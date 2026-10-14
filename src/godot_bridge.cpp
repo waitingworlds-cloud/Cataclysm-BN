@@ -776,7 +776,15 @@ auto copy_window( const catacurses::window &from, const catacurses::window &to,
 
 auto key_label( const std::string &action, const std::string &category ) -> std::string
 {
-    const auto key = key_for_action( action, category );
+    // An arrow key reads better than the vi-style letter bound to the same direction.
+    const auto &events = inp_mngr.get_input_for_action( action, category );
+    const auto arrow = std::ranges::find_if( events, []( const input_event & ev ) {
+        const auto code = ev.get_first_input();
+        return ev.type == input_event_t::keyboard &&
+               ( code == KEY_UP || code == KEY_DOWN || code == KEY_LEFT || code == KEY_RIGHT );
+    } );
+    const auto key = arrow != events.end() ? std::optional( *arrow ) : key_for_action( action,
+                     category );
     if( !key ) {
         return {};
     }
