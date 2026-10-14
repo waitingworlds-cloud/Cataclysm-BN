@@ -40,7 +40,8 @@ directly; clicking a button presses the key bound to that action.
    To debug the game in a debugger, start Godot with `-- --attach --port=7777`, then run the game
    with `BN_GODOT_BRIDGE=127.0.0.1:7777`.
 
-Set `BN_BRIDGE_DEBUG=1` to print every message the game sends (except the HUD) to Godot's output.
+Set `BN_BRIDGE_DEBUG=1` to print every message the game sends (except the HUD) to Godot's output,
+cut to 300 characters; `BN_BRIDGE_DEBUG=full` prints them whole.
 
 ## What is drawn by Godot
 

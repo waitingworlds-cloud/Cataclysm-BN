@@ -32,6 +32,8 @@ var _said_hello := false
 var _pending_mouse := {}
 var launch_error := ""
 var _debug := OS.has_environment("BN_BRIDGE_DEBUG")
+## With `BN_BRIDGE_DEBUG=full`, messages print whole instead of cut to 300 characters.
+var _debug_full := OS.get_environment("BN_BRIDGE_DEBUG") == "full"
 
 
 func _ready() -> void:
@@ -191,7 +193,7 @@ func _on_json(text: String) -> void:
 	if typeof(msg) != TYPE_DICTIONARY:
 		return
 	if _debug and msg.get("t", "") != "hud":
-		print("game: ", text.left(300))
+		print("game: ", text if _debug_full else text.left(300))
 	match String(msg.get("t", "")):
 		"hello":
 			if not _said_hello:
