@@ -130,12 +130,22 @@ var _balance: Control
 var _dock_buttons := {}
 var _options_button: Button
 
+# Hover card: what is under the mouse on the map (the game's "Mouse View" box), shown like a
+# tooltip once the mouse rests.
+const HOVER_DELAY := 0.35
+const HOVER_WIDTH := 420
+var _hover: PanelContainer
+var _hover_text: RichTextLabel
+var _hover_on_map := false
+var _hover_still := 0.0
+
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_build_header()
 	_build_side()
 	_build_bar()
 	_build_survivor_card()
+	_build_hover()
 	Bridge.minimap_received.connect(func(texture: ImageTexture): _minimap.texture = texture)
 	Bridge.connected.connect(_send_insets)
 	_send_insets()
@@ -724,6 +734,66 @@ func _fit_bar() -> void:
 
 # --- Updates -------------------------------------------------------------------------------------
 
+# --- Hover card ----------------------------------------------------------------------------------
+
+func _build_hover() -> void:
+	_hover = PanelContainer.new()
+	_hover.add_theme_stylebox_override("panel", Slate.card_box(12, 14))
+	_hover.custom_minimum_size.x = HOVER_WIDTH
+	_hover.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hover.visible = false
+	add_child(_hover)
+	_hover_text = Slate.rich(12)
+	_hover_text.add_theme_font_override("normal_font", Slate.mono())
+	_hover_text.add_theme_color_override("default_color", Slate.SOFT)
+	_hover_text.add_theme_constant_override("line_separation", 3)
+	_hover.add_child(_hover_text)
+
+
+## Called by the window as the mouse enters or leaves the map (a HUD card covering the map counts
+## as leaving it).
+func set_map_hover(on: bool) -> void:
+	_hover_on_map = on
+	_hover_still = 0.0
+	_update_hover()
+
+
+## Called on every mouse move over the map: the card hides until the mouse rests again.
+func map_mouse_moved() -> void:
+	_hover_still = 0.0
+	_update_hover()
+
+
+func _process(delta: float) -> void:
+	if _hover_still < HOVER_DELAY:
+		_hover_still += delta
+		if _hover_still >= HOVER_DELAY:
+			_update_hover()
+
+
+func _update_hover() -> void:
+	var spans: Array = _hud.get("hover", [])
+	var show := _hover_on_map and _hover_still >= HOVER_DELAY and not spans.is_empty()
+	_hover.visible = show
+	if not show:
+		return
+	_hover_text.text = Slate.tidy_body(Slate.bbcode(spans, Slate.SOFT))
+	_hover.reset_size()
+	# Beside the mouse, kept inside the map between the bars: flipped to the left or up near the
+	# sidebar or the action bar.
+	var mouse := get_local_mouse_position()
+	var card := _hover.get_combined_minimum_size()
+	var area := Rect2(0, HEADER_HEIGHT, size.x - SIDE_WIDTH, size.y - HEADER_HEIGHT - BAR_HEIGHT)
+	var at := mouse + Vector2(20, 20)
+	if at.x + card.x > area.end.x:
+		at.x = mouse.x - 20 - card.x
+	if at.y + card.y > area.end.y:
+		at.y = area.end.y - card.y - 8
+	at.x = clampf(at.x, area.position.x + 8, maxf(area.position.x + 8, area.end.x - card.x - 8))
+	at.y = maxf(at.y, area.position.y + 8)
+	_hover.position = at
+
+
 func apply(hud: Dictionary) -> void:
 	_hud = hud
 	_keys = hud.get("keys", {})
@@ -754,6 +824,7 @@ func apply(hud: Dictionary) -> void:
 	for action in _dock_buttons:
 		_dock_buttons[action].set_key(_key(action))
 	_options_button.tooltip_text = _with_key("HUD options: choose what the HUD shows", "toggle_panel_adm")
+	_update_hover()
 
 
 func _update_needs(hud: Dictionary) -> void:

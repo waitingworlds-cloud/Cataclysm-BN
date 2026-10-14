@@ -38,6 +38,8 @@ func _ready() -> void:
 	frame_view.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	frame_view.mouse_filter = Control.MOUSE_FILTER_PASS
 	frame_view.gui_input.connect(_on_frame_input)
+	frame_view.mouse_entered.connect(func(): hud.set_map_hover(true))
+	frame_view.mouse_exited.connect(func(): hud.set_map_hover(false))
 	add_child(frame_view)
 
 	hud = Hud.new()
@@ -184,6 +186,7 @@ func _input(event: InputEvent) -> void:
 func _on_frame_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		Bridge.send_mouse_move(event.position)
+		hud.map_mouse_moved()
 	elif event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:

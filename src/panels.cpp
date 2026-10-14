@@ -31,6 +31,7 @@
 #include "item.h"
 #include "itype.h"
 #include "json.h"
+#include "live_view.h"
 #include "lua_sidebar_widgets.h"
 #include "magic/magic.h"
 #include "map/map.h"
@@ -3482,6 +3483,21 @@ auto write_area( JsonOut &jsout, const avatar &u ) -> void
     }
     jsout.end_array();
 }
+
+/// The square under the resting mouse as the "Mouse View" box describes it, for the hover card.
+auto write_hover( JsonOut &jsout ) -> void
+{
+    const auto at = godot_hover_position();
+    if( !at ) {
+        return;
+    }
+    const auto w = cata::godot_bridge::capture_window( 40, 52 );
+    auto line = 0;
+    g->pre_print_all_tile_info( *at, w, line, getmaxy( w ) - 1,
+                                get_map().get_visibility_variables_cache() );
+    jsout.member( "hover" );
+    cata::godot_bridge::write_window_spans( jsout, w );
+}
 #endif
 
 /// Panels that Lua mods add to the sidebar, with the lines they draw.
@@ -3560,6 +3576,7 @@ auto cata::godot_hud::build() -> std::string
     write_vehicle( jsout, u );
 #if defined(TILES)
     write_area( jsout, u );
+    write_hover( jsout );
 #endif
 
     // Optional panels follow their switches in the sidebar options menu.
