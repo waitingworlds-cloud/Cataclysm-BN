@@ -4,6 +4,7 @@
 #include "cursesdef.h"
 #include "cursesport.h"
 #include "game.h"
+#include "godot_bridge.h"
 #include "map/map.h"
 #include "options.h"
 #include "output.h"
@@ -37,6 +38,12 @@ void live_view::hide()
 
 void live_view::show( const tripoint_bub_ms &p )
 {
+#if defined(TILES)
+    // The box would sit where the Godot HUD's sidebar is, and showing it hides the HUD.
+    if( cata::godot_bridge::is_active() ) {
+        return;
+    }
+#endif
     mouse_position = p;
     if( !ui ) {
         ui = std::make_unique<ui_adaptor>();
