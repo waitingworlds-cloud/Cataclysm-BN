@@ -32,6 +32,8 @@ struct button {
     bool primary = false;
     bool enabled = true;
     std::string tip = {};
+    /// Pick code sent with `act`, for a button that does something no key does on its own.
+    std::optional<int> pick = std::nullopt;
 };
 
 /// Writes a button object: `{act, text, icon, key, primary, enabled}`.
@@ -48,6 +50,9 @@ inline auto write_button( JsonOut &jsout, const button &b ) -> void
     jsout.member( "enabled", b.enabled );
     if( !b.tip.empty() ) {
         jsout.member( "tip", b.tip );
+    }
+    if( b.pick ) {
+        jsout.member( "pick", *b.pick );
     }
     jsout.end_object();
 }
