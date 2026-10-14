@@ -5,8 +5,10 @@
 
 #include "catacharset.h"
 #include "char_validity_check.h"
+#include "godot_bridge.h"
 #include "ime.h"
 #include "input.h"
+#include "json.h"
 #include "output.h"
 #include "point.h"
 #include "translations.h"
@@ -246,6 +248,11 @@ void string_input_popup::update_input_history( utf8_wrapper &ret, bool up )
 void string_input_popup::draw( ui_adaptor *const ui, const utf8_wrapper &ret,
                                const utf8_wrapper &edit ) const
 {
+#if defined(TILES)
+    if( custom_window && cata::godot_bridge::curses_draw_suppressed() ) {
+        return;
+    }
+#endif
     if( !custom_window ) {
         werase( w_full );
         draw_border( w_full );
@@ -375,7 +382,37 @@ const std::string &string_input_popup::query_string( const bool loop, const bool
     const int scrmax = std::max( 0, _endx - _startx );
 
     std::unique_ptr<ui_adaptor> ui;
-    if( !draw_only && !custom_window ) {
+#if defined(TILES)
+    std::unique_ptr<cata::godot_bridge::native_view> view;
+    if( !draw_only && !custom_window && cata::godot_bridge::native_screens() ) {
+        ui = std::make_unique<ui_adaptor>();
+        // TEXT.* actions are global, so the default text input category finds their keys even
+        // when a caller supplied its own context.
+        view = std::make_unique<cata::godot_bridge::native_view>( "text_input", this,
+                "STRING_INPUT" );
+        view->attach( *ui );
+        ui->on_screen_resize( []( ui_adaptor & ui ) {
+            // Godot draws the text field, so it takes no room in the curses frame.
+            ui.position( point_zero, point_zero );
+        } );
+        ui->mark_resize();
+        ui->on_redraw( [&]( ui_adaptor & ) {
+            using cata::godot_bridge::write_spans;
+            view->publish( [&]( JsonOut & jsout ) {
+                jsout.member( "title" );
+                write_spans( jsout, _title, _title_color );
+                jsout.member( "description" );
+                write_spans( jsout, _description, _desc_color );
+                jsout.member( "value", ret.str() );
+                jsout.member( "cursor", _position );
+                jsout.member( "edit", edit.str() );
+                jsout.member( "max_length", _max_length );
+                jsout.member( "digits", _only_digits );
+            } );
+        } );
+    }
+#endif
+    if( !ui && !draw_only && !custom_window ) {
         ui = std::make_unique<ui_adaptor>();
         ui->position_from_window( w_full );
         ui->on_screen_resize( [this]( ui_adaptor & ui ) {
