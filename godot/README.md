@@ -51,18 +51,18 @@ one did.
 | Area                | Screens drawn by Godot                                                       |
 | ------------------- | ---------------------------------------------------------------------------- |
 | Playing             | HUD (header, sidebar, action bar, survivor card, map hover card), message log, look around and descriptions, nearby items, monsters and vehicles, aiming |
-| Items               | Inventory and every item list built on it, item actions, item info, comparison, pickup, advanced inventory, sort armor, vending machines, enchanting |
+| Items               | Inventory and every item list built on it, item actions, item info, comparison, pickup, advanced inventory, sort armor, vending machines, enchanting, the defense mode caravan |
 | Making things       | Crafting, construction                                                       |
 | Character           | Character sheet, morale, bionics, mutations, martial arts and technique details, blood test results, missions, factions, scores, diary |
 | World               | Overmap legend, search and note editor, vehicle screen, computer terminals, conversations with NPCs, trade |
 | Menus and prompts   | List menus (with search, categories and side panels), questions and notices, text prompts, multi-line text editor, long texts and help topics |
 | Settings            | Options, keybindings, auto pickup, safe mode, auto notes, distractions, colors, zones |
-| Outside a game      | Title screen, world picker, world creation and mod lists, character creation, loading progress |
+| Outside a game      | Title screen, world picker, world creation and mod lists, character creation, defense mode setup, loading progress |
 
-Still drawn by the game in its old style: the Lua console, the debug map editor, the defense mode
-setup, the minigames on in-game computers (robot finds kitten, lights on, minesweeper, snake,
-sokoban), and the debug error screen. When the game shows one of these, Godot shows it as the game
-drew it, so nothing is ever unreachable.
+Still drawn by the game in its old style: the Lua console, the debug map editor, the minigames on
+in-game computers (robot finds kitten, lights on, minesweeper, snake, sokoban), and the debug error
+screen. When the game shows one of these, Godot shows it as the game drew it, so nothing is ever
+unreachable.
 
 ## The HUD
 
