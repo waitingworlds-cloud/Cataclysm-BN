@@ -284,8 +284,7 @@ func _build_aside() -> Control:
 	_aside_glyph.set_anchors_preset(Control.PRESET_FULL_RECT)
 	tile_stack.add_child(_aside_glyph)
 	_aside_icon = Slate.icon_rect("list", 22, Slate.ACCENT)
-	_aside_icon.set_anchors_preset(Control.PRESET_CENTER)
-	_aside_icon.position = Vector2(13, 13)
+	_aside_icon.set_anchors_preset(Control.PRESET_FULL_RECT)
 	tile_stack.add_child(_aside_icon)
 	head.add_child(_aside_tile)
 	var names := VBoxContainer.new()
@@ -671,9 +670,7 @@ func _apply_aside(msg: Dictionary) -> void:
 	var warn: Array = aside.get("warn", [])
 	_aside_warn.visible = not warn.is_empty()
 	_aside_warn_text.text = Slate.bbcode(warn, Slate.DANGER).strip_edges()
-	var body := Slate.bbcode(aside.get("body", []), Slate.SOFT)
-	# The game separates sections with "--" lines; show them as spacing instead.
-	body = body.replace("\n--\n", "\n\n").replace("--\n", "\n").strip_edges()
+	var body := Slate.tidy_body(Slate.bbcode(aside.get("body", []), Slate.SOFT))
 	var empty := String(aside.get("empty", ""))
 	_aside_scroll.visible = body != ""
 	_aside_empty.visible = body == "" and empty != ""
@@ -792,7 +789,7 @@ class Pane extends VBoxContainer:
 			_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			_text.add_theme_color_override("default_color", Slate.SOFT)
 			_text.add_theme_constant_override("line_separation", 4)
-			_text.text = Slate.bbcode(spec["body"], Slate.SOFT).strip_edges()
+			_text.text = Slate.tidy_body(Slate.bbcode(spec["body"], Slate.SOFT))
 			var text_pad := MarginContainer.new()
 			for side in ["left", "right"]:
 				text_pad.add_theme_constant_override("margin_" + side, 10)

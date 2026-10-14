@@ -52,6 +52,7 @@ const CURSES := {
 static var _fonts := {}
 static var _icons := {}
 static var _theme: Theme
+static var _separator: RegEx
 
 
 ## Slate color for a game color name such as `c_light_red`, `h_white` or `c_white_red`.
@@ -216,6 +217,13 @@ static func theme() -> Theme:
 
 
 ## BBCode for `[text, color]` runs sent by the game.
+## The game separates sections with "--" lines (sometimes colored); shows them as spacing instead.
+static func tidy_body(bb: String) -> String:
+	if _separator == null:
+		_separator = RegEx.create_from_string("(?m)^(\\[color=[^\\]]*\\])?-{2,}(\\[/color\\])?$")
+	return _separator.sub(bb, "", true).strip_edges()
+
+
 static func bbcode(spans, fallback := TEXT) -> String:
 	var out := ""
 	if typeof(spans) != TYPE_ARRAY:
