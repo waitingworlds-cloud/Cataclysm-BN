@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,6 +11,10 @@
 #include "catacharset.h"
 #include "color.h"
 #include "cursesdef.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "output.h"
 #include "point.h"
@@ -136,6 +141,14 @@ int minesweeper_game::start_game()
     catacurses::window w_minesweeper;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot draws the field as a board of squares: click to dig, right click to flag.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "MINESWEEPER" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         const point iCenter( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0,
                              TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 : 0 );
@@ -146,6 +159,13 @@ int minesweeper_game::start_game()
                                             iCenter + point_south_east );
         max = point( FULL_SCREEN_WIDTH - 4, FULL_SCREEN_HEIGHT - 4 );
         ui.position_from_window( w_minesweeper_border );
+#if defined(TILES)
+        if( native ) {
+            w_minesweeper_border = cata::godot_bridge::capture_window( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH );
+            w_minesweeper = cata::godot_bridge::capture_window( FULL_SCREEN_HEIGHT - 2, FULL_SCREEN_WIDTH - 2 );
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -255,6 +275,54 @@ int minesweeper_game::start_game()
             }
         }
         wnoutrefresh( w_minesweeper );
+#if defined(TILES)
+        if( native ) {
+            namespace gs = cata::godot_screen;
+            const auto category = std::string( "MINESWEEPER" );
+            native->publish( [&]( JsonOut & jsout ) {
+                jsout.member( "title", _( "Minesweeper" ) );
+                jsout.member( "icon", "bomb" );
+                jsout.member( "size", std::array{ std::clamp( level.x * 36 + 460, 900, 1500 ), std::clamp( level.y * 36 + 260, 600, 940 ) } );
+                jsout.member( "stats" );
+                jsout.start_array();
+                gs::write_stat( jsout, { .icon = "bomb", .label = _( "Mines" ), .value = { .text = std::to_string( iBombs ), .color = c_white } } );
+                jsout.end_array();
+                jsout.member( "panes" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "cell", 34 );
+                jsout.member( "square", true );
+                jsout.member( "raised", "#!" );
+                jsout.member( "hide", "#" );
+                jsout.member( "click", "CONFIRM" );
+                jsout.member( "right_click", "FLAG" );
+                jsout.member( "grid" );
+                cata::godot_bridge::write_window_grid( jsout, w_minesweeper, { .at = offset, .size = level } );
+                jsout.end_object();
+                jsout.end_array();
+                jsout.member( "aside" );
+                jsout.start_object();
+                jsout.member( "width", 340 );
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = _( "Click a square to dig it up, or right click to flag it." ) } );
+                jsout.member( "buttons" );
+                jsout.start_array();
+                gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Dig" ), .icon = "shovel", .category = category, .primary = true } );
+                gs::write_button( jsout, { .act = "FLAG", .text = _( "Flag" ), .icon = "flag", .category = category } );
+                gs::write_button( jsout, { .act = "NEW", .text = _( "New level" ), .icon = "rotate-ccw", .category = category } );
+                jsout.end_array();
+                jsout.end_object();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓←→", _( "Move" ) );
+                gs::write_hint( jsout, "CONFIRM", category, _( "Dig" ) );
+                gs::write_hint( jsout, "FLAG", category, _( "Flag" ) );
+                gs::write_hint( jsout, "NEW", category, _( "New level" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Quit" ) );
+                jsout.end_array();
+            } );
+        }
+#endif
     } );
 
     std::function<void ( point )> rec_reveal = [&]( point  pt ) {
@@ -306,6 +374,13 @@ int minesweeper_game::start_game()
         } else {
             ui_manager::redraw();
             action = ctxt.handle_input();
+#if defined(TILES)
+            // A clicked square: `row * 1000 + column`.
+            if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+                pl = point( std::clamp( *pick % 1000, 0, level.x - 1 ), std::clamp( *pick / 1000, 0,
+                            level.y - 1 ) );
+            }
+#endif
         }
 
         if( const std::optional<tripoint_rel_ms> vec = ctxt.get_direction( action ) ) {
