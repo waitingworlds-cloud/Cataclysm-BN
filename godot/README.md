@@ -58,12 +58,16 @@ one did.
 | World               | Overmap legend, search and note editor, vehicle screen, computer terminals, conversations with NPCs, trade |
 | Menus and prompts   | List menus (with search, categories and side panels), questions and notices, text prompts, multi-line text editor, long texts and help topics, error reports |
 | Settings            | Options, keybindings, auto pickup, safe mode, auto notes, distractions, colors, zones |
-| Developer tools     | Lua console                                                                  |
+| Developer tools     | Lua console, map editor (details docked beside the map, its menus as list menus) |
 | Outside a game      | Title screen, world picker, world creation and mod lists, character creation with the character preview, defense mode setup, loading progress |
 | Games               | The handheld and computer minigames: robot finds kitten, lights on, minesweeper, snake, sokoban |
 
-Still drawn by the game in its old style: the debug map editor. When the game shows it, Godot shows
-it as the game drew it, so nothing is ever unreachable.
+No screen is left in the game's old style. A screen Godot doesn't know (one a mod or a later update
+adds) is still shown as the game draws it, so nothing is ever unreachable.
+
+Long menus (the map editor lists thousands of terrain types) build only the rows around what is in
+view, with spacers that keep the scroll bar true to the whole list. A menu the game asks again on
+every cursor blink stays open between those asks instead of closing and reopening.
 
 ## The HUD
 
