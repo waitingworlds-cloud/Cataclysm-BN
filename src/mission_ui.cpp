@@ -1,7 +1,10 @@
 #include "game.h" // IWYU pragma: associated
 
 #include <algorithm>
+#include <array>
 #include <map>
+#include <memory>
+#include <ranges>
 #include <string>
 #include <vector>
 
@@ -9,6 +12,10 @@
 #include "calendar.h"
 #include "color.h"
 #include "debug.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "mission.h"
 #include "npc.h"
@@ -41,6 +48,14 @@ void game::list_missions()
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the missions with the chosen one's details beside them.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &u, "MISSIONS" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         w_missions = new_centered_win( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH );
 
@@ -48,12 +63,133 @@ void game::list_missions()
         entries_per_page = FULL_SCREEN_HEIGHT - 4;
 
         ui.position_from_window( w_missions );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
     std::vector<mission *> umissions;
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "MISSIONS" );
+        const auto counts = std::array {
+            u.get_active_missions().size(), u.get_completed_missions().size(), u.get_failed_missions().size()
+        };
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Missions" ) );
+            jsout.member( "icon", "scroll-text" );
+            jsout.member( "size", std::array{ 1240, 780 } );
+            jsout.member( "tabs" );
+            jsout.start_array();
+            const auto tab_names = std::array { _( "Active" ), _( "Completed" ), _( "Failed" ) };
+            const auto tab_icons = std::array { "target", "circle-check", "circle-x" };
+            for( const auto n : std::views::iota( 0, static_cast<int>( tab_names.size() ) ) ) {
+                gs::write_tab( jsout, {
+                    .text = tab_names[n],
+                    .active = static_cast<int>( tab ) == n,
+                    .pick = gs::tab_pick + n,
+                    .icon = tab_icons[n],
+                    .count = std::to_string( counts[n] ),
+                } );
+            }
+            jsout.end_array();
+            gs::write_tab_keys( jsout, "LEFT", "RIGHT", category );
+
+            const auto active_tab = tab == tab_mode::TAB_ACTIVE;
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Missions" ) );
+            jsout.member( "icon", "scroll-text" );
+            jsout.member( "cursor", static_cast<int>( selection ) );
+            jsout.member( "confirm", active_tab ? "CONFIRM" : "" );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( auto *miss : umissions ) {
+                const auto current = u.get_active_mission() == miss;
+                gs::write_row( jsout, {
+                    .text = { .text = miss->name(), .color = current ? c_light_green : c_white },
+                    .note = { .text = current ? _( "Current" ) : "", .color = c_light_green },
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 640 );
+            jsout.member( "share", 0.55 );
+            if( selection < umissions.size() ) {
+                auto *miss = umissions[selection];
+                const auto current = u.get_active_mission() == miss;
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = miss->name(), .color = current ? c_light_green : c_white } );
+                if( miss->get_npc_id().is_valid() ) {
+                    if( const npc *guy = g->find_npc( miss->get_npc_id() ) ) {
+                        jsout.member( "subtitle", string_format( _( "For %s" ), guy->disp_name() ) );
+                    }
+                }
+                auto body = miss->get_description();
+                for( const auto &[count, id] : miss->get_likely_rewards() ) {
+                    body = replace_all( body, "<reward_count:" + id.str() + ">", std::to_string( count ) );
+                }
+                if( miss->has_deadline() ) {
+                    const auto deadline = miss->get_deadline();
+                    body += "\n\n" + string_format( _( "Deadline: %s" ), to_string( deadline ) );
+                    if( tab != tab_mode::TAB_COMPLETED ) {
+                        const auto remaining = deadline - calendar::turn;
+                        const auto remaining_time = remaining <= 0_turns ? std::string( _( "None!" ) ) :
+                                                    u.has_watch() ? to_string( remaining ) : to_string_approx( remaining );
+                        body += "\n" + string_format( _( "Time remaining: %s" ), remaining_time );
+                    }
+                }
+                if( miss->has_target() ) {
+                    body += "\n" + string_format( _( "Target: %s   You: %s" ), miss->get_target().to_string(),
+                                                  u.abs_omt_pos().to_string() );
+                }
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = body } );
+                if( active_tab ) {
+                    jsout.member( "buttons" );
+                    jsout.start_array();
+                    gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Make this my current mission" ), .icon = "target",
+                                               .category = category, .primary = true, .enabled = !current
+                                             } );
+                    jsout.end_array();
+                }
+            } else {
+                static const auto nope = std::array {
+                    translate_marker( "You have no active missions!" ),
+                    translate_marker( "You haven't completed any missions!" ),
+                    translate_marker( "You haven't failed any missions!" ),
+                };
+                jsout.member( "empty", _( nope[static_cast<int>( tab )] ) );
+            }
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Tab" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         werase( w_missions );
         // entries_per_page * page number
         const int top_of_page = entries_per_page * ( selection / entries_per_page );
@@ -184,6 +320,19 @@ void game::list_missions()
         }
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            namespace gs = cata::godot_screen;
+            if( *pick >= gs::tab_pick && *pick < gs::tab_pick + static_cast<int>( tab_mode::NUM_TABS ) ) {
+                tab = static_cast<tab_mode>( *pick - gs::tab_pick );
+                selection = 0;
+                continue;
+            }
+            if( *pick >= 0 && static_cast<size_t>( *pick ) < umissions.size() ) {
+                selection = static_cast<size_t>( *pick );
+            }
+        }
+#endif
         if( action == "RIGHT" ) {
             tab = static_cast<tab_mode>( static_cast<int>( tab ) + 1 );
             if( tab >= tab_mode::NUM_TABS ) {
