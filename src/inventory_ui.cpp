@@ -894,8 +894,11 @@ void inventory_column::prepare_paging( const std::string &filter )
     }
     entries_cell_cache.clear();
     paging_is_valid = true;
-    // Select the uppermost possible entry
-    select( selected_index, selected_index ? scroll_direction::BACKWARD : scroll_direction::FORWARD );
+    // Select the uppermost possible entry. A filter can leave the old index past the end of the
+    // list, which would leave nothing selected.
+    const auto index = entries.empty() ? selected_index : std::min( selected_index,
+                       entries.size() - 1 );
+    select( index, index ? scroll_direction::BACKWARD : scroll_direction::FORWARD );
 }
 
 void inventory_column::clear()
