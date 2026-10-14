@@ -58,6 +58,15 @@
 #include <utility>
 #include <vector>
 
+#if defined(TILES)
+#include <array>
+#include <ranges>
+
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#include "json.h"
+#endif
+
 static auto editmap_boundaries() -> half_open_cuboid<tripoint_bub_ms>
 {
     return { tripoint_bub_ms( 0, 0, -OVERMAP_DEPTH ),
@@ -65,6 +74,25 @@ static auto editmap_boundaries() -> half_open_cuboid<tripoint_bub_ms>
 }
 
 static const ter_id undefined_ter_id( -1 );
+
+namespace
+{
+
+/// Names a menu the map editor opens. Godot draws every menu with a title bar, and these have no
+/// title in the game's own layout, where the editor's panel names what is being edited.
+auto name_native_menu( uilist &menu, const std::string &title ) -> void
+{
+#if defined(TILES)
+    if( cata::godot_bridge::native_screens() ) {
+        menu.title = title;
+    }
+#else
+    static_cast<void>( menu );
+    static_cast<void>( title );
+#endif
+}
+
+} // namespace
 
 static std::vector<std::string> fld_string( const std::string &str, int width )
 {
@@ -318,9 +346,124 @@ editmap::game_draw_callback_t_container &editmap::draw_cb_container()
     return *draw_cb_container_;
 }
 
+#if defined(TILES)
+namespace
+{
+
+/// Lines of the off-screen info window Godot's panel is read from: taller than the game's own
+/// panel, so a long vehicle part list or field list isn't cut short.
+constexpr auto native_info_lines = 40;
+
+/// What the map editor's panel shows, for `publish_editmap`.
+struct editmap_panel {
+    const catacurses::window &info;
+    std::string title;
+    std::string help;
+    tripoint_bub_ms target;
+};
+
+/// Title `edit` gives the panel while it waits on its main keys, which then become buttons.
+auto looking_around_title() -> std::string { return pgettext( "map editor state", "Looking around" ); }
+
+/// Sends the map editor's info panel to Godot, docked beside the map. While looking around, the
+/// keys the game listed under the panel are buttons and hints; while editing, the editing step's
+/// keys stay listed under the details.
+auto publish_editmap( cata::godot_bridge::native_view &view, const editmap_panel &panel ) -> void
+{
+    namespace gs = cata::godot_screen;
+    const auto category = std::string( "EDITMAP" );
+    const auto looking_around = panel.title == looking_around_title();
+    view.publish( [&]( JsonOut & jsout ) {
+        jsout.member( "title", _( "Map editor" ) );
+        jsout.member( "icon", "pencil-ruler" );
+        jsout.member( "dock", "right" );
+        jsout.member( "size", std::array{ 460, 0 } );
+        jsout.member( "subtitle" );
+        gs::write_span( jsout, { .text = string_format( _( "Cursor At: (%d,%d,%d)" ), panel.target.x(), panel.target.y(), panel.target.z() ) } );
+        jsout.member( "aside" );
+        jsout.start_object();
+        if( !panel.title.empty() ) {
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = panel.title, .color = c_white } );
+        }
+        jsout.member( "mono", true );
+        jsout.member( "body" );
+        cata::godot_bridge::write_window_spans( jsout, panel.info, { .left = 1, .width = getmaxx( panel.info ) - 2 } );
+        if( !looking_around && !panel.help.empty() ) {
+            jsout.member( "sections" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Keys" ) );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = panel.help } );
+            jsout.end_object();
+            jsout.end_array();
+        }
+        if( looking_around ) {
+            const auto &here = get_map();
+            const auto has_critter = g->critter_at( panel.target ) != nullptr;
+            const auto has_vehicle = !has_critter && here.veh_at( panel.target ).has_value();
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "EDIT_TERRAIN", .text = _( "Terrain" ), .icon = "mountain", .category = category } );
+            gs::write_button( jsout, { .act = "EDIT_FURNITURE", .text = _( "Furniture" ), .icon = "armchair", .category = category } );
+            gs::write_button( jsout, { .act = "EDIT_TRAPS", .text = _( "Traps" ), .icon = "triangle-alert", .category = category } );
+            gs::write_button( jsout, { .act = "EDIT_FIELDS", .text = _( "Fields" ), .icon = "flame", .category = category } );
+            gs::write_button( jsout, { .act = "EDIT_ITEMS", .text = _( "Items" ), .icon = "package", .category = category } );
+            gs::write_button( jsout, { .act = "EDIT_MONSTER", .text = has_vehicle ? _( "Vehicle" ) : _( "Creature" ), .icon = has_vehicle ? "car" : "skull", .category = category, .enabled = has_critter || has_vehicle, .tip = _( "Edit the creature or vehicle under the cursor" ) } );
+            gs::write_button( jsout, { .act = "EDIT_OVERMAP", .text = _( "Map generation" ), .icon = "map", .category = category, .tip = _( "Place an overmap terrain's map here" ) } );
+            jsout.end_array();
+        }
+        jsout.end_object();
+        jsout.member( "hints" );
+        jsout.start_array();
+        if( looking_around ) {
+            const auto key_labels = [&]( const auto & acts ) {
+                return acts
+                | std::views::transform( [&]( const auto & act ) { return cata::godot_bridge::key_label( act, category ); } )
+                | std::views::join_with( std::string( " " ) )
+                | std::ranges::to<std::string>();
+            };
+            // Few and short, so the row fits the panel; the header's close button closes it.
+            gs::write_fixed_hint( jsout, "←↑→↓", _( "Move" ) );
+            gs::write_fixed_hint( jsout, key_labels( std::array{ "LEFT_WIDE", "RIGHT_WIDE", "UP_WIDE", "DOWN_WIDE" } ),
+                                  _( "Fast move" ) );
+            gs::write_fixed_hint( jsout, key_labels( std::array{ "LEVEL_UP", "LEVEL_DOWN" } ), _( "Level" ) );
+        }
+        jsout.end_array();
+    } );
+}
+
+} // namespace
+#endif
+
 shared_ptr_fast<ui_adaptor> editmap::create_or_get_ui_adaptor()
 {
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
+#if defined(TILES)
+    if( !current_ui && cata::godot_bridge::native_screens() ) {
+        ui = current_ui = make_shared_fast<ui_adaptor>();
+        auto view = std::make_shared<cata::godot_bridge::native_view>( "screen", this, "EDITMAP" );
+        view->attach( *current_ui );
+        current_ui->on_screen_resize( [this]( ui_adaptor & ui ) {
+            w_info = cata::godot_bridge::capture_window( native_info_lines, width );
+            tmax = point( getmaxx( g->w_terrain ), getmaxy( g->w_terrain ) );
+            // Godot draws the panel, so it takes no room in the curses frame.
+            ui.position( point_zero, point_zero );
+        } );
+        current_ui->mark_resize();
+        current_ui->on_redraw( [this, view]( const ui_adaptor & ) {
+            // The title and keys go to Godot's panel, so only the details and no border are drawn.
+            update_view_with_help( std::string(), std::string() );
+            const auto rows = std::array{ 0, getmaxy( w_info ) - 1 };
+            for( const auto row : rows ) {
+                mvwprintz( w_info, point( 0, row ), c_black, std::string( width, ' ' ) );
+            }
+            publish_editmap( *view, { .info = w_info, .title = info_title_curr, .help = info_txt_curr, .target = target } );
+        } );
+        return current_ui;
+    }
+#endif
     if( !current_ui ) {
         ui = current_ui = make_shared_fast<ui_adaptor>();
         current_ui->on_screen_resize( [this]( ui_adaptor & ui ) {
@@ -1024,6 +1167,7 @@ void editmap::edit_feature()
     emenu.w_y_setup = 0;
     emenu.w_x_setup = offsetX;
     emenu.desc_enabled = true;
+    name_native_menu( emenu, info_title<T_t>() );
     emenu.input_category = "EDITMAP_FEATURE";
     emenu.additional_actions = {
         { "CONFIRM_QUIT", translation() },
@@ -1162,6 +1306,7 @@ void editmap::edit_fld()
     fmenu.w_y_setup = 0;
     fmenu.w_x_setup = offsetX;
     setup_fmenu( fmenu );
+    name_native_menu( fmenu, pgettext( "Map editor: Editing field effects", "Field effects" ) );
     fmenu.input_category = "EDIT_FIELDS";
     fmenu.additional_actions = {
         { "EDITMAP_TAB", translation() },
@@ -1340,6 +1485,7 @@ void editmap::edit_itm()
                          an_item->is_emissive() ? " L" : "" );
     }
     ilmenu.addentry( items.size(), true, 'a', _( "Add item" ) );
+    name_native_menu( ilmenu, _( "Items here" ) );
     ilmenu.input_category = "EDIT_ITEMS";
     ilmenu.additional_actions = {
         { "HELP_KEYBINDINGS", translation() } // to refresh the view after exiting from keybindings
@@ -1807,6 +1953,7 @@ void editmap::mapgen_preview( const point_abs_ms &tc, uilist &gmenu )
     gpmenu.addentry( pgettext( "map generator", "Rotate" ) );
     gpmenu.addentry( pgettext( "map generator", "Apply" ) );
     gpmenu.addentry( pgettext( "map generator", "Change Overmap (Doesn't Apply)" ) );
+    name_native_menu( gpmenu, _( "Mapgen preview" ) );
 
     gpmenu.input_category = "MAPGEN_PREVIEW";
     gpmenu.additional_actions = {
@@ -2033,6 +2180,7 @@ void editmap::edit_mapgen()
     gmenu.w_y_setup = 0;
     gmenu.w_x_setup = offsetX;
     gmenu.input_category = "EDIT_MAPGEN";
+    name_native_menu( gmenu, pgettext( "map generator", "Mapgen stamp" ) );
     gmenu.additional_actions = {
         { "EDITMAP_MOVE", translation() },
         { "HELP_KEYBINDINGS", translation() } // to refresh the view after exiting from keybindings

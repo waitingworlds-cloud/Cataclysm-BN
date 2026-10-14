@@ -317,6 +317,12 @@ static func key_name(key: String) -> String:
 		"BACKSPACE": "Backspace", "DELETE": "Del", "HOME": "Home", "END": "End", "PPAGE": "PgUp",
 		"NPAGE": "PgDn", "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→",
 	}
+	# A hint for several keys lists them with spaces between ("PPAGE NPAGE").
+	if key.contains(" "):
+		var names := PackedStringArray()
+		for part in key.split(" ", false):
+			names.append(key_name(part))
+		return " ".join(names)
 	if key.begins_with("CTRL+") and key.length() > 5:
 		return "Ctrl+" + key.substr(5)
 	return NAMES.get(key, key)
