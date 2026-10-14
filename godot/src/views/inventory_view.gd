@@ -8,9 +8,10 @@ extends Control
 ## Picks arrive in the game as `pane * STRIDE + row index` (see `inventory_ui.cpp`).
 const STRIDE := 100000
 const ROW_HEIGHT := 36
-## Width of each extra column a list shows (damage, encumbrance, ...), and the gap between them.
-const CELL_WIDTH := 40
-const CELL_GAP := 2
+## Narrowest extra column a list shows (damage, encumbrance, ...), and the gap between them.
+const MIN_CELL_WIDTH := 30
+const MAX_CELL_WIDTH := 190
+const CELL_GAP := 10
 const ASIDE_WIDTH := 390.0
 const MAX_SIZE := Vector2(1440, 920)
 const PANE_NAMES := {"carried": "Carried", "nearby": "Nearby", "worn": "Worn", "selection": "Chosen"}
@@ -50,6 +51,8 @@ var _glyph: Label
 var _glyph_tile: PanelContainer
 var _name: RichTextLabel
 var _category: Label
+var _denial: PanelContainer
+var _denial_text: RichTextLabel
 var _info_scroll: ScrollContainer
 var _info: RichTextLabel
 var _no_item: Label
@@ -317,6 +320,26 @@ func _build_aside() -> Control:
 	_category = Slate.label("", 11, Slate.FAINT, Slate.bold())
 	names.add_child(_category)
 
+	# Why the selected item can't be chosen here, in full (rows only have room for the start).
+	_denial = PanelContainer.new()
+	var denial_box := Slate.box(Color(Slate.DANGER, 0.1), 10, Color(Slate.DANGER, 0.35), 1)
+	denial_box.content_margin_left = 12
+	denial_box.content_margin_right = 12
+	denial_box.content_margin_top = 8
+	denial_box.content_margin_bottom = 8
+	_denial.add_theme_stylebox_override("panel", denial_box)
+	var denial_row := HBoxContainer.new()
+	denial_row.add_theme_constant_override("separation", 10)
+	_denial.add_child(denial_row)
+	var alert := Slate.icon_rect("circle-alert", 16, Slate.DANGER)
+	alert.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	denial_row.add_child(alert)
+	_denial_text = Slate.rich(13)
+	_denial_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_denial_text.add_theme_color_override("default_color", Slate.DANGER)
+	denial_row.add_child(_denial_text)
+	col.add_child(_denial)
+
 	col.add_child(_rule())
 	_info_scroll = ScrollContainer.new()
 	_info_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -455,6 +478,7 @@ func _update_detail(detail: Dictionary, keys: Dictionary) -> void:
 	_name.visible = has_item
 	_category.visible = has_item
 	_info_scroll.visible = has_item
+	_denial.visible = has_item and detail.has("denial")
 	_no_item.visible = not has_item
 	if not has_item:
 		_no_item.text = "Nothing to show here." if bool(_msg.get("empty", false)) else "Select an item to see its details."
@@ -468,6 +492,7 @@ func _update_detail(detail: Dictionary, keys: Dictionary) -> void:
 	_glyph.add_theme_color_override("font_color", Slate.curses(String(detail.get("sym_color", "c_white"))))
 	_name.text = Slate.bbcode(detail.get("name", []), Slate.TEXT)
 	_category.text = String(detail.get("category", "")).to_upper()
+	_denial_text.text = Slate.bbcode(detail.get("denial", []), Slate.DANGER).strip_edges()
 	var info := Slate.bbcode(detail.get("info", []), Slate.SOFT)
 	# The game separates sections with "--" lines; show them as spacing instead.
 	info = info.replace("\n--\n", "\n\n").replace("--\n", "\n").strip_edges()
@@ -535,13 +560,14 @@ func _build_panes() -> void:
 		_panes.append(pane)
 		var multi := bool(column.get("multi", false))
 		var keyed: bool = column.get("rows", []).any(func(r): return String(r.get("key", "")) != "")
+		var widths := _cell_widths(column.get("rows", []))
 		for row_data in column.get("rows", []):
 			var index := int(row_data.get("i", -1))
 			if row_data.has("cat"):
-				pane.add_category(String(row_data["cat"]), row_data.get("cells", []))
+				pane.add_category(String(row_data["cat"]), row_data.get("cells", []), widths)
 				continue
 			var row := InvRow.new()
-			row.setup(row_data, multi, keyed)
+			row.setup(row_data, multi, keyed, widths)
 			var code := p * STRIDE + index
 			row.clicked.connect(_on_row_clicked.bind(Vector2i(p, index), code))
 			row.activated.connect(func(): Bridge.pick(view_id, code, "CONFIRM"))
@@ -549,6 +575,27 @@ func _build_panes() -> void:
 			pane.add_row(row)
 			_rows[Vector2i(p, index)] = row
 		pane.finish()
+
+
+## Width of each extra column in a list: as wide as its widest value or title, like the old list
+## (which also leaves out rows showing why they can't be chosen), up to a limit.
+static func _cell_widths(rows: Array) -> Array:
+	var widths := []
+	for r in rows:
+		if r.has("denial"):
+			continue
+		var cells: Array = r.get("cells", [])
+		for i in cells.size():
+			var w := 0.0
+			if r.has("cat"):
+				w = Slate.bold().get_string_size(String(cells[i]).strip_edges().to_upper(),
+						HORIZONTAL_ALIGNMENT_LEFT, -1, 9).x
+			else:
+				w = InvRow.cell_text_width(Slate.plain(cells[i]).strip_edges())
+			if i >= widths.size():
+				widths.append(MIN_CELL_WIDTH)
+			widths[i] = clampf(ceilf(w) + 4, widths[i], MAX_CELL_WIDTH)
+	return widths
 
 
 func _on_row_clicked(at: Vector2i, code: int) -> void:
@@ -583,6 +630,8 @@ func _scroll_to(row: Control) -> void:
 	var scroll := row.get_parent().get_parent().get_parent() as ScrollContainer
 	if scroll != null:
 		scroll.ensure_control_visible(row)
+		# Keep rows wider than their pane cut at the right, so the name stays in view.
+		scroll.scroll_horizontal = 0
 
 
 ## One list (carried, nearby, worn or chosen): a header with its name and count, then its rows.
@@ -642,7 +691,7 @@ class Pane extends VBoxContainer:
 		_list.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		pad.add_child(_list)
 
-	func add_category(name: String, cells: Array) -> void:
+	func add_category(name: String, cells: Array, widths: Array) -> void:
 		var row := HBoxContainer.new()
 		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var title := Slate.label(name.to_upper(), 11, Slate.FAINT, Slate.bold())
@@ -653,9 +702,10 @@ class Pane extends VBoxContainer:
 		titles.add_theme_constant_override("separation", CELL_GAP)
 		titles.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.add_child(titles)
-		for cell in cells:
+		for i in cells.size():
+			var cell = cells[i]
 			var c := Slate.label(String(cell).strip_edges().to_upper(), 9, Slate.FAINT, Slate.bold())
-			c.custom_minimum_size.x = CELL_WIDTH
+			c.custom_minimum_size.x = widths[i] if i < widths.size() else MIN_CELL_WIDTH
 			c.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 			c.clip_text = true
 			c.tooltip_text = String(cell).strip_edges()
@@ -700,11 +750,13 @@ class InvRow extends PanelContainer:
 	var _active := false
 	var _hover := false
 
-	func setup(row: Dictionary, multi: bool, keyed: bool) -> void:
+	func setup(row: Dictionary, multi: bool, keyed: bool, widths: Array) -> void:
 		_enabled = bool(row.get("enabled", true))
 		custom_minimum_size.y = ROW_HEIGHT
 		mouse_filter = Control.MOUSE_FILTER_STOP
-		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		# Items that can't be chosen here only show why, on hover; clicking them does nothing.
+		if _enabled:
+			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 		mouse_entered.connect(func():
 			_hover = true
 			_restyle())
@@ -763,7 +815,23 @@ class InvRow extends PanelContainer:
 			line.add_child(Slate.icon_rect("star", 14, Slate.ACCENT))
 
 		var cells: Array = row.get("cells", [])
-		if cells.is_empty():
+		if denial != "" or not _enabled:
+			for c in line.get_children():
+				(c as CanvasItem).modulate.a = 0.5
+		if denial != "":
+			# As in the old list: the reason takes the place of the values, kept bright so it reads.
+			# Name and reason share the row by length; whichever doesn't fit ends in "...".
+			var reason := Slate.label(denial, 12, Slate.DANGER)
+			reason.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+			reason.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			reason.custom_minimum_size.x = 80
+			reason.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			reason.size_flags_stretch_ratio = Slate.body().get_string_size(denial,
+					HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+			name.size_flags_stretch_ratio = Slate.semibold().get_string_size(tooltip_text.get_slice("\n", 0),
+					HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+			line.add_child(reason)
+		elif cells.is_empty():
 			var weight := Slate.label(String(row.get("weight", "")), 12, Slate.FAINT, Slate.mono())
 			weight.tooltip_text = String(row.get("volume", ""))
 			weight.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -775,18 +843,31 @@ class InvRow extends PanelContainer:
 			values.add_theme_constant_override("separation", CELL_GAP)
 			values.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			line.add_child(values)
-			for cell in cells:
+			for i in cells.size():
+				var runs := _trimmed(cells[i])
+				var width: float = widths[i] if i < widths.size() else MIN_CELL_WIDTH
+				var text := Slate.plain(runs)
+				if cell_text_width(text) + 4 > width:
+					# Too long for the column (a long yield, say): one color, ending in "...".
+					var cut := Slate.label(text, 12, Slate.lead_color(runs, Slate.MUTED), Slate.mono())
+					cut.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+					cut.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+					cut.custom_minimum_size.x = width
+					cut.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+					cut.tooltip_text = text
+					cut.mouse_filter = Control.MOUSE_FILTER_PASS
+					values.add_child(cut)
+					continue
 				var c := Slate.rich(12, false)
 				c.autowrap_mode = TextServer.AUTOWRAP_OFF
 				c.clip_contents = true
-				c.custom_minimum_size = Vector2(CELL_WIDTH, 18)
+				c.custom_minimum_size = Vector2(width, 18)
 				c.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 				c.add_theme_font_override("normal_font", Slate.mono())
-				c.text = "[right]%s[/right]" % Slate.bbcode(_trimmed(cell), Slate.MUTED)
+				c.text = "[right]%s[/right]" % Slate.bbcode(runs, Slate.MUTED)
 				values.add_child(c)
-
-		if denial != "" or not _enabled:
-			modulate.a = 0.5
+		if not _enabled and denial == "":
+			(line.get_child(line.get_child_count() - 1) as CanvasItem).modulate.a = 0.5
 		_restyle()
 
 	func _mark_box(row: Dictionary) -> Control:
@@ -823,6 +904,9 @@ class InvRow extends PanelContainer:
 				return "[code]%s[/code]%s" % [Slate.bbcode([runs[0]], Slate.TEXT), rest]
 		return Slate.bbcode(runs, Slate.TEXT)
 
+	static func cell_text_width(text: String) -> float:
+		return Slate.mono().get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+
 	## Runs without the padding curses lists use for alignment.
 	func _trimmed(spans) -> Array:
 		if typeof(spans) != TYPE_ARRAY or spans.is_empty():
@@ -842,7 +926,7 @@ class InvRow extends PanelContainer:
 		var bg := Color(0, 0, 0, 0)
 		if _selected and _active:
 			bg = Color(1, 1, 1, 0.09)
-		elif _selected or _hover:
+		elif _selected or (_hover and _enabled):
 			bg = Color(1, 1, 1, 0.045)
 		var sb := Slate.box(bg, 10, Slate.BORDER, 0)
 		if _selected and _active:
@@ -858,6 +942,8 @@ class InvRow extends PanelContainer:
 	func _gui_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 			accept_event()
+			if not _enabled:
+				return
 			if event.double_click or (_selected and _active):
 				activated.emit()
 			else:

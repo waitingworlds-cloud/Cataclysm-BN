@@ -2270,6 +2270,10 @@ auto inventory_selector::publish_native( native_inventory &state ) -> void
             jsout.member( "sym", it.symbol() );
             jsout.member( "sym_color", string_from_color( it.color() ) );
             jsout.member( "fav", it.is_favorite );
+            if( const auto denial = preset.get_denial( selected ); !denial.empty() ) {
+                jsout.member( "denial" );
+                write_spans( jsout, denial, c_red );
+            }
             jsout.member( "info" );
             write_spans( jsout, format_item_info( it.info(), {} ), c_light_gray );
             jsout.end_object();
