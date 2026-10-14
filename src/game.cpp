@@ -9526,7 +9526,27 @@ void game::zones_manager()
     bool show = true;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot shows the zones in a panel docked beside the map. It is closed while a zone's corners
+    // are picked on the map, and opened again after.
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    // The address of the zone list, which the panel's picks are sent to.
+    const void *native_owner = nullptr;
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( !show ) {
+            native = nullptr;
+        } else if( cata::godot_bridge::native_screens() ) {
+            if( !native ) {
+                native = std::make_unique<cata::godot_bridge::native_view>( "screen", native_owner,
+                         "ZONES_MANAGER" );
+                native->attach( ui );
+            }
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         if( !show ) {
             ui.position( point_zero, point_zero );
             return;
@@ -9548,7 +9568,6 @@ void game::zones_manager()
 
         ui.position( point( offsetX, 0 ), point( width, TERMY ) );
     } );
-    ui.mark_resize();
 
     std::string action;
     input_context ctxt( "ZONES_MANAGER" );
@@ -9594,6 +9613,10 @@ void game::zones_manager()
     };
 
     auto zones = get_zones();
+#if defined(TILES)
+    native_owner = &zones;
+#endif
+    ui.mark_resize();
 
     auto zones_manager_options = [&]() {
         werase( w_zones_options );
@@ -9700,10 +9723,121 @@ void game::zones_manager()
         return std::nullopt;
     };
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "ZONES_MANAGER" );
+        const auto player_absolute_pos = u.abs_pos();
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Zones manager" ) );
+            jsout.member( "icon", "map-pin" );
+            jsout.member( "dock", "right" );
+            jsout.member( "size", std::array{ 520, 0 } );
+            jsout.member( "toggles" );
+            jsout.start_array();
+            gs::write_toggle( jsout, { .act = "SHOW_ALL_ZONES", .text = _( "All zones" ), .icon = "globe", .category = category, .tip = _( "Show all zones, or only those near you" ) },
+                              show_all_zones );
+            gs::write_toggle( jsout, { .act = "TOGGLE_ZONE_OVERLAY", .text = _( "Overlay" ), .icon = "layers", .category = category, .tip = _( "Show every zone on the map" ) },
+                              g->show_zone_overlay );
+            gs::write_toggle( jsout, { .act = "debug_submap_grid", .text = _( "Submap grid" ), .icon = "grid-3x3", .category = category },
+                              g->debug_submap_grid_overlay || zone_submap_grid_overlay );
+            jsout.end_array();
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", show_all_zones ? _( "All zones" ) : _( "Zones nearby" ) );
+            jsout.member( "icon", "map-pin" );
+            jsout.member( "cursor", active_index );
+            jsout.member( "empty", _( "No Zones defined." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &ref : zones ) {
+                const auto &zone = ref.get();
+                const auto color = zone.get_enabled() ? c_white : c_dark_gray;
+                const auto center = zone.get_center_point();
+                gs::write_row( jsout, {
+                    .text = { .text = zone.get_name(), .color = color },
+                    .cells = {
+                        { .text = mgr.get_name_from_type( zone.get_type() ), .color = zone.get_enabled() ? c_light_gray : c_dark_gray },
+                        {
+                            .text = string_format( "%d %s", static_cast<int>( trig_dist( player_absolute_pos, center ) ),
+                                                   direction_name_short( direction_from( player_absolute_pos, center ) ) ),
+                            .color = c_light_gray
+                        },
+                    },
+                    .icon = zone.get_is_vehicle() ? "car" : "",
+                    .tip = zone.get_is_vehicle() ? _( "On a vehicle" ) : std::string(),
+                    .mark = zone.get_enabled(),
+                    .mark_act = zone.get_enabled() ? "DISABLE_ZONE" : "ENABLE_ZONE",
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            if( zone_cnt > 0 ) {
+                const auto &zone = zones[active_index].get();
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = zone.get_name(), .color = c_white } );
+                jsout.member( "subtitle", string_format( "%s%s", mgr.get_name_from_type( zone.get_type() ),
+                              zone.get_enabled() ? "" : string_format( " · %s", _( "disabled" ) ) ) );
+                auto body = std::string();
+                if( zone.has_options() ) {
+                    for( const auto &[name, value] : zone.get_options().get_descriptions() ) {
+                        body += string_format( "%s: <color_white>%s</color>\n", name, value );
+                    }
+                }
+                if( !body.empty() ) {
+                    jsout.member( "sections" );
+                    jsout.start_array();
+                    jsout.start_object();
+                    jsout.member( "title", _( "Options" ) );
+                    jsout.member( "body" );
+                    gs::write_span( jsout, { .text = body } );
+                    jsout.end_object();
+                    jsout.end_array();
+                }
+            } else {
+                jsout.member( "empty",
+                              _( "Add a zone to sort loot, mark areas to avoid, plan construction and more." ) );
+            }
+            const auto have = zone_cnt > 0;
+            const auto enabled = have && zones[active_index].get().get_enabled();
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Edit" ), .icon = "pencil", .category = category, .primary = true, .enabled = have } );
+            gs::write_button( jsout, { .act = "ADD_ZONE", .text = _( "Add zone" ), .icon = "plus", .category = category } );
+            gs::write_button( jsout, { .act = enabled ? "DISABLE_ZONE" : "ENABLE_ZONE", .text = enabled ? _( "Disable" ) : _( "Enable" ), .icon = enabled ? "circle-x" : "circle-check", .category = category, .enabled = have } );
+            gs::write_button( jsout, { .act = "REMOVE_ZONE", .text = _( "Remove" ), .icon = "trash", .category = category, .enabled = have } );
+            // The list shows the first zone on top, so "up" there is toward the first zone.
+            gs::write_button( jsout, { .act = "MOVE_ZONE_DOWN", .text = _( "Move up" ), .icon = "arrow-up", .category = category, .enabled = have && active_index > 0 } );
+            gs::write_button( jsout, { .act = "MOVE_ZONE_UP", .text = _( "Move down" ), .icon = "arrow-down", .category = category, .enabled = have && active_index < zone_cnt - 1 } );
+            gs::write_button( jsout, { .act = "SHOW_ZONE_ON_MAP", .text = _( "Show on map" ), .icon = "map", .category = category, .enabled = have } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
         if( !show ) {
             return;
         }
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         zones_manager_draw_borders( w_zones_border, w_zones_info_border, zone_ui_height, width );
         zones_manager_shortcuts( w_zones_info, g->show_zone_overlay,
                                  g->debug_submap_grid_overlay || zone_submap_grid_overlay );
@@ -9976,6 +10110,12 @@ void game::zones_manager()
 
         //Wait for input
         action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &zones ) : std::nullopt;
+            pick && *pick >= 0 && *pick < zone_cnt ) {
+            active_index = *pick;
+        }
+#endif
     } while( action != "QUIT" );
     zones_manager_open = false;
     ctxt.reset_timeout();
