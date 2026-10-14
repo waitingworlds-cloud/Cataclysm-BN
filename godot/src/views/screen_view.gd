@@ -58,6 +58,7 @@ var _aside_rule: ColorRect
 var _aside_warn_text: RichTextLabel
 var _aside_scroll: ScrollContainer
 var _aside_body: RichTextLabel
+var _aside_sections: VBoxContainer
 var _aside_empty: Label
 var _buttons: VBoxContainer
 var _footer: RichTextLabel
@@ -351,7 +352,14 @@ func _build_aside() -> Control:
 	_aside_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_aside_body.add_theme_color_override("default_color", Slate.SOFT)
 	_aside_body.add_theme_constant_override("line_separation", 4)
-	_aside_scroll.add_child(_aside_body)
+	var stack := VBoxContainer.new()
+	stack.add_theme_constant_override("separation", 16)
+	stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_aside_scroll.add_child(stack)
+	stack.add_child(_aside_body)
+	_aside_sections = VBoxContainer.new()
+	_aside_sections.add_theme_constant_override("separation", 16)
+	stack.add_child(_aside_sections)
 	_aside_empty = Slate.label("", 14, Slate.FAINT)
 	_aside_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_aside_empty.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -753,8 +761,11 @@ func _apply_aside(msg: Dictionary) -> void:
 	_aside_warn_text.text = Slate.bbcode(warn, Slate.DANGER).strip_edges()
 	var body := Slate.tidy_body(Slate.bbcode(aside.get("body", []), Slate.SOFT))
 	var empty := String(aside.get("empty", ""))
-	_aside_scroll.visible = body != ""
-	_aside_empty.visible = body == "" and empty != ""
+	var sections: Array = aside.get("sections", [])
+	_apply_sections(sections)
+	_aside_body.visible = body != ""
+	_aside_scroll.visible = body != "" or not sections.is_empty()
+	_aside_empty.visible = _aside_scroll.visible == false and empty != ""
 	_aside_empty.text = empty
 	# Text laid out in columns by the game (look around) keeps its alignment in a fixed-width font.
 	if bool(aside.get("mono", false)):
@@ -769,6 +780,44 @@ func _apply_aside(msg: Dictionary) -> void:
 	if aside.has("scroll"):
 		_aside_scroll.scroll_vertical = int(float(aside["scroll"]) * LINE_HEIGHT)
 	_apply_buttons(aside.get("buttons", msg.get("buttons", [])))
+
+
+## Titled blocks of text below the body (a vehicle's parts, its description, its stats), each
+## optionally in a fixed-width font to keep columns the game lined up.
+func _apply_sections(sections: Array) -> void:
+	var have := _aside_sections.get_child_count()
+	for i in range(sections.size(), have):
+		_aside_sections.get_child(i).queue_free()
+	for i in sections.size():
+		var spec: Dictionary = sections[i]
+		var box: VBoxContainer
+		if i < have:
+			box = _aside_sections.get_child(i) as VBoxContainer
+		else:
+			box = VBoxContainer.new()
+			box.add_theme_constant_override("separation", 6)
+			var head := Slate.label("", 11, Slate.FAINT, Slate.bold())
+			box.add_child(head)
+			var text := Slate.rich(13)
+			text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			text.add_theme_color_override("default_color", Slate.SOFT)
+			text.add_theme_constant_override("line_separation", 3)
+			box.add_child(text)
+			_aside_sections.add_child(box)
+		var head := box.get_child(0) as Label
+		head.text = String(spec.get("title", "")).to_upper()
+		head.visible = head.text != ""
+		var label := box.get_child(1) as RichTextLabel
+		if bool(spec.get("mono", false)):
+			label.add_theme_font_override("normal_font", Slate.mono())
+			label.add_theme_font_size_override("normal_font_size", 12)
+		else:
+			label.remove_theme_font_override("normal_font")
+			label.add_theme_font_size_override("normal_font_size", 13)
+		var text := Slate.tidy_body(Slate.bbcode(spec.get("body", []), Slate.SOFT))
+		if label.text != text:
+			label.text = text
+		box.visible = text != ""
 
 
 func _apply_buttons(buttons: Array) -> void:

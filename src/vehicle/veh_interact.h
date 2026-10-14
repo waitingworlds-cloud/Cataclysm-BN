@@ -37,6 +37,9 @@ class vehicle;
 struct vehicle_part;
 #if defined(TILES)
 struct vehicle_preview_window;
+namespace cata::godot_bridge {
+class native_view;
+} // namespace cata::godot_bridge
 #endif
 
 // For marking 'leaking' tanks/reactors/batteries
@@ -95,6 +98,10 @@ private:
 
 #if defined(TILES)
     std::unique_ptr<vehicle_preview_window> tile_preview;
+    /// Panel the Godot front end draws beside the vehicle in place of the text windows.
+    std::unique_ptr<cata::godot_bridge::native_view> native;
+    void open_native(const ui_adaptor& current_ui);
+    void publish_native();
 #endif
 
     bool ui_hidden = false;

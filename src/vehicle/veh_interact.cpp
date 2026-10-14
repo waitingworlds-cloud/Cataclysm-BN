@@ -16,6 +16,10 @@
 #include "fault.h"
 #include "game.h"
 #include "game_constants.h"
+#if defined(TILES)
+#    include "godot_bridge.h"
+#    include "godot_screen.h"
+#endif
 #include "handle_liquid.h"
 #include "item.h"
 #include "item_contents.h"
@@ -89,6 +93,23 @@ static const activity_id ACT_VEHICLE("ACT_VEHICLE");
 static const std::string flag_MOUNTABLE("MOUNTABLE");
 
 namespace {
+
+#if defined(TILES)
+/// Width of the Godot side panel, in pixels.
+constexpr auto godot_panel_width = 720;
+#endif
+
+/// Where the second and third columns of the vehicle stats start.
+struct stats_columns {
+    int second = 0;
+    int third = 0;
+};
+
+auto get_stats_columns() -> stats_columns {
+    // see exec()
+    const int extraw = ((TERMX - FULL_SCREEN_WIDTH) / 4) * 2;
+    return {.second = 33 + (extraw / 4), .third = 65 + (extraw / 2)};
+}
 
 auto spawn_debug_install_base(const vpart_info& vpinfo) -> detached_ptr<item> {
     auto spawned = item::spawn(vpinfo.item);
@@ -312,6 +333,24 @@ void veh_interact::allocate_windows() {
     w_stats = catacurses::newwin(stats_h, grid_w, point(grid.x, stats_y));
     w_name = catacurses::newwin(name_h, grid_w, point(grid.x, name_y));
     w_details = catacurses::newwin(details_h, details_w, point(details_x, details_y));
+#if defined(TILES)
+    if (native) {
+        // The vehicle takes the screen left of Godot's side panel and runs a little under it, so
+        // no old map shows in between; the text goes in the panel.
+        const point window = cata::godot_bridge::window_size();
+        const int pixels = std::min(godot_panel_width, window.x * 45 / 100);
+        const int covered = window.x > 0 ? pixels * TERMX / window.x : pane_w * 2;
+        w_disp = catacurses::newwin(TERMY, std::max(TERMX - covered, 10), point_zero);
+        w_border = cata::godot_bridge::capture_window(TERMY, TERMX);
+        w_mode = cata::godot_bridge::capture_window(mode_h, grid_w);
+        w_msg = cata::godot_bridge::capture_window(page_size, pane_w);
+        w_parts = cata::godot_bridge::capture_window(parts_h, pane_w);
+        w_list = cata::godot_bridge::capture_window(page_size, pane_w);
+        w_stats = cata::godot_bridge::capture_window(stats_h, grid_w);
+        w_name = cata::godot_bridge::capture_window(name_h, grid_w);
+        w_details = cata::godot_bridge::capture_window(details_h, details_w);
+    }
+#endif
 }
 
 auto veh_interact::format_reqs(
@@ -353,6 +392,9 @@ auto veh_interact::create_or_get_ui_adaptor() -> shared_ptr_fast<ui_adaptor> {
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
     if (!current_ui) {
         ui = current_ui = make_shared_fast<ui_adaptor>();
+#if defined(TILES)
+        if (!ui_hidden) { open_native(*current_ui); }
+#endif
         current_ui->on_screen_resize([this](ui_adaptor& current_ui) {
             if (ui_hidden) {
                 current_ui.position(point_zero, point_zero);
@@ -392,6 +434,9 @@ auto veh_interact::create_or_get_ui_adaptor() -> shared_ptr_fast<ui_adaptor> {
                 display_overview();
             }
             display_mode();
+#if defined(TILES)
+            if (native) { publish_native(); }
+#endif
         });
     }
     return current_ui;
@@ -400,9 +445,156 @@ auto veh_interact::create_or_get_ui_adaptor() -> shared_ptr_fast<ui_adaptor> {
 void veh_interact::hide_ui(const bool hide) {
     if (hide != ui_hidden) {
         ui_hidden = hide;
+#if defined(TILES)
+        // The side panel hides with the rest of the screen.
+        if (hide) {
+            native.reset();
+        } else if (const shared_ptr_fast<ui_adaptor> current_ui = ui.lock()) {
+            open_native(*current_ui);
+        }
+#endif
         create_or_get_ui_adaptor()->mark_resize();
     }
 }
+
+#if defined(TILES)
+void veh_interact::open_native(const ui_adaptor& current_ui) {
+    if (!cata::godot_bridge::native_screens()) { return; }
+    native = std::make_unique<cata::godot_bridge::native_view>("screen", this, "VEH_INTERACT");
+    native->attach(current_ui);
+}
+
+void veh_interact::publish_native() {
+    namespace gs = cata::godot_screen;
+    const auto category = std::string("VEH_INTERACT");
+    native->publish([&](JsonOut& jsout) {
+        jsout.member("title", veh->name);
+        jsout.member("icon", "car");
+        jsout.member("dock", "side");
+        jsout.member("size", std::array{godot_panel_width, 0});
+        jsout.member("subtitle");
+        gs::write_span(
+            jsout,
+            {.text = title ? remove_color_tags(*title)
+                           : string_format(_("Owner: %s"), veh->get_owner_name())});
+
+        jsout.member("aside");
+        jsout.start_object();
+        jsout.member("sections");
+        jsout.start_array();
+        const auto section =
+            [&](const std::string& name, const catacurses::window& w,
+                const cata::godot_bridge::window_columns& columns) {
+                jsout.start_object();
+                jsout.member("title", name);
+                jsout.member("mono", true);
+                jsout.member("body");
+                cata::godot_bridge::write_window_spans(jsout, w, columns);
+                jsout.end_object();
+            };
+        if (install_info) {
+            // The list being chosen from first, with what the chosen part needs.
+            section(_("Parts you can install"), w_list, {});
+            section(_("Details"), w_details, {});
+            section(_("Requirements"), w_msg, {});
+            section(_("Parts here"), w_parts, {});
+        } else {
+            section(_("Parts here"), w_parts, {});
+            section(msg ? _("Note") : _("Selected part"), w_msg, {});
+            section(_("Overview"), w_list, {});
+        }
+        // The stats come in three columns across the screen's width: one after another here.
+        const stats_columns columns = get_stats_columns();
+        section(_("Vehicle"), w_stats, {.left = 1, .width = columns.second - 1});
+        section("", w_stats, {.left = columns.second, .width = columns.third - columns.second});
+        section("", w_stats, {.left = columns.third});
+        jsout.end_array();
+
+        jsout.member("buttons");
+        jsout.start_array();
+        if (!title) {
+            struct task {
+                std::string act;
+                std::string text;
+                char mode = ' ';
+                std::string icon;
+            };
+            const auto tasks = std::array{
+                task{"INSTALL", pgettext("veh_interact", "Install"), 'i', "plus"},
+                task{"REPAIR", pgettext("veh_interact", "Repair"), 'r', "wrench"},
+                task{"MEND", pgettext("veh_interact", "Mend"), 'm', "bandage"},
+                task{"REFILL", pgettext("veh_interact", "Refill"), 'f', "fuel"},
+                task{"REMOVE", pgettext("veh_interact", "Remove"), 'o', "circle-minus"},
+                task{"SIPHON", pgettext("veh_interact", "Siphon"), 's', "droplet"},
+                task{"UNLOAD", pgettext("veh_interact", "Unload"), 'd', "package-open"},
+                task{"ASSIGN_CREW", pgettext("veh_interact", "Crew"), 'w', "users"},
+                task{"RELABEL", pgettext("veh_interact", "Label"), 'a', "tag"},
+                task{"CHANGE_SHAPE", pgettext("veh_interact", "Shape"), 'p', "shapes"},
+                task{"RENAME", pgettext("veh_interact", "Rename"), ' ', "pencil"},
+            };
+            for (const task& t : tasks) {
+                gs::write_button(
+                    jsout,
+                    {.act = t.act,
+                     .text = t.text,
+                     .icon = t.icon,
+                     .category = category,
+                     .enabled = t.mode == ' ' || cant_do(t.mode) == task_reason::CAN_DO});
+            }
+            if (tile_preview) {
+                gs::write_button(
+                    jsout,
+                    {.act = "ZOOM_IN",
+                     .text = _("Zoom in"),
+                     .icon = "zoom-in",
+                     .category = category});
+                gs::write_button(
+                    jsout,
+                    {.act = "ZOOM_OUT",
+                     .text = _("Zoom out"),
+                     .icon = "zoom-out",
+                     .category = category});
+            }
+        } else {
+            if (install_info) {
+                gs::write_button(
+                    jsout,
+                    {.act = "PREV_TAB",
+                     .text = _("Previous group"),
+                     .icon = "chevron-left",
+                     .category = category});
+                gs::write_button(
+                    jsout,
+                    {.act = "NEXT_TAB",
+                     .text = _("Next group"),
+                     .icon = "chevron-right",
+                     .category = category});
+                gs::write_button(
+                    jsout,
+                    {.act = "FILTER", .text = _("Filter"), .icon = "search", .category = category});
+            }
+            gs::write_button(
+                jsout, {.act = "QUIT", .text = _("Back"), .icon = "undo-2", .category = category});
+            gs::write_button(
+                jsout,
+                {.act = "CONFIRM",
+                 .text = _("Choose"),
+                 .icon = "check",
+                 .category = category,
+                 .primary = true});
+        }
+        jsout.end_array();
+        jsout.end_object();
+
+        jsout.member("hints");
+        jsout.start_array();
+        gs::write_fixed_hint(jsout, "←↑→↓", title ? _("Choose") : _("Move cursor"));
+        gs::write_hint(jsout, "HELP_KEYBINDINGS", category, _("All keys"));
+        gs::write_hint(jsout, "QUIT", category, title ? _("Back") : _("Close"));
+        jsout.end_array();
+    });
+}
+#endif
 
 void veh_interact::do_main_loop() {
     avatar& you = get_avatar();
@@ -2405,6 +2597,7 @@ void veh_interact::display_stats() const {
     const int extraw = ((TERMX - FULL_SCREEN_WIDTH) / 4) * 2;
     // 3 * stats_h
     const int slots = 24;
+    const stats_columns columns = get_stats_columns();
     int x[slots], y[slots], w[slots];
 
     units::volume total_cargo = 0_ml;
@@ -2415,8 +2608,8 @@ void veh_interact::display_stats() const {
         free_cargo += veh->free_volume(p);
     }
 
-    const int second_column = 33 + (extraw / 4);
-    const int third_column = 65 + (extraw / 2);
+    const int second_column = columns.second;
+    const int third_column = columns.third;
     for (int i = 0; i < slots; i++) {
         if (i < stats_h) {
             // First column
