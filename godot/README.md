@@ -44,6 +44,20 @@ directly; clicking a button presses the key bound to that action.
 Set `BN_BRIDGE_DEBUG=1` to print every message the game sends (except the HUD) to Godot's output,
 cut to 300 characters; `BN_BRIDGE_DEBUG=full` prints them whole.
 
+## A standalone app
+
+`export_presets.cfg` has Windows and Linux presets that build the front end into one executable.
+With Godot's export templates installed:
+
+```sh
+godot --headless --path godot --export-release "Windows Desktop" BrightNights.exe
+```
+
+Put the app in the game's folder, next to `cataclysm-bn-tiles` and `data/`, and it finds the game
+there. Icons and fonts use Godot's "Keep File" import so the app reads them as files in both a run
+from this folder and an exported app; a new icon needs an `.import` file holding
+`[remap]` and `importer="keep"`, like the others.
+
 ## What is drawn by Godot
 
 Almost everything outside the map. Each screen keeps every key it had, and shows everything the old
