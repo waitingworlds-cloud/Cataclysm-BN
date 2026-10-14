@@ -5,6 +5,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <ranges>
 #include <string>
 #include <utility>
 
@@ -16,6 +17,10 @@
 #include "filesystem.h"
 #include "fstream_utils.h"
 #include "game.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "json.h"
 #include "monstergenerator.h"
@@ -78,6 +83,16 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
     catacurses::window w;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the rules with the chosen one's settings as buttons beside them.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "SAFEMODE" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+    /// Picks for the setting buttons: `field_pick + column` moves to that column and edits it.
+    constexpr auto field_pick = cata::godot_screen::tab_pick + 1000;
+#endif
 
     const auto init_windows = [&]( ui_adaptor & ui ) {
         content_height = FULL_SCREEN_HEIGHT - 2 - header_height;
@@ -92,6 +107,11 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                                 offset + point( 1, header_height + 1 ) );
 
         ui.position_from_window( w_border );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     };
     init_windows( ui );
     ui.on_screen_resize( init_windows );
@@ -123,7 +143,217 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
         ctxt.register_action( "SWAP_RULE_GLOBAL_CHAR" );
     }
 
+    const auto rule_help = []( const Categories category ) -> std::string {
+        switch( category )
+        {
+            case Categories::HOSTILE_SPOTTED:
+                return _(
+                    "* is used as a Wildcard.  A few Examples:\n"
+                    "\n"
+                    "human          matches every NPC\n"
+                    "zombie         matches the monster name exactly\n"
+                    "acidic zo*     matches monsters beginning with 'acidic zo'\n"
+                    "*mbie          matches monsters ending with 'mbie'\n"
+                    "*cid*zo*ie     multiple * are allowed\n"
+                    "AcI*zO*iE      case insensitive search" );
+            case Categories::SOUND:
+                return _(
+                    "* is used as a Wildcard.  A few Examples:\n"
+                    "\n"
+                    "footsteps      matches the sound name exactly\n"
+                    "a loud ba*     matches sounds beginning with 'a loud ba'\n"
+                    "*losion!       matches sounds ending with 'losion!'\n"
+                    "a *oud*ba*     multiple * are allowed\n"
+                    "*LoU*bA*       case insensitive search" );
+            default:
+                return {};
+        }
+    };
+    const auto attitude_text = []( const rules_class & rule ) -> std::string {
+        return rule.category == Categories::HOSTILE_SPOTTED ?
+        Creature::get_attitude_ui_data( rule.attitude ).first.translated() : "---";
+    };
+    const auto proximity_text = []( const rules_class & rule ) -> std::string {
+        return rule.category == Categories::SOUND || !rule.whitelist ? std::to_string( rule.proximity ) : "---";
+    };
+
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "SAFEMODE" );
+        const auto &current_tab = tab == GLOBAL_TAB ? global_rules : character_rules;
+        const auto no_character = tab == CHARACTER_TAB && g->u.name.empty();
+        const auto have_rule = !no_character && line >= 0 && line < static_cast<int>( current_tab.size() );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", trim( custom_name_in ) );
+            jsout.member( "icon", "shield" );
+            jsout.member( "size", std::array{ 1260, 820 } );
+            jsout.member( "tabs" );
+            jsout.start_array();
+            gs::write_tab( jsout, {
+                .text = _( "Global" ), .active = tab == GLOBAL_TAB, .pick = gs::tab_pick + GLOBAL_TAB,
+                .count = std::to_string( global_rules.size() )
+            } );
+            gs::write_tab( jsout, {
+                .text = _( "Character" ), .active = tab == CHARACTER_TAB, .pick = gs::tab_pick + CHARACTER_TAB,
+                .count = std::to_string( character_rules.size() )
+            } );
+            jsout.end_array();
+            gs::write_tab_keys( jsout, "PREV_TAB", "NEXT_TAB", category );
+            if( is_safemode_in ) {
+                jsout.member( "toggles" );
+                jsout.start_array();
+                gs::write_toggle( jsout, {
+                    .act = "SWITCH_SAFEMODE_OPTION", .text = _( "Safe mode" ), .icon = "power", .category = category
+                }, get_option<bool>( "SAFEMODE" ) );
+                jsout.end_array();
+            }
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Rules" ) );
+            jsout.member( "icon", "list" );
+            jsout.member( "cursor", line );
+            jsout.member( "empty", no_character ? _( "Please load a character first to use this page!" ) :
+                          _( "Safe Mode manager currently inactive.  Default rules are used.  Add a rule to activate." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            if( !no_character && !current_tab.empty() ) {
+                gs::write_row( jsout, {
+                    .text = { .text = _( "Rules" ) },
+                    .cells = { { .text = _( "Attitude" ) }, { .text = _( "Dist" ) }, { .text = _( "B/W" ) }, { .text = pgettext( "category", "Cat" ) } },
+                    .heading = true,
+                } );
+                // The column titles take the first place in the list, so each rule says its own index.
+                for( const auto &[index, rule] : current_tab | std::views::enumerate ) {
+                    const auto color = rule.active ? c_white : c_dark_gray;
+                    gs::write_row( jsout, {
+                        .text = { .text = rule.rule.empty() ? _( "<empty rule>" ) : rule.rule, .color = color },
+                        .cells = {
+                            { .text = attitude_text( rule ), .color = color },
+                            { .text = proximity_text( rule ), .color = color },
+                            {
+                                .text = rule.whitelist ? _( "Whitelist" ) : _( "Blacklist" ),
+                                .color = !rule.active ? c_dark_gray : rule.whitelist ? c_light_green : c_light_red
+                            },
+                            { .text = rule.category == Categories::SOUND ? _( "Sound" ) : _( "Hostile" ), .color = color },
+                        },
+                        .i = static_cast<int>( index ),
+                        .mark = rule.active,
+                        .mark_act = rule.active ? "DISABLE_RULE" : "ENABLE_RULE",
+                    } );
+                }
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 460 );
+            if( have_rule ) {
+                const auto &rule = current_tab[line];
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = rule.rule.empty() ? _( "<empty rule>" ) : rule.rule, .color = c_white } );
+                jsout.member( "subtitle", rule.active ? _( "Enabled" ) : _( "Disabled" ) );
+                jsout.member( "sections" );
+                jsout.start_array();
+                jsout.start_object();
+                jsout.member( "title", _( "How rules match" ) );
+                jsout.member( "mono", true );
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = rule_help( rule.category ) } );
+                jsout.end_object();
+                jsout.end_array();
+            } else if( !no_character ) {
+                jsout.member( "empty", _( "Add a rule, or add the default rules to get started." ) );
+            }
+
+            jsout.member( "buttons" );
+            jsout.start_array();
+            if( have_rule ) {
+                // A button for each of the rule's settings; Enter changes the one the cursor is on.
+                const auto &rule = current_tab[line];
+                const auto field = [&]( const int col, const std::string & text, const std::string & icon,
+                const bool enabled ) {
+                    gs::write_button( jsout, {
+                        .act = column == col ? "CONFIRM" : "", .text = text, .icon = icon, .category = category,
+                        .primary = column == col, .enabled = enabled, .pick = field_pick + col
+                    } );
+                };
+                field( COLUMN_RULE, _( "Edit rule" ), "pencil", true );
+                field( COLUMN_ATTITUDE, string_format( _( "Attitude: %s" ), attitude_text( rule ) ), "users",
+                       rule.category == Categories::HOSTILE_SPOTTED );
+                field( COLUMN_PROXIMITY, string_format( _( "Distance: %s" ), proximity_text( rule ) ), "ruler",
+                       rule.category == Categories::SOUND || !rule.whitelist );
+                field( COLUMN_WHITE_BLACKLIST, rule.whitelist ? _( "Whitelist" ) : _( "Blacklist" ), "list-checks",
+                       true );
+                field( COLUMN_CATEGORY, rule.category == Categories::SOUND ? _( "Sound" ) : _( "Hostile" ),
+                       rule.category == Categories::SOUND ? "volume-2" : "skull", true );
+            }
+            const auto last = static_cast<int>( current_tab.size() ) - 1;
+            const auto active = have_rule && current_tab[line].active;
+            const auto buttons = std::vector<gs::button> {
+                { .act = "ADD_RULE", .text = _( "Add rule" ), .icon = "plus", .category = category, .enabled = !no_character },
+                {
+                    .act = "ADD_DEFAULT_RULESET", .text = _( "Add default rules" ), .icon = "list-plus",
+                    .category = category, .enabled = !no_character
+                },
+                {
+                    .act = active ? "DISABLE_RULE" : "ENABLE_RULE", .text = active ? _( "Disable" ) : _( "Enable" ),
+                    .icon = active ? "circle-x" : "circle-check", .category = category, .enabled = have_rule
+                },
+                { .act = "COPY_RULE", .text = _( "Copy" ), .icon = "copy", .category = category, .enabled = have_rule },
+                {
+                    .act = "REMOVE_RULE", .text = _( "Remove" ), .icon = "trash", .category = category,
+                    .enabled = have_rule
+                },
+                {
+                    .act = "TEST_RULE", .text = _( "Test rule" ), .icon = "flask-conical", .category = category,
+                    .enabled = have_rule
+                },
+                // The actions are named for the rule's number: "up" moves it down the list.
+                {
+                    .act = "MOVE_RULE_DOWN", .text = _( "Move up" ), .icon = "arrow-up", .category = category,
+                    .enabled = have_rule && line > 0
+                },
+                {
+                    .act = "MOVE_RULE_UP", .text = _( "Move down" ), .icon = "arrow-down", .category = category,
+                    .enabled = have_rule && line < last
+                },
+            };
+            for( const auto &b : buttons ) {
+                gs::write_button( jsout, b );
+            }
+            if( is_safemode_in ) {
+                gs::write_button( jsout, {
+                    .act = "SWAP_RULE_GLOBAL_CHAR",
+                    .text = tab == GLOBAL_TAB ? _( "Move to Character" ) : _( "Move to Global" ),
+                    .icon = "arrow-right-left", .category = category,
+                    .enabled = have_rule && !g->u.name.empty()
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Setting" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_border( w_border, BORDER_COLOR, custom_name_in );
 
         mvwputch( w_border, point( 0, 3 ), c_light_gray, LINE_XXXO ); // |-
@@ -237,10 +467,8 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                 };
 
                 draw_column( COLUMN_RULE, ( rule.rule.empty() ) ? _( "<empty rule>" ) : rule.rule );
-                draw_column( COLUMN_ATTITUDE, ( rule.category == Categories::HOSTILE_SPOTTED ) ?
-                             Creature::get_attitude_ui_data( rule.attitude ).first.translated() : "---" );
-                draw_column( COLUMN_PROXIMITY, ( ( rule.category == Categories::SOUND ) ||
-                                                 !rule.whitelist ) ? std::to_string( rule.proximity ) : "---" );
+                draw_column( COLUMN_ATTITUDE, attitude_text( rule ) );
+                draw_column( COLUMN_PROXIMITY, proximity_text( rule ) );
                 draw_column( COLUMN_WHITE_BLACKLIST, rule.whitelist ? _( "Whitelist" ) : _( "Blacklist" ) );
                 draw_column( COLUMN_CATEGORY, ( rule.category == Categories::SOUND ) ? _( "Sound" ) :
                              _( "Hostile" ) );
@@ -255,7 +483,23 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
 
         ui_manager::redraw();
 
-        const std::string action = ctxt.handle_input();
+        std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            namespace gs = cata::godot_screen;
+            if( *pick >= gs::tab_pick && *pick < gs::tab_pick + MAX_TAB ) {
+                tab = *pick - gs::tab_pick;
+                line = 0;
+                continue;
+            }
+            if( *pick >= field_pick && *pick < field_pick + num_columns ) {
+                column = *pick - field_pick;
+                action = "CONFIRM";
+            } else if( *pick >= 0 && *pick < static_cast<int>( current_tab.size() ) ) {
+                line = *pick;
+            }
+        }
+#endif
 
         if( action == "NEXT_TAB" ) {
             tab++;
@@ -325,6 +569,12 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
         } else if( action == "CONFIRM" && !current_tab.empty() ) {
             changes_made = true;
             if( column == COLUMN_RULE ) {
+#if defined(TILES)
+                // Godot shows the examples with the text field.
+                const auto help_in_prompt = native != nullptr;
+#else
+                const auto help_in_prompt = false;
+#endif
                 catacurses::window w_help;
                 ui_adaptor help_ui;
                 const auto init_help_window = [&]( ui_adaptor & help_ui ) {
@@ -335,48 +585,26 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                                                  offset + point( 19 / 2, 7 + FULL_SCREEN_HEIGHT / 2 / 2 ) );
 
                     help_ui.position_from_window( w_help );
+                    if( help_in_prompt ) {
+                        help_ui.position( point_zero, point_zero );
+                    }
                 };
                 init_help_window( help_ui );
                 help_ui.on_screen_resize( init_help_window );
 
                 help_ui.on_redraw( [&]( const ui_adaptor & ) {
-                    switch( current_tab[line].category ) {
-                        case Categories::HOSTILE_SPOTTED:
-                            // NOLINTNEXTLINE(cata-use-named-point-constants)
-                            fold_and_print( w_help, point( 1, 1 ), 999, c_white,
-                                            _(
-                                                "* is used as a Wildcard.  A few Examples:\n"
-                                                "\n"
-                                                "human          matches every NPC\n"
-                                                "zombie         matches the monster name exactly\n"
-                                                "acidic zo*     matches monsters beginning with 'acidic zo'\n"
-                                                "*mbie          matches monsters ending with 'mbie'\n"
-                                                "*cid*zo*ie     multiple * are allowed\n"
-                                                "AcI*zO*iE      case insensitive search" )
-                                          );
-                            break;
-                        case Categories::SOUND:
-                            // NOLINTNEXTLINE(cata-use-named-point-constants)
-                            fold_and_print( w_help, point( 1, 1 ), 999, c_white,
-                                            _(
-                                                "* is used as a Wildcard.  A few Examples:\n"
-                                                "\n"
-                                                "footsteps      matches the sound name exactly\n"
-                                                "a loud ba*     matches sounds beginning with 'a loud ba'\n"
-                                                "*losion!       matches sounds ending with 'losion!'\n"
-                                                "a *oud*ba*     multiple * are allowed\n"
-                                                "*LoU*bA*       case insensitive search" )
-                                          );
-                            break;
-                        default:
-                            break;
+                    if( help_in_prompt ) {
+                        return;
                     }
+                    // NOLINTNEXTLINE(cata-use-named-point-constants)
+                    fold_and_print( w_help, point( 1, 1 ), 999, c_white, rule_help( current_tab[line].category ) );
                     draw_border( w_help );
                     wnoutrefresh( w_help );
                 } );
 
                 current_tab[line].rule = wildcard_trim_rule( string_input_popup()
                                          .title( _( "Safe Mode Rule:" ) )
+                                         .description( help_in_prompt ? rule_help( current_tab[line].category ) : std::string() )
                                          .width( 30 )
                                          .text( current_tab[line].rule )
                                          .query_string() );
