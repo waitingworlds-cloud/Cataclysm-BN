@@ -1307,6 +1307,33 @@ static std::pair<unsigned, unsigned> calculate_shared_column_win_height(
 }
 
 #if defined(TILES)
+auto character_display::encumbrance_rows( const Character &ch,
+        const item *selected_clothing ) -> std::vector<cata::godot_screen::row>
+{
+    const auto enc_data = ch.get_encumbrance();
+    return list_and_combine_bps( ch, selected_clothing )
+           | std::views::enumerate
+    | std::views::transform( [&]( const auto & entry ) -> cata::godot_screen::row {
+        const auto &[n, part] = entry;
+        const auto &[bp, combined] = part;
+        const auto &e = enc_data.elems.at( bp );
+        const auto color = encumb_color( e.encumbrance );
+        const auto covered = selected_clothing != nullptr && selected_clothing->covers( bp.id() );
+        return {
+            .text = { .text = body_part_name_as_heading( bp, combined ? 2 : 1 ), .color = covered ? c_green : c_light_gray },
+            .cells = {
+                { .text = std::to_string( e.encumbrance - e.layer_penalty ), .color = color },
+                { .text = string_format( "+%d", e.layer_penalty ), .color = color },
+                { .text = std::to_string( temperature_print_rescaling( get_temp_conv( ch, bp ) ) ), .color = warmth::bodytemp_color( ch, bp ) },
+            },
+            .i = static_cast<int>( n ),
+        };
+    } )
+    | std::ranges::to<std::vector>();
+}
+#endif
+
+#if defined(TILES)
 namespace
 {
 
@@ -1613,21 +1640,7 @@ auto sheet_rows( const sheet_state &st ) -> std::vector<gs::row>
         }
         case player_display_tab::encumbrance: {
             rows.push_back( { .cells = { { .text = _( "Encumbrance" ) }, { .text = _( "Layers" ) }, { .text = _( "Warmth" ) } }, .heading = true } );
-            const auto enc_data = you.get_encumbrance();
-            for( const auto &[n, part] : list_and_combine_bps( you, nullptr ) | std::views::enumerate ) {
-                const auto &[bp, combined] = part;
-                const auto &e = enc_data.elems.at( bp );
-                const auto color = encumb_color( e.encumbrance );
-                rows.push_back( {
-                    .text = { .text = body_part_name_as_heading( bp, combined ? 2 : 1 ) },
-                    .cells = {
-                        { .text = std::to_string( e.encumbrance - e.layer_penalty ), .color = color },
-                        { .text = string_format( "+%d", e.layer_penalty ), .color = color },
-                        { .text = std::to_string( temperature_print_rescaling( get_temp_conv( you, bp ) ) ), .color = warmth::bodytemp_color( you, bp ) },
-                    },
-                    .i = static_cast<int>( n ),
-                } );
-            }
+            std::ranges::move( character_display::encumbrance_rows( you ), std::back_inserter( rows ) );
             break;
         }
         case player_display_tab::skills:
