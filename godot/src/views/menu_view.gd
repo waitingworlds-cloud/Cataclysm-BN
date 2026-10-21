@@ -56,6 +56,9 @@ var _side_scroll: ScrollContainer
 var _side_text: RichTextLabel
 var _side_cols := 0
 var _side_lines := 0
+var _center: CenterContainer
+## Where the menu opens as a context menu (the mouse, in interface units), or null for centered.
+var _anchor = null
 
 
 func _ready() -> void:
@@ -71,6 +74,7 @@ func _ready() -> void:
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(center)
+	_center = center
 
 	_card = PanelContainer.new()
 	_card.add_theme_stylebox_override("panel", Slate.card_box(18, 0))
@@ -361,6 +365,9 @@ func _measure_widest() -> float:
 
 
 func apply(msg: Dictionary) -> void:
+	var anchor: Array = msg.get("anchor", [])
+	_anchor = Vector2(float(anchor[0]), float(anchor[1])) * Display.frame_scale() if anchor.size() == 2 else null
+	_scrim.color = Color(0, 0, 0, 0) if _anchor != null else Slate.SCRIM
 	var title := Slate.plain(msg.get("title", [])).strip_edges()
 	var text: Array = msg.get("text", [])
 	var plain_text := Slate.plain(text).strip_edges()
@@ -429,6 +436,7 @@ func apply(msg: Dictionary) -> void:
 	if moved:
 		_scroll_to_selected()
 	_update_description()
+	_place.call_deferred()
 
 
 func _update_hints(filtering: bool) -> void:
@@ -515,7 +523,8 @@ func _layout() -> void:
 	var widest := _widest
 	var avail := viewport.x - 80
 	var side := _side_width(avail)
-	var width := clampf(widest + (100.0 if _has_keys else 60.0), 300.0 if side > 0 else MIN_WIDTH, minf(MAX_WIDTH, avail - side))
+	var narrowest := 260.0 if _anchor != null else 300.0 if side > 0 else MIN_WIDTH
+	var width := clampf(widest + (100.0 if _has_keys else 60.0), narrowest, minf(MAX_WIDTH, avail - side))
 	_card.custom_minimum_size.x = width + side
 	_side.custom_minimum_size.x = side
 	var rows := maxi(_listed.size(), 1)
@@ -525,6 +534,26 @@ func _layout() -> void:
 		var lines_height := _side_lines * 17.0 + 28
 		_side_scroll.custom_minimum_size.y = minf(lines_height, maxf(viewport.y - 260.0, 160))
 	_scroll.visible = not _listed.is_empty()
+	_place.call_deferred()
+
+
+## Centered, or beside the mouse as a context menu, kept inside the window.
+func _place() -> void:
+	if _center == null or not is_inside_tree():
+		return
+	if _anchor == null:
+		_center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		return
+	var card := _card.get_combined_minimum_size()
+	var viewport := get_viewport_rect().size
+	var at: Vector2 = _anchor + Vector2(14, 10)
+	if at.x + card.x > viewport.x - 8:
+		at.x = _anchor.x - 14 - card.x
+	at.x = clampf(at.x, 8, maxf(8, viewport.x - card.x - 8))
+	at.y = clampf(at.y, 8, maxf(8, viewport.y - card.y - 8))
+	_center.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_center.position = at
+	_center.size = card
 
 
 func _scroll_to_selected() -> void:
@@ -562,7 +591,10 @@ func _update_description() -> void:
 
 
 func _on_scrim_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT and _cancel:
+	# A context menu also closes on a right click elsewhere.
+	var closing_click: bool = event is InputEventMouseButton and event.pressed and (event.button_index == MOUSE_BUTTON_LEFT
+			or (_anchor != null and event.button_index == MOUSE_BUTTON_RIGHT))
+	if closing_click and _cancel:
 		Bridge.press(view_id, "QUIT")
 
 

@@ -11,6 +11,7 @@
 #include <optional>
 #include <ranges>
 #include <string>
+#include <utility>
 
 #include "avatar.h"
 #include "cata_utility.h"
@@ -18,6 +19,7 @@
 #include "debug.h"
 #include "game.h"
 #include "godot_bridge.h"
+#include "godot_menu_anchor.h"
 #include "ime.h"
 #include "input.h"
 #include "json.h"
@@ -43,6 +45,8 @@ struct native_menu {
     cata::godot_bridge::native_view view;
     /// Last entry list sent, so unchanged entries aren't resent on every redraw.
     std::string sent_entries;
+    /// Where to show the menu as a context menu (see `godot_menu_anchor.h`).
+    std::optional<point> anchor;
 };
 
 auto native_menus() -> std::map<const uilist *, std::weak_ptr<native_menu>> & // *NOPAD*
@@ -59,6 +63,12 @@ auto menus_held_after_timeout() -> held_menus & // *NOPAD*
 {
     static auto held = held_menus{};
     return held;
+}
+
+auto pending_menu_anchor() -> std::optional<point> & // *NOPAD*
+{
+    static auto anchor = std::optional<point> {};
+    return anchor;
 }
 
 auto native_menu_of( const uilist *menu ) -> std::shared_ptr<native_menu>
@@ -101,6 +111,16 @@ auto hotkey_label( int hotkey ) -> std::string
 }
 
 } // namespace
+
+auto cata::godot_bridge::anchor_next_menu( const point px ) -> void
+{
+    pending_menu_anchor() = px;
+}
+
+auto cata::godot_bridge::take_menu_anchor() -> std::optional<point>
+{
+    return std::exchange( pending_menu_anchor(), std::nullopt );
+}
 #endif // TILES
 
 catacurses::window new_centered_win( int nlines, int ncols )
@@ -1113,6 +1133,7 @@ shared_ptr_fast<ui_adaptor> uilist::create_or_get_ui_adaptor()
     if( !current_ui && cata::godot_bridge::native_screens() ) {
         ui = current_ui = make_shared_fast<ui_adaptor>();
         auto menu = std::make_shared<native_menu>( this, input_category );
+        menu->anchor = cata::godot_bridge::take_menu_anchor();
         menu->view.attach( *current_ui );
         native_menus()[this] = menu;
         current_ui->on_redraw( [this, menu]( ui_adaptor & ) {
@@ -1150,7 +1171,14 @@ shared_ptr_fast<ui_adaptor> uilist::create_or_get_ui_adaptor()
                 menu->view.send( entries_message );
                 menu->sent_entries = entries_message;
             }
-            menu->view.publish( [this]( JsonOut & jsout ) {
+            menu->view.publish( [this, menu]( JsonOut & jsout ) {
+                if( menu->anchor ) {
+                    jsout.member( "anchor" );
+                    jsout.start_array();
+                    jsout.write( menu->anchor->x );
+                    jsout.write( menu->anchor->y );
+                    jsout.end_array();
+                }
                 jsout.member( "title" );
                 write_spans( jsout, title, title_color );
                 jsout.member( "text" );
