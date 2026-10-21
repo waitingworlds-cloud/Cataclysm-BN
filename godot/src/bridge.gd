@@ -15,6 +15,7 @@ signal hud_received(hud: Dictionary)
 signal view_received(view: Dictionary)
 signal entries_received(id: int, entries: Array)
 signal view_closed(id: int)
+signal commands_received(list: Array, suggested: Array)
 signal game_exited(reason: String)
 
 const KIND_FRAME := 1
@@ -221,6 +222,8 @@ func _on_json(text: String) -> void:
 			entries_received.emit(int(msg.get("id", 0)), msg.get("entries", []))
 		"close":
 			view_closed.emit(int(msg.get("id", 0)))
+		"commands":
+			commands_received.emit(msg.get("list", []), msg.get("suggested", []))
 
 
 ## Sends one JSON message to the game.

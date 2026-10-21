@@ -25,6 +25,7 @@
 #include "cursesport.h"
 #include "debug.h"
 #include "godot_bridge_socket.h"
+#include "godot_commands.h"
 #include "input.h"
 #include "json.h"
 #include "output.h"
@@ -459,6 +460,25 @@ auto translate_event( SDL_Event &ev ) -> event_result
         }
         if( type == "action" ) {
             return press_action( obj.get_string( "id" ), obj.get_string( "cat", "DEFAULTMODE" ) );
+        }
+        if( type == "commands" ) {
+            auto out = std::ostringstream();
+            auto jsout = JsonOut( out );
+            jsout.start_object();
+            jsout.member( "t", "commands" );
+            cata::godot_commands::write( jsout );
+            jsout.end_object();
+            send_json( out.str() );
+            return event_result::consumed;
+        }
+        if( type == "run" ) {
+            // Actions without a key go through the action menu, which picks the requested one.
+            const auto id = obj.get_string( "id" );
+            if( key_for_action( id, "DEFAULTMODE" ) ) {
+                return press_action( id, "DEFAULTMODE" );
+            }
+            cata::godot_commands::request( id );
+            return press_action( "action_menu", "DEFAULTMODE" );
         }
         if( type == "pick" || type == "press" ) {
             const auto *view = find_view( obj.get_int( "id", 0 ) );

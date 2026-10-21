@@ -8,6 +8,7 @@ extends Control
 ## minimap, log, armor, mod panels) follow the sidebar options menu, opened with the gear button.
 
 const DisplayCard := preload("res://src/ui/display_card.gd")
+const CommandPalette := preload("res://src/ui/command_palette.gd")
 const DOCK := [
 	["inventory", "Bag", "backpack", "Open your inventory"],
 	["craft", "Craft", "hammer", "Craft items"],
@@ -65,7 +66,7 @@ const SURVIVOR_WIDTH := 440
 const GAP := 16
 ## Action bar button widths, widest first; the narrowest drops the labels.
 const DOCK_WIDTHS := [70, 58, 44]
-const CORNER_WIDTH := 4 * 40 + 3 * 6
+const CORNER_WIDTH := 5 * 40 + 4 * 6
 
 ## Weather words and the icon that fits them, checked in order.
 const WEATHER_ICONS := [
@@ -699,8 +700,9 @@ func _build_bar() -> void:
 	corner.alignment = BoxContainer.ALIGNMENT_END
 	corner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(corner)
-	for z in [["zoom_out", "zoom-out", "Zoom out"], ["zoom_in", "zoom-in", "Zoom in"],
-			["", "monitor", "Display: interface and map size (Ctrl =, Ctrl −, with Shift for the map)"],
+	for z in [["#commands", "search", "Find a command (Ctrl K)"],
+			["zoom_out", "zoom-out", "Zoom out"], ["zoom_in", "zoom-in", "Zoom in"],
+			["#display", "monitor", "Display: interface and map size (Ctrl =, Ctrl −, with Shift for the map)"],
 			["toggle_panel_adm", "settings", "HUD options"]]:
 		var b := _icon_button(z[1], z[2], 40, 18)
 		var plain := Slate.box(Color(1, 1, 1, 0.05), 10, Slate.BORDER, 0)
@@ -713,8 +715,10 @@ func _build_bar() -> void:
 		b.add_theme_color_override("icon_normal_color", Slate.SOFT)
 		b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		var action: String = z[0]
-		if action == "":
+		if action == "#display":
 			b.pressed.connect(_open_display_card)
+		elif action == "#commands":
+			b.pressed.connect(open_commands)
 		else:
 			b.pressed.connect(func(): Bridge.run_action(action))
 		corner.add_child(b)
@@ -722,6 +726,13 @@ func _build_bar() -> void:
 			_options_button = b
 	resized.connect(_fit_bar)
 	_fit_bar()
+
+
+func open_commands() -> void:
+	if get_node_or_null("CommandPalette") == null:
+		var palette := CommandPalette.new()
+		palette.name = "CommandPalette"
+		add_child(palette)
 
 
 func _open_display_card() -> void:

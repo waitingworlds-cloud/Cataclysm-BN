@@ -159,13 +159,18 @@ func _show_toast(text: String) -> void:
 	_toast_tween.tween_property(_toast, "modulate:a", 0.0, 0.4)
 
 
-## Display shortcuts handled here instead of in the game: Ctrl+= / Ctrl+- change the interface
-## size, with Shift the map size, and Ctrl+0 goes back to automatic.
+## Shortcuts handled here instead of in the game: Ctrl+= / Ctrl+- change the interface size, with
+## Shift the map size, Ctrl+0 goes back to automatic, and Ctrl+K opens the command search.
 func _display_shortcut(event: InputEventKey) -> bool:
 	if not event.pressed or not event.ctrl_pressed or event.alt_pressed or event.meta_pressed:
 		return false
 	var direction := 0
 	match event.keycode:
+		KEY_K:
+			if not _on_map():
+				return false
+			hud.open_commands()
+			return true
 		KEY_EQUAL, KEY_PLUS, KEY_KP_ADD:
 			direction = 1
 		KEY_MINUS, KEY_KP_SUBTRACT:
@@ -182,6 +187,11 @@ func _display_shortcut(event: InputEventKey) -> bool:
 		Display.step_ui(direction)
 	_show_toast(Display.describe())
 	return true
+
+
+## True when the map and HUD are showing with no game screen over them.
+func _on_map() -> bool:
+	return hud.visible and visible_views.is_empty()
 
 
 func _on_frame_meta(main_view: bool, shown: Array) -> void:
@@ -240,10 +250,13 @@ func _on_view_closed(id: int) -> void:
 
 
 func _input(event: InputEvent) -> void:
-	# The game owns the keyboard: every key goes to it, even while a Godot menu is open.
+	# The game owns the keyboard: every key goes to it, even while a Godot menu is open. Cards
+	# that only Godot draws (the command search) take it while they are open.
 	if event is InputEventKey:
 		if _display_shortcut(event):
 			get_viewport().set_input_as_handled()
+			return
+		if get_tree().get_first_node_in_group("godot_modal") != null:
 			return
 		for msg in Keys.translate(event):
 			if OS.has_environment("BN_BRIDGE_DEBUG"):
