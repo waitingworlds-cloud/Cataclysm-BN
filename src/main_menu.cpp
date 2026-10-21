@@ -33,6 +33,7 @@
 #include "sdlsound.h"
 #include "sounds.h"
 #include "string_formatter.h"
+#include "string_utils.h"
 #include "text_snippets.h"
 #include "translations.h"
 #include "ui.h"
@@ -40,7 +41,13 @@
 #include "wcwidth.h"
 #include "worldfactory.h"
 
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -51,6 +58,7 @@
 #include <istream>
 #include <memory>
 #include <optional>
+#include <ranges>
 enum class main_menu_opts : int {
     MOTD = 0,
     NEWCHAR = 1,
@@ -72,6 +80,307 @@ namespace
 {
 point prev_submenu_top_left;
 point prev_submenu_size;
+
+/// Saves in `world` this player may load: with map sharing, only their own.
+auto loadable_saves( const WORLDINFO &world ) -> std::vector<save_t>
+{
+    auto saves = world.world_saves;
+    if( MAP_SHARING::isSharing() ) {
+        std::erase_if( saves, []( const save_t &s ) { return s.decoded_name() != MAP_SHARING::getUsername(); } );
+    }
+    return saves;
+}
+
+/// Loads `save` from `world` and remembers it as the last one played. The caller clears
+/// `g->gamemode` first.
+auto load_save( WORLDINFO &world, const save_t &save ) -> bool
+{
+    avatar &pc = get_avatar();
+    on_out_of_scope cleanup( [&pc]() {
+        pc = avatar();
+        world_generator->set_active_world( nullptr );
+    } );
+
+    world_generator->last_world_name = world.world_name;
+    world_generator->last_character_name = save.decoded_name();
+    world_generator->save_last_world_info();
+    world_generator->set_active_world( &world );
+
+    try {
+        g->setup();
+    } catch( const std::exception &err ) {
+        debugmsg( "Error: %s", err.what() );
+        return false;
+    }
+
+    if( g->load( save ) ) {
+        cleanup.cancel();
+        return true;
+    }
+    return false;
+}
+
+/// The character played last, while its world and save still exist.
+struct last_played {
+    WORLDINFO *world;
+    save_t save;
+};
+
+auto find_last_played() -> std::optional<last_played>
+{
+    if( !std::ranges::contains( world_generator->all_worldnames(),
+                                world_generator->last_world_name ) ) {
+        return std::nullopt;
+    }
+    auto *world = world_generator->get_world( world_generator->last_world_name );
+    const auto saves = loadable_saves( *world );
+    const auto found = std::ranges::find( saves, world_generator->last_character_name,
+                                          &save_t::decoded_name );
+    if( found == saves.end() ) {
+        return std::nullopt;
+    }
+    return last_played{ .world = world, .save = *found };
+}
+
+#if defined(TILES)
+namespace gs = cata::godot_screen;
+
+/// Title screen pick codes besides sections (`tab_pick + i`) and choices (`i`).
+constexpr auto save_pick = gs::row_stride;
+constexpr auto continue_pick = 2 * gs::row_stride;
+
+constexpr auto section_icons = std::array
+{ "newspaper", "play", "save", "globe", "settings",
+    "circle-question-mark", "award", "power"
+};
+constexpr auto new_game_icons = std::array
+{ "user-pen", "id-card", "shuffle", "circle-play",
+    "dices", "graduation-cap", "shield"
+};
+constexpr auto settings_icons = std::array
+{ "sliders-horizontal", "keyboard", "package-check",
+    "shield-alert", "bell-off", "palette"
+};
+
+/// What the Godot title screen shows: the old main menu's strings and cursor.
+struct title_screen {
+    const std::vector<std::string> &art;
+    const std::vector<std::string> &sections;
+    const std::vector<std::string> &new_game;
+    const std::vector<std::string> &new_game_hints;
+    const std::vector<std::string> &settings;
+    const std::string &motd;
+    const std::string &credits;
+    const std::string &tip;
+    int section = 0;
+    int item = 0;
+    int line = 0;
+};
+
+auto icon_at( const auto &icons, const size_t i ) -> std::string
+{
+    return i < icons.size() ? icons[i] : "chevron-right";
+}
+
+/// A choice: `{text, key, icon, note, pick, saves}`.
+struct title_choice {
+    std::string text;
+    std::string key = {};
+    std::string icon = {};
+    gs::span note = {};
+    nc_color color = c_white;
+    /// Characters to load straight from this choice, shown while it is selected.
+    std::vector<std::string> saves = {};
+};
+
+auto write_choice( JsonOut &jsout, const title_choice &c, const int i ) -> void
+{
+    jsout.start_object();
+    jsout.member( "text" );
+    gs::write_span( jsout, { .text = c.text, .color = c.color } );
+    jsout.member( "key", c.key );
+    jsout.member( "icon", c.icon );
+    if( !c.note.text.empty() ) {
+        jsout.member( "note" );
+        gs::write_span( jsout, c.note );
+    }
+    jsout.member( "pick", i );
+    if( !c.saves.empty() ) {
+        jsout.member( "saves" );
+        jsout.start_array();
+        for( const auto &[j, name] : c.saves | std::views::enumerate ) {
+            jsout.start_object();
+            jsout.member( "text", name );
+            jsout.member( "pick", save_pick + static_cast<int>( j ) );
+            jsout.end_object();
+        }
+        jsout.end_array();
+    }
+    jsout.end_object();
+}
+
+/// Worlds as choices; the one at `selected` lists its characters when `with_saves`.
+auto world_choices( const int selected, const bool with_saves ) -> std::vector<title_choice>
+{
+    const auto names = world_generator->all_worldnames();
+    return names | std::views::enumerate | std::views::transform( [&]( const auto & entry ) {
+        const auto &[i, name] = entry;
+        const auto saves = loadable_saves( *world_generator->get_world( name ) );
+        const auto special = name == "TUTORIAL" || name == "DEFENSE";
+        auto note = saves.empty() ? std::string( _( "No characters" ) ) :
+                    string_format( vgettext( "%d character", "%d characters", saves.size() ), saves.size() );
+        if( name == world_generator->last_world_name ) {
+            note += string_format( "  ·  %s", _( "played last" ) );
+        }
+        auto choice = title_choice{ .text = name, .icon = "globe", .note = { .text = note, .color = c_dark_gray },
+                                    .color = special ? c_light_cyan : c_white };
+        if( with_saves && i == selected ) {
+            choice.saves = saves | std::views::transform( &save_t::decoded_name ) |
+                           std::ranges::to<std::vector>();
+        }
+        return choice;
+    } ) | std::ranges::to<std::vector>();
+}
+
+auto write_title_screen( JsonOut &jsout, const title_screen &t ) -> void
+{
+    const auto opt = static_cast<main_menu_opts>( t.section );
+    const auto category = std::string( "MAIN_MENU" );
+    jsout.member( "title", _( "Cataclysm: Bright Nights" ) );
+    jsout.member( "version", string_format( _( "Version: %s" ), getVersionString() ) );
+
+    // The title art, without the blank lines under it.
+    auto art = t.art;
+    while( art.size() > 1 && trim( remove_color_tags( art.back() ) ).empty() ) {
+        art.pop_back();
+    }
+    jsout.member( "art" );
+    jsout.start_array();
+    for( const auto &line : art ) {
+        gs::write_span( jsout, { .text = line, .color = art.size() > 1 ? c_white : c_light_cyan } );
+    }
+    jsout.end_array();
+
+    jsout.member( "tabs" );
+    jsout.start_array();
+    for( const auto &[i, label] : t.sections | std::views::enumerate ) {
+        const auto split = gs::split_shortcut( label );
+        jsout.start_object();
+        jsout.member( "text", split.text );
+        jsout.member( "key", split.key );
+        jsout.member( "icon", icon_at( section_icons, i ) );
+        jsout.member( "active", i == t.section );
+        jsout.member( "pick", gs::tab_pick + static_cast<int>( i ) );
+        jsout.end_object();
+    }
+    jsout.end_array();
+
+    if( const auto last = find_last_played() ) {
+        jsout.member( "continue" );
+        jsout.start_object();
+        jsout.member( "text", _( "Continue" ) );
+        jsout.member( "name", last->save.decoded_name() );
+        jsout.member( "world", last->world->world_name );
+        jsout.member( "pick", continue_pick );
+        jsout.end_object();
+    }
+
+    jsout.member( "section" );
+    jsout.start_object();
+    const auto title = gs::split_shortcut( t.sections[t.section] ).text;
+    jsout.member( "icon", icon_at( section_icons, t.section ) );
+    auto choices = std::vector<title_choice> {};
+    switch( opt ) {
+        case main_menu_opts::MOTD:
+        case main_menu_opts::CREDITS:
+            //~ Message Of The Day
+            jsout.member( "title", opt == main_menu_opts::MOTD ? _( "Message of the day" ) : title );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = opt == main_menu_opts::MOTD ? t.motd : t.credits } );
+            jsout.member( "scroll", t.line );
+            break;
+        case main_menu_opts::NEWCHAR:
+            jsout.member( "title", _( "Start a new game" ) );
+            for( const auto &[i, label] : t.new_game | std::views::enumerate ) {
+                const auto split = gs::split_shortcut( label );
+                const auto hint = static_cast<size_t>( i ) < t.new_game_hints.size() ? t.new_game_hints[i] : "";
+                choices.push_back( { .text = split.text, .key = split.key, .icon = icon_at( new_game_icons, i ),
+                                     .note = { .text = hint } } );
+            }
+            break;
+        case main_menu_opts::LOADCHAR:
+            jsout.member( "title", _( "Load a character" ) );
+            jsout.member( "empty", _( "No worlds yet.  Start a new game to make one." ) );
+            choices = world_choices( t.item, true );
+            break;
+        case main_menu_opts::WORLD:
+            jsout.member( "title", _( "Worlds" ) );
+            choices.push_back( { .text = _( "Create World" ), .icon = "plus",
+                                 .note = { .text = _( "Pick its mods and options, then generate it." ), .color = c_dark_gray } } );
+            std::ranges::move( world_choices( t.item - 1, false ), std::back_inserter( choices ) );
+            break;
+        case main_menu_opts::SETTINGS: {
+            jsout.member( "title", title );
+            const auto notes = std::array{
+                _( "Interface, graphics, sound and gameplay settings." ),
+                _( "Change which keys do what." ),
+                _( "Rules for items to pick up as you walk over them." ),
+                _( "Which monsters stop you when they come into view." ),
+                _( "Which events interrupt what you are doing." ),
+                _( "Change the colors the game uses." ),
+            };
+            for( const auto &[i, label] : t.settings | std::views::enumerate ) {
+                const auto split = gs::split_shortcut( label );
+                const auto note = static_cast<size_t>( i ) < notes.size() ? notes[i] : "";
+                choices.push_back( { .text = split.text, .key = split.key, .icon = icon_at( settings_icons, i ),
+                                     .note = { .text = note, .color = c_dark_gray } } );
+            }
+            break;
+        }
+        case main_menu_opts::HELP:
+        case main_menu_opts::QUIT:
+            jsout.member( "title", title );
+            jsout.member( "action" );
+            jsout.start_object();
+            if( opt == main_menu_opts::HELP ) {
+                jsout.member( "text",
+                              _( "Topics on playing the game: movement, combat, crafting, survival and more." ) );
+                gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Open help" ), .icon = "book-open", .category = category, .primary = true } );
+            } else {
+                jsout.member( "text", _( "Close the game." ) );
+                gs::write_button( jsout, { .act = "QUIT", .text = _( "Quit" ), .icon = "power", .category = category, .primary = true } );
+            }
+            jsout.end_object();
+            break;
+    }
+    if( !choices.empty() ) {
+        jsout.member( "cursor", t.item );
+        jsout.member( "rows" );
+        jsout.start_array();
+        for( const auto &[i, c] : choices | std::views::enumerate ) {
+            write_choice( jsout, c, static_cast<int>( i ) );
+        }
+        jsout.end_array();
+    }
+    jsout.end_object();
+
+    jsout.member( "tip" );
+    gs::write_span( jsout, { .text = string_format( _( "Tip of the day: %s" ), t.tip ), .color = c_light_cyan } );
+    jsout.member( "notice" );
+    gs::write_span( jsout, { .text = _( "Bugs?  Suggestions?  Use links in MOTD to report them." ), .color = c_light_red } );
+
+    const auto reading = opt == main_menu_opts::MOTD || opt == main_menu_opts::CREDITS;
+    jsout.member( "hints" );
+    jsout.start_array();
+    gs::write_fixed_hint( jsout, "←→", _( "Section" ) );
+    gs::write_fixed_hint( jsout, "↑↓", reading ? _( "Scroll" ) : _( "Choose" ) );
+    if( !reading ) {
+        gs::write_hint( jsout, "CONFIRM", category, _( "Open" ) );
+    }
+    gs::write_hint( jsout, "QUIT", category, _( "Quit" ) );
+    jsout.end_array();
+}
+#endif // TILES
 } // namespace
 
 void main_menu::on_move() const
@@ -695,11 +1004,37 @@ bool main_menu::opening_screen()
     background_pane background;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // The Godot front end draws its own title screen from the same sections and choices.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "title", this, "MAIN_MENU" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                write_title_screen( jsout, {
+                    .art = mmenu_title, .sections = vMenuItems, .new_game = vNewGameSubItems,
+                    .new_game_hints = vNewGameHints, .settings = vSettingsSubItems, .motd = mmenu_motd,
+                    .credits = mmenu_credits, .tip = vdaytip, .section = sel1, .item = sel2, .line = sel_line
+                } );
+            } );
+            return;
+        }
+#endif
         print_menu( w_open, sel1, menu_offset, sel_line );
     } );
-    ui.on_screen_resize( [this]( ui_adaptor & ui ) {
+    ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         init_windows();
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         ui.position_from_window( w_open );
     } );
     ui.mark_resize();
@@ -712,6 +1047,47 @@ bool main_menu::opening_screen()
         const size_t last_world_pos = world_generator->get_world_index( world_generator->last_world_name );
         std::string action = ctxt.handle_input();
         input_event sInput = ctxt.get_raw_input();
+
+#if defined(TILES)
+        // Clicks in the Godot title screen: a section, a choice, or a character to load at once.
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick >= gs::tab_pick ) {
+                const auto i = *pick - gs::tab_pick;
+                if( i >= 0 && i <= max_menu_opts && i != sel1 ) {
+                    sel1 = i;
+                    sel2 = i == getopt( main_menu_opts::LOADCHAR ) ? last_world_pos : 0;
+                    sel_line = 0;
+                    on_move();
+                }
+                if( i == getopt( main_menu_opts::HELP ) ) {
+                    action = "CONFIRM";
+                } else if( i == getopt( main_menu_opts::QUIT ) ) {
+                    action = "QUIT";
+                }
+            } else if( *pick == continue_pick ) {
+                if( const auto last = find_last_played() ) {
+                    g->gamemode = nullptr;
+                    start = load_save( *last->world, last->save );
+                }
+                continue;
+            } else if( *pick >= save_pick ) {
+                const auto names = world_generator->all_worldnames();
+                if( sel1 == getopt( main_menu_opts::LOADCHAR ) && static_cast<size_t>( sel2 ) < names.size() ) {
+                    auto *world = world_generator->get_world( names[sel2] );
+                    const auto saves = loadable_saves( *world );
+                    const auto j = static_cast<size_t>( *pick - save_pick );
+                    if( j < saves.size() ) {
+                        g->gamemode = nullptr;
+                        start = load_save( *world, saves[j] );
+                    }
+                }
+                continue;
+            } else if( *pick != sel2 ) {
+                sel2 = *pick;
+                on_move();
+            }
+        }
+#endif
 
         // check automatic menu shortcuts
         for( int i = 0; static_cast<size_t>( i ) < vMenuHotkeys.size(); ++i ) {
@@ -1010,13 +1386,7 @@ bool main_menu::new_character_tab()
 bool main_menu::load_character_tab( const std::string &worldname )
 {
     WORLDINFO *world = world_generator->get_world( worldname );
-    savegames = world->world_saves;
-    if( MAP_SHARING::isSharing() ) {
-        auto new_end = std::remove_if( savegames.begin(), savegames.end(), []( const save_t &str ) {
-            return str.decoded_name() != MAP_SHARING::getUsername();
-        } );
-        savegames.erase( new_end, savegames.end() );
-    }
+    savegames = loadable_saves( *world );
 
     if( savegames.empty() ) {
         on_error();
@@ -1042,31 +1412,8 @@ bool main_menu::load_character_tab( const std::string &worldname )
         return false;
     }
 
-    avatar &pc = get_avatar();
-    on_out_of_scope cleanup( [&pc]() {
-        pc = avatar();
-        world_generator->set_active_world( nullptr );
-    } );
-
     g->gamemode = nullptr;
-    world_generator->last_world_name = world->world_name;
-    world_generator->last_character_name = savegames[opt_val].decoded_name();
-    world_generator->save_last_world_info();
-    world_generator->set_active_world( world );
-
-    try {
-        g->setup();
-    } catch( const std::exception &err ) {
-        debugmsg( "Error: %s", err.what() );
-        return false;
-    }
-
-    if( g->load( savegames[opt_val] ) ) {
-        cleanup.cancel();
-        return true;
-    }
-
-    return false;
+    return load_save( *world, savegames[opt_val] );
 }
 
 void main_menu::world_tab( const std::string &worldname )

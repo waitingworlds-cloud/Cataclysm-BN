@@ -1,0 +1,301 @@
+extends Control
+## Root of the front end: the game's frame at the bottom, the HUD above it, native screens
+## (menus, prompts) on top. Keyboard input always goes to the game; mouse input goes to whatever
+## Godot control is under the pointer, and to the game when that is the map.
+
+const Hud := preload("res://src/ui/hud.gd")
+const MenuView := preload("res://src/views/menu_view.gd")
+const PopupView := preload("res://src/views/popup_view.gd")
+const TextInputView := preload("res://src/views/text_input_view.gd")
+const InventoryView := preload("res://src/views/inventory_view.gd")
+const ItemActionsView := preload("res://src/views/item_actions_view.gd")
+const ScreenView := preload("res://src/views/screen_view.gd")
+const TitleView := preload("res://src/views/title_view.gd")
+const LoadingView := preload("res://src/views/loading_view.gd")
+const Keys := preload("res://src/keys.gd")
+
+var frame_view: TextureRect
+var hud: Hud
+var view_layer: Control
+var splash: Control
+var views := {}
+var visible_views := []
+var _last_size := Vector2i.ZERO
+var _toast: PanelContainer
+var _toast_label: Label
+var _toast_tween: Tween
+
+
+func _ready() -> void:
+	theme = Slate.theme()
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var ground := ColorRect.new()
+	ground.color = Slate.GROUND
+	ground.set_anchors_preset(Control.PRESET_FULL_RECT)
+	ground.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(ground)
+
+	frame_view = TextureRect.new()
+	frame_view.stretch_mode = TextureRect.STRETCH_KEEP
+	frame_view.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	frame_view.mouse_filter = Control.MOUSE_FILTER_PASS
+	frame_view.gui_input.connect(_on_frame_input)
+	frame_view.mouse_entered.connect(func(): hud.set_map_hover(true))
+	frame_view.mouse_exited.connect(func(): hud.set_map_hover(false))
+	add_child(frame_view)
+
+	hud = Hud.new()
+	hud.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hud.visible = false
+	add_child(hud)
+
+	view_layer = Control.new()
+	view_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	view_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(view_layer)
+
+	splash = _make_splash()
+	add_child(splash)
+	_build_toast()
+
+	Bridge.connected.connect(_on_connected)
+	Bridge.frame_received.connect(_on_frame)
+	Bridge.frame_meta.connect(_on_frame_meta)
+	Bridge.hud_received.connect(hud.apply)
+	Bridge.view_received.connect(_on_view)
+	Bridge.entries_received.connect(_on_entries)
+	Bridge.view_closed.connect(_on_view_closed)
+	Bridge.game_exited.connect(_on_game_exited)
+	Display.changed.connect(_fit_frame)
+	if Bridge.launch_error != "":
+		_show_splash_message(Bridge.launch_error)
+
+
+func _make_splash() -> Control:
+	var box := CenterContainer.new()
+	box.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var col := VBoxContainer.new()
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_theme_constant_override("separation", 10)
+	box.add_child(col)
+	var title := Slate.label("Bright Nights", 34, Slate.TEXT, Slate.heavy())
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(title)
+	var status := Slate.label("Starting the game…", 15, Slate.MUTED)
+	status.name = "Status"
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(status)
+	var bar := ProgressBar.new()
+	bar.custom_minimum_size = Vector2(220, 4)
+	bar.show_percentage = false
+	bar.indeterminate = true
+	bar.add_theme_stylebox_override("background", Slate.box(Slate.TRACK, 2, Slate.BORDER, 0))
+	bar.add_theme_stylebox_override("fill", Slate.box(Slate.ACCENT, 2, Slate.BORDER, 0))
+	col.add_child(bar)
+	return box
+
+
+func _show_splash_message(text: String) -> void:
+	splash.visible = true
+	var status := splash.find_child("Status", true, false) as Label
+	status.text = text
+
+
+func _on_connected() -> void:
+	_last_size = Display.game_size(size)
+
+
+func _on_game_exited(reason: String) -> void:
+	_show_splash_message(reason)
+	hud.visible = false
+
+
+func _process(_delta: float) -> void:
+	var game_size := Display.game_size(size)
+	if Bridge.is_connected_to_game() and game_size != _last_size and size.x > 0:
+		_last_size = game_size
+		Bridge.send_resize(game_size)
+
+
+func _on_frame(texture: ImageTexture) -> void:
+	frame_view.texture = texture
+	_fit_frame()
+	splash.visible = false
+
+
+## The game draws the map at a lower resolution than the screen; show it enlarged. Mouse
+## positions inside the frame stay in game pixels.
+func _fit_frame() -> void:
+	frame_view.scale = Vector2.ONE * Display.frame_scale()
+	if frame_view.texture != null:
+		frame_view.size = frame_view.texture.get_size()
+
+
+func _build_toast() -> void:
+	_toast = PanelContainer.new()
+	_toast.add_theme_stylebox_override("panel", Slate.pill_box(Slate.CARD_SOLID, 16, 8))
+	_toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_toast.anchor_left = 0.5
+	_toast.anchor_right = 0.5
+	_toast.offset_top = 72
+	_toast.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_toast.modulate.a = 0.0
+	_toast_label = Slate.label("", 14, Slate.TEXT, Slate.semibold())
+	_toast.add_child(_toast_label)
+	add_child(_toast)
+
+
+func _show_toast(text: String) -> void:
+	_toast_label.text = text
+	_toast.reset_size()
+	_toast.offset_left = -_toast.size.x / 2
+	_toast.offset_right = _toast.size.x / 2
+	if _toast_tween != null:
+		_toast_tween.kill()
+	_toast.modulate.a = 1.0
+	_toast_tween = create_tween()
+	_toast_tween.tween_interval(1.6)
+	_toast_tween.tween_property(_toast, "modulate:a", 0.0, 0.4)
+
+
+## Shortcuts handled here instead of in the game: Ctrl+= / Ctrl+- change the interface size, with
+## Shift the map size, Ctrl+0 goes back to automatic, and Ctrl+K opens the command search.
+func _display_shortcut(event: InputEventKey) -> bool:
+	if _hotbar_shortcut(event):
+		return true
+	if not event.pressed or not event.ctrl_pressed or event.alt_pressed or event.meta_pressed:
+		return false
+	var direction := 0
+	match event.keycode:
+		KEY_K:
+			if not _on_map():
+				return false
+			hud.open_commands()
+			return true
+		KEY_EQUAL, KEY_PLUS, KEY_KP_ADD:
+			direction = 1
+		KEY_MINUS, KEY_KP_SUBTRACT:
+			direction = -1
+		KEY_0, KEY_KP_0:
+			Display.reset()
+			_show_toast(Display.describe())
+			return true
+		_:
+			return false
+	if event.shift_pressed:
+		Display.step_map(direction)
+	else:
+		Display.step_ui(direction)
+	_show_toast(Display.describe())
+	return true
+
+
+## True when the map and HUD are showing with no game screen over them.
+func _on_map() -> bool:
+	return hud.visible and visible_views.is_empty()
+
+
+## Alt+1 to Alt+9: on the map, use that hotbar slot; on an item card, pin the item to it.
+func _hotbar_shortcut(event: InputEventKey) -> bool:
+	if not event.pressed or not event.alt_pressed or event.ctrl_pressed or event.meta_pressed:
+		return false
+	if event.keycode < KEY_1 or event.keycode > KEY_9:
+		return false
+	var slot := int(event.keycode - KEY_1)
+	if event.echo:
+		return true
+	if _on_map():
+		Hotbar.use(slot)
+		return true
+	for id in visible_views:
+		if views.has(id) and views[id] is ItemActionsView:
+			views[id].pin_to(slot)
+			return true
+	return false
+
+
+func _on_frame_meta(main_view: bool, shown: Array) -> void:
+	hud.visible = main_view
+	visible_views = shown.map(func(id): return int(id))
+	for id in views:
+		views[id].visible = id in visible_views
+
+
+func _on_view(msg: Dictionary) -> void:
+	var id := int(msg["id"])
+	if not views.has(id):
+		var view: Control
+		match String(msg.get("kind", "")):
+			"menu":
+				view = MenuView.new()
+			"popup":
+				view = PopupView.new()
+			"text_input":
+				view = TextInputView.new()
+			"inventory":
+				view = InventoryView.new()
+			"item_actions":
+				view = ItemActionsView.new()
+			"screen":
+				view = ScreenView.new()
+			"title":
+				view = TitleView.new()
+			"loading":
+				view = LoadingView.new()
+			_:
+				return
+		view.view_id = id
+		view.set_anchors_preset(Control.PRESET_FULL_RECT)
+		view.visible = id in visible_views
+		view_layer.add_child(view)
+		views[id] = view
+	views[id].apply(msg)
+
+
+func _on_entries(id: int, entries: Array) -> void:
+	if not views.has(id):
+		var view := MenuView.new()
+		view.view_id = id
+		view.set_anchors_preset(Control.PRESET_FULL_RECT)
+		view.visible = id in visible_views
+		view_layer.add_child(view)
+		views[id] = view
+	views[id].set_entries(entries)
+
+
+func _on_view_closed(id: int) -> void:
+	if views.has(id):
+		views[id].queue_free()
+		views.erase(id)
+
+
+func _input(event: InputEvent) -> void:
+	# The game owns the keyboard: every key goes to it, even while a Godot menu is open. Cards
+	# that only Godot draws (the command search) take it while they are open.
+	if event is InputEventKey:
+		if _display_shortcut(event):
+			get_viewport().set_input_as_handled()
+			return
+		if get_tree().get_first_node_in_group("godot_modal") != null:
+			return
+		for msg in Keys.translate(event):
+			if OS.has_environment("BN_BRIDGE_DEBUG"):
+				print("key ", event, " -> ", msg)
+			Bridge.send(msg)
+		get_viewport().set_input_as_handled()
+
+
+func _on_frame_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion:
+		Bridge.send_mouse_move(event.position)
+		hud.map_mouse_moved()
+	elif event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
+			Bridge.send_mouse("wheel", mb.position, 0, 1)
+		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
+			Bridge.send_mouse("wheel", mb.position, 0, -1)
+		elif mb.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE]:
+			var sdl_button: int = {MOUSE_BUTTON_LEFT: 1, MOUSE_BUTTON_MIDDLE: 2, MOUSE_BUTTON_RIGHT: 3}[mb.button_index]
+			Bridge.send_mouse("down" if mb.pressed else "up", mb.position, sdl_button)

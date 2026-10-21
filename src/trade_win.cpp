@@ -1,6 +1,7 @@
 #include "trade_win.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -31,6 +32,12 @@
 #include "translations.h"
 #include "ui_manager.h"
 #include "units_utility.h"
+
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#include "json.h"
+#endif
 
 namespace
 {
@@ -125,6 +132,41 @@ auto build_category_ranges( const std::vector<item_pricing> &list,
     return ranges;
 }
 
+struct selection_totals {
+    units::volume volume = 0_ml;
+    units::mass weight = 0_gram;
+};
+
+/// How much of `ip` is picked to change hands: by you from their list, or by them from yours.
+auto amount_selected( const item_pricing &ip, bool is_theirs ) -> int
+{
+    if( ip.charges > 0 ) {
+        return is_theirs ? ip.u_charges : ip.npc_charges;
+    }
+    return is_theirs ? ip.u_has : ip.npc_has;
+}
+
+auto sum_selected( const std::vector<item_pricing> &list, bool is_theirs ) -> selection_totals
+{
+    return std::ranges::fold_left( list | std::views::transform( [&]( const item_pricing & ip ) {
+        const auto amount = amount_selected( ip, is_theirs );
+        return selection_totals{ .volume = ip.vol * amount, .weight = ip.weight * amount };
+    } ), selection_totals{}, []( const selection_totals & acc, const selection_totals & value ) {
+        return selection_totals{ .volume = acc.volume + value.volume, .weight = acc.weight + value.weight };
+    } );
+}
+
+auto trade_title( const std::string &deal ) -> std::string
+{
+    if( deal == _( "Pay:" ) ) {
+        return _( "Paying" );
+    }
+    if( deal == _( "Reward" ) ) {
+        return _( "Accepting a reward from" );
+    }
+    return _( "Trading with" );
+}
+
 auto register_trade_actions( input_context &ctxt, bool include_any_input ) -> void
 {
     ctxt.register_action( "SWITCH_LISTS" );
@@ -181,10 +223,6 @@ auto trading_window::update_win( npc &np, const std::string &deal ) -> void
 
     // Colors for hinting if the trade will be accepted or not.
     const auto trade_color = npc_trading::npc_will_accept_trade( state, np ) ? c_green : c_red;
-    struct selection_totals {
-        units::volume volume = 0_ml;
-        units::mass weight = 0_gram;
-    };
 
     auto ctxt = input_context( "NPC_TRADE" );
     register_trade_actions( ctxt, false );
@@ -210,17 +248,7 @@ auto trading_window::update_win( npc &np, const std::string &deal ) -> void
     const auto head_keybinds_label_middle = _( "] keybindings >" );
     const auto head_keybinds_label_width = utf8_width( head_keybinds_label_prefix ) +
                                            1 + utf8_width( head_keybinds_label_middle );
-    const auto title_label = [&deal]() -> std::string {
-        if( deal == _( "Pay:" ) )
-        {
-            return _( "Paying" );
-        }
-        if( deal == _( "Reward" ) )
-        {
-            return _( "Accepting a reward from" );
-        }
-        return _( "Trading with" );
-    }();
+    const auto title_label = trade_title( deal );
     mvwprintz( w_head, point( 1, head_title_y ), c_white, title_label );
     mvwprintz( w_head, point( 1 + utf8_width( title_label ) + 1, head_title_y ),
                c_light_green, np.disp_name() );
@@ -324,26 +352,6 @@ auto trading_window::update_win( npc &np, const std::string &deal ) -> void
     mvwprintz( w_you,  point( 2 + utf8_width( _( "Inventory:" ) ) + 1, 1 ), c_light_green,
                _( "You" ) );
 
-    const auto selected_amount = []( const item_pricing & ip, bool is_theirs ) -> int {
-        if( ip.charges > 0 )
-        {
-            return is_theirs ? ip.u_charges : ip.npc_charges;
-        }
-        return is_theirs ? ip.u_has : ip.npc_has;
-    };
-    const auto sum_selected = [&]( const std::vector<item_pricing> &list,
-    bool is_theirs ) -> selection_totals {
-        return std::ranges::fold_left( list | std::views::transform( [&]( const item_pricing & ip )
-        {
-            const auto amount = selected_amount( ip, is_theirs );
-            return selection_totals{ .volume = ip.vol * amount, .weight = ip.weight * amount };
-        } ), selection_totals{},
-        []( const selection_totals & acc, const selection_totals & value ) -> selection_totals {
-            return selection_totals{
-                .volume = acc.volume + value.volume,
-                .weight = acc.weight + value.weight };
-        } );
-    };
     const auto your_selected = sum_selected( state.yours, false );
     const auto their_selected = sum_selected( state.theirs, true );
     const auto player_free_volume = g->u.volume_capacity() - g->u.volume_carried() +
@@ -663,6 +671,253 @@ auto trading_window::update_win( npc &np, const std::string &deal ) -> void
     wnoutrefresh( w_info );
 }
 
+#if defined(TILES)
+auto trading_window::publish_native( cata::godot_bridge::native_view &view, npc &np,
+                                     const std::string &deal ) -> void
+{
+    namespace gs = cata::godot_screen;
+    const auto category = std::string( "NPC_TRADE" );
+    them_filtered = build_filtered_indices( state.theirs, them_filter );
+    you_filtered = build_filtered_indices( state.yours, you_filter );
+    const auto accepted = npc_trading::npc_will_accept_trade( state, np );
+    const auto free_exchange = np.will_exchange_items_freely();
+    const auto your_selected = sum_selected( state.yours, false );
+    const auto their_selected = sum_selected( state.theirs, true );
+    struct load {
+        units::mass weight;
+        units::mass max_weight;
+        units::volume volume;
+        units::volume max_volume;
+    };
+    // What each side carries once the trade goes through, as the curses screen shows it.
+    const auto your_load = load{
+        .weight = g->u.weight_carried() - your_selected.weight + their_selected.weight,
+        .max_weight = g->u.weight_capacity(),
+        .volume = g->u.volume_carried() - your_selected.volume + their_selected.volume,
+        .max_volume = g->u.volume_capacity(),
+    };
+    const auto their_load = load{
+        .weight = np.weight_capacity() - state.weight_left,
+        .max_weight = np.weight_capacity(),
+        .volume = np.volume_capacity() - state.volume_left,
+        .max_volume = np.volume_capacity(),
+    };
+    const auto load_text = []( const load & l ) {
+        return string_format( "%s/%.1f %s  %s/%s %s",
+                              colorize( string_format( "%.1f", convert_weight( l.weight ) ),
+                                        l.weight > l.max_weight ? c_light_red : c_light_green ),
+                              convert_weight( l.max_weight ), weight_units(),
+                              colorize( format_volume( l.volume ), l.volume > l.max_volume ? c_light_red : c_light_green ),
+                              format_volume( l.max_volume ), volume_units_abbr() );
+    };
+    auto balance = std::string( _( "Exchange" ) );
+    if( !free_exchange ) {
+        balance = string_format( state.your_balance >= 0 ? _( "Credit %s" ) : _( "Debt %s" ),
+                                 format_money( std::abs( state.your_balance ) ) );
+    }
+    auto ctxt = input_context( category );
+    register_trade_actions( ctxt, false );
+    const auto item_hotkeys = ctxt.get_available_single_char_hotkeys(
+                                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" );
+    const auto &focus_list = focus_them ? state.theirs : state.yours;
+    const auto &focus_filtered = focus_them ? them_filtered : you_filtered;
+    const auto focus_cursor = focus_them ? them_cursor : you_cursor;
+    const auto *focus_item = focus_cursor < focus_filtered.size() ?
+                             focus_list[focus_filtered[focus_cursor]].locs.front() : nullptr;
+    const auto focus_selected = focus_cursor < focus_filtered.size() &&
+                                focus_list[focus_filtered[focus_cursor]].selected;
+
+    view.publish( [&]( JsonOut & jsout ) {
+        jsout.member( "title", string_format( "%s %s", trade_title( deal ), np.disp_name() ) );
+        jsout.member( "icon", "handshake" );
+        jsout.member( "size", std::array{ 1500, 940 } );
+        jsout.member( "stats" );
+        jsout.start_array();
+        gs::write_stat( jsout, {
+            .icon = "coins",
+            .value = { .text = balance, .color = accepted ? c_light_green : c_light_red },
+            .tip = accepted ? _( "They would accept this deal." ) : _( "They won't accept this deal yet." ),
+        } );
+        gs::write_stat( jsout, { .icon = "backpack", .label = _( "You" ), .value = { .text = load_text( your_load ) } } );
+        if( !np.is_shopkeeper() ) {
+            gs::write_stat( jsout, { .icon = "user", .label = np.name, .value = { .text = load_text( their_load ) } } );
+        }
+        jsout.end_array();
+
+        const auto &active_filter = focus_them ? them_filter : you_filter;
+        jsout.member( "search" );
+        jsout.start_object();
+        jsout.member( "text", filter_edit && filter_popup ? filter_popup->text() : active_filter );
+        jsout.member( "typing", filter_edit );
+        jsout.member( "act", "FILTER" );
+        jsout.member( "key", cata::godot_bridge::key_label( "FILTER", category ) );
+        jsout.member( "placeholder", focus_them ? _( "Filter their items" ) : _( "Filter your items" ) );
+        jsout.end_object();
+        const auto toggle = [&]( const gs::button & b, const bool on ) {
+            jsout.start_object();
+            jsout.member( "act", b.act );
+            jsout.member( "text", b.text );
+            jsout.member( "icon", b.icon );
+            jsout.member( "key", cata::godot_bridge::key_label( b.act, category ) );
+            jsout.member( "on", on );
+            jsout.member( "tip", b.tip );
+            jsout.end_object();
+        };
+        jsout.member( "toggles" );
+        jsout.start_array();
+        if( !active_filter.empty() ) {
+            toggle( { .act = "RESET_FILTER", .text = _( "Clear filter" ), .icon = "x" }, false );
+        }
+        toggle( { .act = "CATEGORY_SELECTION", .text = _( "Whole categories" ), .icon = "layers", .tip = _( "Move and pick a whole category at a time" ) },
+                category_mode );
+        toggle( { .act = "AUTOBALANCE", .text = _( "Autobalance" ), .icon = "scale", .tip = _( "Pick the amount that evens out the deal" ) },
+                false );
+        toggle( { .act = "SWITCH_LISTS", .text = _( "Switch side" ), .icon = "arrow-left-right" }, false );
+        jsout.end_array();
+
+        jsout.member( "active_pane", focus_them ? 0 : 1 );
+        jsout.member( "panes" );
+        jsout.start_array();
+        for( const auto they : { true, false } ) {
+            const auto &list = they ? state.theirs : state.yours;
+            const auto &filtered = they ? them_filtered : you_filtered;
+            const auto offset = they ? them_off : you_off;
+            const auto &person = they ? static_cast<player &>( np ) : static_cast<player &>( g->u );
+            const auto &filter = they ? them_filter : you_filter;
+            jsout.start_object();
+            jsout.member( "title", they ? np.name : std::string( _( "You" ) ) );
+            jsout.member( "icon", they ? "user" : "backpack" );
+            const auto picked_count = std::ranges::count_if( list, &item_pricing::selected );
+            jsout.member( "count", picked_count == 0 ? std::string() : string_format( they ? _( "Taking %d" ) :
+                          _( "Offering %d" ), picked_count ) );
+            if( !filter.empty() ) {
+                jsout.member( "note" );
+                gs::write_span( jsout, { .text = string_format( _( "Filter: %s" ), filter ), .color = c_yellow } );
+            }
+            jsout.member( "cursor", static_cast<int>( they ? them_cursor : you_cursor ) );
+            jsout.member( "empty", filter.empty() ? _( "Nothing to trade." ) :
+                          _( "No items match the filter." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            auto last_category = std::optional<item_category_id> {};
+            for( const auto &[i, list_index] : filtered | std::views::enumerate ) {
+                const auto &ip = list[list_index];
+                const auto *it = ip.locs.front();
+                if( !last_category || *last_category != it->get_category().get_id() ) {
+                    last_category = it->get_category().get_id();
+                    gs::write_row( jsout, {
+                        .text = { .text = it->get_category().name() },
+                        .cells = { { .text = _( "amt" ) }, { .text = _( "weight" ) }, { .text = _( "vol" ) }, { .text = free_exchange ? std::string() : _( "unit price" ) } },
+                        .heading = true,
+                    } );
+                }
+                auto color = it == &person.primary_weapon() ? c_yellow : c_light_gray;
+                auto name = it->display_name();
+                if( free_exchange && it->where() != item_location_type::character ) {
+                    name += " (" + it->describe_location( &g->u ) + ")";
+                    color = c_light_blue;
+                }
+                const auto total = ip.charges > 0 ? ip.charges : std::max( ip.count, 1 );
+                const auto picked = amount_selected( ip, they );
+                const auto available = ip.charges > 0 ? ip.charges : ip.count;
+                auto amount = available > 1 ? std::to_string( available ) : std::string();
+                if( picked > 0 && picked < total ) {
+                    amount = string_format( _( "%d of %d" ), picked, total );
+                }
+                auto price_color = c_light_gray;
+                auto price = format_money( ip.price );
+                const auto base_price = it->price( true );
+                if( free_exchange ) {
+                    price.clear();
+                } else if( base_price > 0 ) {
+                    const auto ratio = ip.price / base_price;
+                    if( ratio < 0.95 ) {
+                        price_color = they ? c_light_green : c_light_red;
+                    } else if( ratio > 1.05 ) {
+                        price_color = they ? c_light_red : c_light_green;
+                    }
+                }
+                const auto hotkey = static_cast<size_t>( i ) >= offset ? static_cast<size_t>( i ) - offset :
+                                    item_hotkeys.size();
+                // Clicking the check box, or the selected row again, picks the item or puts it back.
+                const auto toggle_act = ip.selected ? std::string( "LEFT" ) : std::string( "RIGHT" );
+                gs::write_row( jsout, {
+                    .text = { .text = name, .color = ip.selected ? c_white : color },
+                    .cells = {
+                        { .text = amount, .color = picked > 0 ? c_white : c_light_gray },
+                        { .text = string_format( "%.2f %s", convert_weight( ip.weight * std::max( available, 1 ) ), weight_units() ) },
+                        { .text = string_format( "%s %s", format_volume( ip.vol * std::max( available, 1 ) ), volume_units_abbr() ) },
+                        { .text = price, .color = price_color },
+                    },
+                    .i = static_cast<int>( i ),
+                    .sym = it->symbol(),
+                    .sym_color = string_from_color( it->color() ),
+                    .mark = picked > 0,
+                    .key = hotkey < item_hotkeys.size() ? std::string( 1, item_hotkeys[hotkey] ) : std::string(),
+                    .confirm = toggle_act,
+                    .mark_act = toggle_act,
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+        }
+        jsout.end_array();
+
+        jsout.member( "aside" );
+        jsout.start_object();
+        jsout.member( "width", 460 );
+        if( focus_item != nullptr && !category_mode ) {
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = focus_item->display_name(), .color = focus_item->color_in_inventory() } );
+            jsout.member( "sym", focus_item->symbol() );
+            jsout.member( "sym_color", string_from_color( focus_item->color() ) );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = focus_item->info_string() } );
+        } else {
+            jsout.member( "empty", category_mode ? _( "Picking whole categories." ) :
+                          _( "Nothing selected." ) );
+        }
+        jsout.member( "buttons" );
+        jsout.start_array();
+        gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Make the deal" ), .icon = "handshake", .category = category, .primary = true } );
+        if( focus_item != nullptr ) {
+            const auto pick_text = focus_them ? _( "Take" ) : _( "Offer" );
+            const auto drop_text = focus_them ? _( "Don't take" ) : _( "Don't offer" );
+            gs::write_button( jsout, { .act = "RIGHT", .text = category_mode ? string_format( _( "%s category" ), pick_text ) : pick_text, .icon = "plus", .category = category, .enabled = category_mode || !focus_selected } );
+            gs::write_button( jsout, { .act = "LEFT", .text = category_mode ? string_format( _( "%s category" ), drop_text ) : drop_text, .icon = "minus", .category = category, .enabled = category_mode || focus_selected } );
+        }
+        gs::write_button( jsout, { .act = "QUIT", .text = _( "Walk away" ), .icon = "log-out", .category = category } );
+        jsout.end_array();
+        jsout.end_object();
+
+        jsout.member( "hints" );
+        jsout.start_array();
+        gs::write_fixed_hint( jsout, "a-Z", _( "Pick or put back" ) );
+        gs::write_fixed_hint( jsout, "0-9", _( "Amount for the next pick" ) );
+        gs::write_hint( jsout, "SWITCH_LISTS", category, _( "Other side" ) );
+        gs::write_hint( jsout, "CONFIRM", category, _( "Make the deal" ) );
+        jsout.end_array();
+    } );
+}
+
+auto trading_window::take_native_pick() -> bool
+{
+    const auto pick = cata::godot_bridge::take_pick( this );
+    if( !pick ) {
+        return false;
+    }
+    const auto pane = *pick / cata::godot_screen::row_stride;
+    const auto row = static_cast<size_t>( *pick % cata::godot_screen::row_stride );
+    const auto &filtered = pane == 0 ? them_filtered : you_filtered;
+    if( pane > 1 || row >= filtered.size() ) {
+        return false;
+    }
+    focus_them = pane == 0;
+    ( focus_them ? them_cursor : you_cursor ) = row;
+    return true;
+}
+#endif // TILES
+
 auto trading_window::show_item_data( size_t index, bool target_is_theirs ) -> info_popup_result
 {
     auto &target_list = target_is_theirs ? state.theirs : state.yours;
@@ -807,18 +1062,40 @@ auto trading_window::perform_trade( npc &np, const std::string &deal ) -> bool
     register_trade_actions( ctxt, true );
 
     auto ui = ui_adaptor{};
-    ui.on_screen_resize( [this]( ui_adaptor & ui ) {
+#if defined(TILES)
+    // The Godot front end draws the trade; see `publish_native`.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "NPC_TRADE" ) : nullptr;
+    auto suppress_curses = std::optional<cata::godot_bridge::curses_draw_suppression> {};
+    if( native ) {
+        native->attach( ui );
+        suppress_curses.emplace();
+    }
+#endif
+    ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         setup_win( ui );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native( *native, np, deal );
+            return;
+        }
+#endif
         update_win( np, deal );
     } );
 
     auto confirm = false;
     auto exit = false;
     auto pending_count = std::optional<int> {};
+    auto queued_action = std::optional<std::string> {};
     category_mode = false;
     them_category_cursor = 0;
     you_category_cursor = 0;
@@ -1127,7 +1404,18 @@ auto trading_window::perform_trade( npc &np, const std::string &deal ) -> bool
         }
         ui_manager::redraw();
 
-        const auto action = ctxt.handle_input();
+        const auto action = queued_action ? *std::exchange( queued_action, std::nullopt ) :
+                            ctxt.handle_input();
+#if defined(TILES)
+        // A click moves the cursor, maybe to the other list; what it pressed is handled on the next
+        // pass, once the loop has picked up the new cursor.
+        if( native && take_native_pick() ) {
+            if( action == "RIGHT" || action == "LEFT" ) {
+                queued_action = action;
+            }
+            continue;
+        }
+#endif
         if( action == "SWITCH_LISTS" ) {
             focus_them = !focus_them;
             if( category_mode ) {
@@ -1333,6 +1621,12 @@ auto trading_window::perform_trade( npc &np, const std::string &deal ) -> bool
             if( category_mode ) {
                 continue;
             }
+#if defined(TILES)
+            // Godot always shows the selected item's details beside the lists.
+            if( native ) {
+                continue;
+            }
+#endif
             const auto result = show_item_data( filtered.empty() ? 0 : filtered[cursor], focus_them );
             if( !filtered.empty() ) {
                 if( result == info_popup_result::move_up ) {

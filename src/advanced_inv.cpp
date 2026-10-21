@@ -14,6 +14,10 @@
 #include "examine_item_menu.h"
 #include "game.h"
 #include "game_constants.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "ime.h"
 #include "input.h"
 #include "inventory.h"
@@ -612,8 +616,8 @@ void advanced_inventory::recalc_pane( side p )
     }
     // Finally sort all items (category headers will now be moved to their proper position)
     std::ranges::stable_sort( pane.items, advanced_inv_sorter( pane.sortby ) );
-    // itemsPerPage is 0 during processing
-    if( itemsPerPage > 0 ) {
+    // itemsPerPage is 0 during processing; Godot's lists scroll instead of having pages.
+    if( itemsPerPage > 0 && !cata::godot_bridge::native_screens() ) {
         pane.paginate( itemsPerPage );
     }
 }
@@ -1358,8 +1362,19 @@ void advanced_inventory::display()
 
     std::unique_ptr<string_input_popup> spopup;
     std::unique_ptr<ui_adaptor> ui;
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    // The filter box is drawn by Godot, so its text field skips curses drawing.
+    auto suppress = std::optional<cata::godot_bridge::curses_draw_suppression>();
+#endif
     if( !is_processing() ) {
         ui = std::make_unique<ui_adaptor>();
+#if defined(TILES)
+        if( cata::godot_bridge::native_screens() ) {
+            native = std::make_unique<cata::godot_bridge::native_view>( "screen", this, "ADVANCED_INVENTORY" );
+            suppress.emplace();
+        }
+#endif
         ui->on_screen_resize( [&]( ui_adaptor & ui ) {
             constexpr int min_w_height = 10;
             const int min_w_width = FULL_SCREEN_WIDTH;
@@ -1393,10 +1408,23 @@ void advanced_inventory::display()
             }
 
             ui.position( point( colstart, headstart ), point( w_width, head_height + w_height ) );
+#if defined(TILES)
+            if( native ) {
+                // Page keys move by this many rows.
+                itemsPerPage = 20;
+                ui.position( point_zero, point_zero );
+            }
+#endif
         } );
         ui->mark_resize();
 
         ui->on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+            if( native ) {
+                publish_native( *native, filter_edit ? spopup.get() : nullptr );
+                return;
+            }
+#endif
             redraw_pane( advanced_inventory::side::left );
             redraw_pane( advanced_inventory::side::right );
             redraw_sidebar();
@@ -1409,6 +1437,11 @@ void advanced_inventory::display()
                 spopup->query_string( /*loop=*/false, /*draw_only=*/true );
             }
         } );
+#if defined(TILES)
+        if( native ) {
+            native->attach( *ui );
+        }
+#endif
     }
 
     while( !exit ) {
@@ -1436,6 +1469,12 @@ void advanced_inventory::display()
         aim_location changeSquare = NUM_AIM_LOCATIONS;
 
         const std::string action = is_processing() ? "MOVE_ALL_ITEMS" : ctxt.handle_input();
+#if defined(TILES)
+        // A click that picked another row, side or location only selects; keys act next time.
+        if( native && take_native_pick() ) {
+            continue;
+        }
+#endif
         if( action == "CATEGORY_SELECTION" ) {
             inCategoryMode = !inCategoryMode;
         } else if( action == "ITEMS_DEFAULT" ) {
@@ -1928,3 +1967,318 @@ void cancel_aim_processing()
 {
     uistate.transfer_save.re_enter_move_all = ENTRY_START;
 }
+
+#if defined(TILES)
+namespace
+{
+
+/// Locations offered as sub-tabs, in the order a player scans them: on you, then the 3x3 grid.
+constexpr auto native_locations = std::array
+{
+    AIM_INVENTORY, AIM_WORN, AIM_CONTAINER, AIM_DRAGGED, AIM_ALL,
+                   AIM_NORTHWEST, AIM_NORTH, AIM_NORTHEAST, AIM_WEST, AIM_CENTER, AIM_EAST,
+                   AIM_SOUTHWEST, AIM_SOUTH, AIM_SOUTHEAST, AIM_ABOVE, AIM_BELOW,
+};
+
+auto location_icon( const aim_location loc ) -> std::string
+{
+    switch( loc ) {
+        case AIM_INVENTORY:
+            return "backpack";
+        case AIM_WORN:
+            return "shirt";
+        case AIM_CONTAINER:
+            return "package-open";
+        case AIM_DRAGGED:
+            return "car";
+        case AIM_ALL:
+            return "grid-3x3";
+        case AIM_NORTHWEST:
+            return "arrow-up-left";
+        case AIM_NORTH:
+            return "arrow-up";
+        case AIM_NORTHEAST:
+            return "arrow-up-right";
+        case AIM_WEST:
+            return "arrow-left";
+        case AIM_CENTER:
+            return "circle-dot";
+        case AIM_EAST:
+            return "arrow-right";
+        case AIM_SOUTHWEST:
+            return "arrow-down-left";
+        case AIM_SOUTH:
+            return "arrow-down";
+        case AIM_SOUTHEAST:
+            return "arrow-down-right";
+        case AIM_ABOVE:
+            return "chevrons-up";
+        case AIM_BELOW:
+            return "chevrons-down";
+        default:
+            return "map-pin";
+    }
+}
+
+} // namespace
+
+auto advanced_inventory::publish_native( cata::godot_bridge::native_view &view,
+        const string_input_popup *filter ) -> void
+{
+    namespace gs = cata::godot_screen;
+    if( is_processing() ) {
+        return;
+    }
+    for( const auto p : { left, right } ) {
+        if( recalc || panes[p].recalc ) {
+            recalc_pane( p );
+        }
+        panes[p].fix_index();
+    }
+    const auto category = std::string( "ADVANCED_INVENTORY" );
+    auto &spane = panes[src];
+    const auto *sitem = spane.get_cur_item_ptr();
+    view.publish( [&]( JsonOut & jsout ) {
+        jsout.member( "title", _( "Move items" ) );
+        jsout.member( "icon", "arrow-right-left" );
+        jsout.member( "size" );
+        jsout.start_array();
+        jsout.write( 1500 );
+        jsout.write( 940 );
+        jsout.end_array();
+        jsout.member( "subtitle" );
+        gs::write_span( jsout, { .text = g->u.has_watch() ? to_string_time_of_day( calendar::turn ) : std::string() } );
+
+        const auto weight_carried = convert_weight( g->u.weight_carried() );
+        const auto weight_capacity = convert_weight( g->u.weight_capacity() );
+        jsout.member( "stats" );
+        jsout.start_array();
+        gs::write_stat( jsout, { .icon = "weight", .label = _( "Weight" ), .value = { .text = string_format( "%.1f / %.1f %s", weight_carried, weight_capacity, weight_units() ), .color = weight_carried > weight_capacity ? c_red : c_light_green } } );
+        gs::write_stat( jsout, { .icon = "box", .label = _( "Volume" ), .value = { .text = string_format( "%s / %s %s", format_volume( g->u.volume_carried() ), format_volume( g->u.volume_capacity() ), volume_units_abbr() ), .color = g->u.volume_carried() > g->u.volume_capacity() ? c_red : c_light_green } } );
+        jsout.end_array();
+
+        jsout.member( "search" );
+        jsout.start_object();
+        jsout.member( "text", filter != nullptr ? filter->text() : spane.filter );
+        jsout.member( "typing", filter != nullptr );
+        jsout.member( "act", "FILTER" );
+        jsout.member( "key", cata::godot_bridge::key_label( "FILTER", category ) );
+        jsout.member( "placeholder", _( "Filter the selected side" ) );
+        jsout.end_object();
+        const auto toggle = [&]( const gs::button & b, const bool on ) {
+            jsout.start_object();
+            jsout.member( "act", b.act );
+            jsout.member( "text", b.text );
+            jsout.member( "icon", b.icon );
+            jsout.member( "key", cata::godot_bridge::key_label( b.act, category ) );
+            jsout.member( "on", on );
+            jsout.member( "enabled", b.enabled );
+            jsout.member( "tip", b.tip );
+            jsout.end_object();
+        };
+        jsout.member( "toggles" );
+        jsout.start_array();
+        if( !spane.filter.empty() ) {
+            toggle( { .act = "RESET_FILTER", .text = _( "Clear filter" ), .icon = "x" }, false );
+        }
+        toggle( { .act = "SORT", .text = string_format( _( "Sort: %s" ), get_sortname( spane.sortby ) ), .icon = "arrow-up-down" },
+                false );
+        toggle( { .act = "CATEGORY_SELECTION", .text = _( "Jump by category" ), .icon = "layers", .tip = _( "Up and down move between categories" ) },
+                inCategoryMode );
+        toggle( { .act = "TOGGLE_VEH", .text = _( "Vehicle storage" ), .icon = "car", .enabled = squares[spane.get_area()].can_store_in_vehicle(), .tip = _( "Switch between the ground and a vehicle's storage here" ) },
+                spane.in_vehicle() );
+        toggle( { .act = "TOGGLE_FILTER_AUTORESET", .text = _( "Reset filter on close" ), .icon = "rotate-ccw" },
+                get_option<bool>( "AIM_AUTORESET_FILTER" ) );
+        toggle( { .act = "SAVE_DEFAULT", .text = _( "Save layout" ), .icon = "save", .tip = _( "Remember both sides' locations as the default layout" ) },
+                false );
+        toggle( { .act = "ITEMS_DEFAULT", .text = _( "Default layout" ), .icon = "layout-panel-left" },
+                false );
+        jsout.end_array();
+
+        // The source side's location, like the bracketed letters in the old header.
+        jsout.member( "subtabs" );
+        jsout.start_array();
+        for( const auto loc : native_locations ) {
+            const auto data_loc = screen_relative_location( loc );
+            auto &sq = squares[data_loc];
+            const auto on_grid = loc >= AIM_SOUTHWEST && loc <= AIM_BELOW && loc != AIM_CENTER;
+            gs::write_tab( jsout, {
+                .text = loc == AIM_CENTER ? _( "Here" ) : on_grid ? squares[loc].shortname : squares[loc].name,
+                .active = spane.get_area() == data_loc,
+                .pick = gs::subtab_pick + static_cast<int>( loc ),
+                .enabled = sq.canputitems( spane.get_cur_item_ptr() ),
+                .icon = location_icon( loc ),
+                .count = cata::godot_bridge::key_label( squares[loc].actionname, category ),
+                .tip = sq.name,
+            } );
+        }
+        jsout.end_array();
+
+        jsout.member( "active_pane", static_cast<int>( src ) );
+        jsout.member( "panes" );
+        jsout.start_array();
+        for( const auto p : { left, right } ) {
+            const auto &pane = panes[p];
+            auto &square = squares[pane.get_area()];
+            const auto same_as_dragged = square.id >= AIM_SOUTHWEST && square.id <= AIM_NORTHEAST &&
+                                         square.id != AIM_CENTER && pane.in_vehicle() && square.off == squares[AIM_DRAGGED].off;
+            const auto &sq = same_as_dragged ? squares[AIM_DRAGGED] : square;
+            const auto car = square.can_store_in_vehicle() && pane.in_vehicle() && sq.id != AIM_DRAGGED;
+            auto summary = std::string();
+            if( pane.get_area() == AIM_INVENTORY || pane.get_area() == AIM_WORN ) {
+                summary = string_format( "%.1f/%.1f %s  %s/%s %s", weight_carried, weight_capacity, weight_units(),
+                                         format_volume( g->u.volume_carried() ), format_volume( g->u.volume_capacity() ),
+                                         volume_units_abbr() );
+            } else if( pane.get_area() == AIM_ALL ) {
+                summary = string_format( "%3.1f %s  %s %s", convert_weight( square.weight ), weight_units(),
+                                         format_volume( square.volume ), volume_units_abbr() );
+            } else {
+                auto maxvolume = 0_ml;
+                if( pane.get_area() == AIM_CONTAINER && square.get_container( pane.in_vehicle() ) != nullptr ) {
+                    maxvolume = square.get_container( pane.in_vehicle() )->get_container_capacity();
+                } else if( pane.in_vehicle() ) {
+                    maxvolume = square.veh->max_volume( square.vstor );
+                } else {
+                    maxvolume = get_map().max_volume( square.pos );
+                }
+                summary = string_format( "%3.1f %s  %s/%s %s", convert_weight( square.weight ), weight_units(),
+                                         format_volume( square.volume ), format_volume( maxvolume ), volume_units_abbr() );
+            }
+            if( square.max_size > 0 ) {
+                summary = string_format( "%d/%d  %s", square.get_item_count(), square.max_size, summary );
+            }
+            auto note = sq.desc[car];
+            if( !square.flags.empty() ) {
+                note += ( note.empty() ? "" : "  " ) + colorize( square.flags, c_cyan );
+            }
+            if( !pane.filter.empty() ) {
+                note += ( note.empty() ? "" : "  " ) + colorize( string_format( _( "Filter: %s" ), pane.filter ),
+                        c_yellow );
+            }
+            jsout.start_object();
+            jsout.member( "title", car ? sq.veh->name : sq.name );
+            jsout.member( "icon", location_icon( pane.get_area() ) );
+            jsout.member( "count", summary );
+            jsout.member( "note" );
+            gs::write_span( jsout, { .text = note, .color = c_light_blue } );
+            jsout.member( "cursor", pane.index );
+            jsout.member( "confirm", "MOVE_SINGLE_ITEM" );
+            jsout.member( "empty", pane.filter.empty() ? _( "No items here." ) :
+                          _( "No items match the filter." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( auto i = 0; i < static_cast<int>( pane.items.size() ); ++i ) {
+                const auto &sitem_i = pane.items[i];
+                if( sitem_i.is_category_header() ) {
+                    gs::write_row( jsout, { .text = { .text = sitem_i.name }, .heading = true } );
+                    continue;
+                }
+                if( !sitem_i.is_item_entry() ) {
+                    continue;
+                }
+                const auto &it = *sitem_i.items.front();
+                auto name = it.is_money() ? it.display_money( sitem_i.items.size(),
+                std::ranges::fold_left( sitem_i.items, 0, []( const int sum, const item * e ) { return sum + e->charges; } ) )
+                    : it.display_name();
+                if( !it.is_owned_by( g->u, true ) ) {
+                    name = string_format( "<color_light_red>!</color> %s", name );
+                }
+                auto cells = std::vector<gs::span>();
+                if( pane.get_area() == AIM_ALL ) {
+                    cells.push_back( { .text = squares[sitem_i.area].shortname } );
+                }
+                cells.push_back( { .text = sitem_i.stacks > 1 ? std::to_string( std::min( sitem_i.stacks, 9999 ) ) : std::string() } );
+                const auto weight = convert_weight( sitem_i.weight );
+                cells.push_back( { .text = string_format( "%.*f %s", weight >= 1000.0 ? 0 : weight >= 100.0 ? 1 : 2, weight, weight_units() ), .color = weight > 0 ? c_light_gray : c_dark_gray } );
+                cells.push_back( { .text = string_format( "%s %s", format_volume( sitem_i.volume ), volume_units_abbr() ), .color = sitem_i.volume.value() > 0 ? c_light_gray : c_dark_gray } );
+                gs::write_row( jsout, {
+                    .text = { .text = name, .color = it.color_in_inventory() },
+                    .cells = cells,
+                    .icon = sitem_i.autopickup ? "hand" : it.is_favorite ? "star" : "",
+                    .icon_color = sitem_i.autopickup ? "c_magenta" : "c_yellow",
+                    .sym = it.symbol(),
+                    .sym_color = string_from_color( it.color() ),
+                    .tip = sitem_i.autopickup ? _( "Picked up automatically" ) : "",
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+        }
+        jsout.end_array();
+
+        if( sitem != nullptr && sitem->is_item_entry() ) {
+            const auto &it = *sitem->items.front();
+            const auto dest_name = squares[panes[dest].get_area()].name;
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 380 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = it.display_name(), .color = it.color_in_inventory() } );
+            jsout.member( "sym", it.symbol() );
+            jsout.member( "sym_color", string_from_color( it.color() ) );
+            jsout.member( "subtitle", string_format( _( "Moves to: %s" ), dest_name ) );
+            jsout.member( "body" );
+            cata::godot_bridge::write_spans( jsout, format_item_info( it.info(), {} ), c_light_gray );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "MOVE_SINGLE_ITEM", .text = _( "Move" ), .icon = "arrow-right-left", .category = category, .primary = true } );
+            gs::write_button( jsout, { .act = "MOVE_VARIABLE_ITEM", .text = _( "Move some" ), .icon = "hash", .category = category } );
+            gs::write_button( jsout, { .act = "MOVE_ITEM_STACK", .text = _( "Move stack" ), .icon = "layers", .category = category } );
+            gs::write_button( jsout, { .act = "MOVE_ALL_ITEMS", .text = _( "Move all" ), .icon = "chevrons-right", .category = category } );
+            gs::write_button( jsout, { .act = "EXAMINE", .text = _( "Examine" ), .icon = "info", .category = category } );
+            gs::write_button( jsout, { .act = "TOGGLE_FAVORITE", .text = it.is_favorite ? _( "Unfavorite" ) : _( "Favorite" ), .icon = "star", .category = category } );
+            gs::write_button( jsout, { .act = "TOGGLE_AUTO_PICKUP", .text = sitem->autopickup ? _( "Stop auto pickup" ) : _( "Auto pickup" ), .icon = "hand", .category = category } );
+            jsout.end_array();
+            jsout.end_object();
+        } else {
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 380 );
+            jsout.member( "empty", _( "Choose an item to see it here." ) );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "MOVE_ALL_ITEMS", .text = _( "Move all" ), .icon = "chevrons-right", .category = category } );
+            jsout.end_array();
+            jsout.end_object();
+        }
+
+        const auto recent = Messages::recent_messages( 1 );
+        if( !recent.empty() ) {
+            jsout.member( "footer" );
+            gs::write_span( jsout, { .text = recent.back().second, .color = c_light_gray } );
+        }
+        jsout.member( "hints" );
+        jsout.start_array();
+        gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+        gs::write_fixed_hint( jsout, "←→", _( "Side" ) );
+        gs::write_hint( jsout, "MOVE_SINGLE_ITEM", category, _( "Move" ) );
+        gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+        jsout.end_array();
+    } );
+}
+
+auto advanced_inventory::take_native_pick() -> bool
+{
+    namespace gs = cata::godot_screen;
+    const auto pick = cata::godot_bridge::take_pick( this );
+    if( !pick ) {
+        return false;
+    }
+    if( *pick >= gs::subtab_pick ) {
+        const auto loc = static_cast<aim_location>( *pick - gs::subtab_pick );
+        if( loc >= 0 && loc < NUM_AIM_LOCATIONS ) {
+            change_square( screen_relative_location( loc ), panes[dest], panes[src] );
+        }
+        return true;
+    }
+    const auto side_picked = *pick / gs::row_stride == 0 ? left : right;
+    const auto row = *pick % gs::row_stride;
+    if( side_picked == src && panes[src].index == row ) {
+        return false;
+    }
+    src = side_picked;
+    dest = src == left ? right : left;
+    panes[src].index = row;
+    return true;
+}
+#endif

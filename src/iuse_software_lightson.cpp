@@ -1,6 +1,8 @@
 #include "iuse_software_lightson.h"
 
 #include <algorithm>
+#include <array>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -9,10 +11,15 @@
 #include "catacharset.h"
 #include "color.h"
 #include "cursesdef.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "output.h"
 #include "point.h"
 #include "rng.h"
+#include "string_formatter.h"
 #include "translations.h"
 #include "ui_manager.h"
 
@@ -132,12 +139,26 @@ int lightson_game::start_game()
     const int w_height = 15;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot draws the lights as a board of large squares, which can be clicked to toggle them.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "LIGHTSON" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         const point iOffset( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0,
                              TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 : 0 );
         w_border = catacurses::newwin( w_height, FULL_SCREEN_WIDTH, iOffset );
         w = catacurses::newwin( w_height - 6, FULL_SCREEN_WIDTH - 2, iOffset + point_south_east );
         ui.position_from_window( w_border );
+#if defined(TILES)
+        if( native ) {
+            w = cata::godot_bridge::capture_window( w_height - 6, FULL_SCREEN_WIDTH - 2 );
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -149,7 +170,60 @@ int lightson_game::start_game()
     ctxt.register_action( "QUIT" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "LIGHTSON" );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Lights on!" ) );
+            jsout.member( "icon", "lightbulb" );
+            jsout.member( "size", std::array{ 900, 620 } );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "cell", 72 );
+            jsout.member( "square", true );
+            jsout.member( "lit", "#" );
+            jsout.member( "hide", "#-" );
+            jsout.member( "click", "TOGGLE_SPACE" );
+            jsout.member( "grid" );
+            cata::godot_bridge::write_window_grid( jsout, w, { .at = point_south_east, .size = level_size } );
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 360 );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = string_format( "%s\n\n%s\n\n%s",
+                                             _( "<color_white>Game goal:</color> Switch all the lights on." ),
+                                             _( "Lit squares are on, dark squares are off." ),
+                                             _( "Toggle lights switches selected light and 4 its neighbors." ) )
+                                   } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "TOGGLE_SPACE", .text = _( "Toggle lights" ), .icon = "lightbulb", .category = category, .primary = true } );
+            gs::write_button( jsout, { .act = "RESET", .text = _( "Reset" ), .icon = "rotate-ccw", .category = category } );
+            jsout.end_array();
+            jsout.end_object();
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓←→", _( "Move" ) );
+            gs::write_hint( jsout, "TOGGLE_SPACE", category, _( "Toggle lights" ) );
+            gs::write_hint( jsout, "RESET", category, _( "Reset" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Quit" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            draw_level();
+            publish_native();
+            return;
+        }
+#endif
         std::vector<std::string> shortcuts;
         shortcuts.emplace_back( _( "<spacebar or 5> toggle lights" ) );
         shortcuts.emplace_back( _( "<r>eset" ) );
@@ -191,6 +265,13 @@ int lightson_game::start_game()
         }
         ui_manager::redraw();
         std::string action = ctxt.handle_input();
+#if defined(TILES)
+        // A clicked square: `row * 1000 + column`.
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            position = point( clamp( *pick % 1000, 0, level_size.x - 1 ),
+                              clamp( *pick / 1000, 0, level_size.y - 1 ) );
+        }
+#endif
         if( const std::optional<tripoint_rel_ms> vec = ctxt.get_direction( action ) ) {
             position.y = clamp( position.y + vec->y(), 0, level_size.y - 1 );
             position.x = clamp( position.x + vec->x(), 0, level_size.x - 1 );

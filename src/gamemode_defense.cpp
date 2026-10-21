@@ -9,6 +9,10 @@
 #include "debug.h"
 #include "game.h"
 #include "game_constants.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "item.h"
 #include "item_group.h"
@@ -36,10 +40,14 @@
 #include "ui_manager.h"
 #include "weather/weather.h"
 
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <ostream>
+#include <ranges>
 #include <set>
 
 static const skill_id skill_barter( "barter" );
@@ -475,18 +483,136 @@ void defense_game::setup()
     catacurses::window w;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the options with their values, check boxes and descriptions.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "DEFENSE_SETUP" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         w = catacurses::newwin( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH,
                                 point( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0,
                                        TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 : 0 ) );
         ui.position_from_window( w );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
     int selection = 1;
     int selection_max = 20;
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "DEFENSE_SETUP" );
+        const auto label = []( std::string text ) {
+            if( text.ends_with( ':' ) ) {
+                text.pop_back();
+            }
+            return text;
+        };
+        struct option {
+            std::string heading = {};
+            std::string text = {};
+            std::string value = {};
+            std::string help = {};
+            std::optional<bool> on = std::nullopt;
+        };
+        // In the order of `selection`, from 1.
+        const auto options = std::vector<option> {
+            { .text = label( _( "Scenario:" ) ), .value = defense_style_name( style ), .help = defense_style_description( style ) },
+            { .text = label( _( "Location:" ) ), .value = defense_location_name( location ), .help = defense_location_description( location ) },
+            { .text = label( _( "Initial Difficulty:" ) ), .value = std::to_string( initial_difficulty ), .help = _( "The difficulty of the first wave." ) },
+            { .text = label( _( "Wave Difficulty:" ) ), .value = std::to_string( wave_difficulty ), .help = _( "The increase of difficulty with each wave." ) },
+            { .text = label( _( "Time b/w Waves:" ) ), .value = std::to_string( to_minutes<int>( time_between_waves ) ), .help = _( "The time, in minutes, between waves." ) },
+            { .text = label( _( "Waves b/w Caravans:" ) ), .value = std::to_string( waves_between_caravans ), .help = _( "The number of waves in between caravans." ) },
+            { .text = label( _( "Initial Cash:" ) ), .value = std::to_string( initial_cash / 100 ), .help = _( "The amount of money the player starts with." ) },
+            { .text = label( _( "Cash for 1st Wave:" ) ), .value = std::to_string( cash_per_wave / 100 ), .help = _( "The cash awarded for the first wave." ) },
+            { .text = label( _( "Cash Increase:" ) ), .value = std::to_string( cash_increase / 100 ), .help = _( "The increase in the award each wave." ) },
+            { .heading = label( _( "Enemy Selection:" ) ), .text = _( "Zombies" ), .on = zombies },
+            { .text = _( "Special Zombies" ), .on = specials },
+            { .text = _( "Spiders" ), .on = spiders },
+            { .text = _( "Triffids" ), .on = triffids },
+            { .text = _( "Robots" ), .on = robots },
+            { .text = _( "Subspace" ), .on = subspace },
+            { .heading = label( _( "Needs:" ) ), .text = _( "Food" ), .on = hunger },
+            { .text = _( "Water" ), .on = thirst },
+            { .text = _( "Sleep" ), .on = sleep },
+            { .text = _( "Mercenaries" ), .on = mercenaries },
+            { .text = _( "Allow save" ), .on = allow_save },
+        };
+        const auto &chosen = options[std::clamp( selection - 1, 0,
+                                                 static_cast<int>( options.size() ) - 1 )];
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Defense mode" ) );
+            jsout.member( "icon", "shield" );
+            jsout.member( "size", std::array{ 1040, 760 } );
+            jsout.member( "quit", "" );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "cursor", selection - 1 );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &[index, o] : options | std::views::enumerate ) {
+                if( !o.heading.empty() ) {
+                    gs::write_row( jsout, { .text = { .text = o.heading }, .heading = true } );
+                }
+                gs::write_row( jsout, {
+                    .text = { .text = o.text, .color = o.on.value_or( true ) ? c_white : c_light_gray },
+.cells = o.on ? std::vector<gs::span> {} : std::vector<gs::span> { { .text = o.value, .color = c_yellow } },
+                    .i = static_cast<int>( index ),
+                    .mark = o.on,
+                    // Clicking a chosen value again moves it on, as the right key does.
+                    .confirm = o.on ? std::nullopt : std::optional<std::string>( "RIGHT" ),
+                    .mark_act = o.on ? "CONFIRM" : "",
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = chosen.text, .color = c_white } );
+            jsout.member( "subtitle", chosen.on ? ( *chosen.on ? _( "On" ) : _( "Off" ) ) : chosen.value );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = chosen.help } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            if( chosen.on ) {
+                gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Toggle" ), .icon = "toggle-right", .category = category } );
+            } else {
+                gs::write_button( jsout, { .act = "LEFT", .text = _( "Previous" ), .icon = "chevron-left", .category = category } );
+                gs::write_button( jsout, { .act = "RIGHT", .text = _( "Next" ), .icon = "chevron-right", .category = category } );
+            }
+            gs::write_button( jsout, { .act = "START", .text = _( "Start" ), .icon = "play", .category = category, .primary = true } );
+            jsout.end_array();
+            jsout.end_object();
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Change" ) );
+            gs::write_hint( jsout, "CONFIRM", category, _( "Toggle" ) );
+            gs::write_hint( jsout, "START", category, _( "Start" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         refresh_setup( w, selection );
     } );
 
@@ -504,6 +630,13 @@ void defense_game::setup()
     while( true ) {
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick >= 0 && *pick < selection_max ) {
+                selection = *pick + 1;
+            }
+        }
+#endif
 
         if( action == "START" ) {
             if( !zombies && !specials && !spiders && !triffids && !robots && !subspace ) {
@@ -884,6 +1017,14 @@ void defense_game::caravan()
 
     catacurses::window w;
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot shows the categories and their items side by side, with the chosen item's details.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &items, "CARAVAN" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         const int width = FULL_SCREEN_WIDTH;
         const int height = FULL_SCREEN_HEIGHT;
@@ -891,6 +1032,11 @@ void defense_game::caravan()
                             TERMY - FULL_SCREEN_HEIGHT ) / 2 );
         w = catacurses::newwin( height, width, offset );
         ui.position_from_window( w );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -900,7 +1046,116 @@ void defense_game::caravan()
 
     int current_window = 0;
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "CARAVAN" );
+        const auto cash = g->u.cash;
+        const auto &shown = items[category_selected];
+        const auto &counts = item_count[category_selected];
+        const auto price_of = []( const itype_id & id, const int count ) {
+            return caravan_price( g->u, item::spawn_temporary( id,
+                                  calendar::start_of_cataclysm )->price( false ) * count );
+        };
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Caravan" ) );
+            jsout.member( "icon", "truck" );
+            jsout.member( "size", std::array{ 1200, 820 } );
+            jsout.member( "stats" );
+            jsout.start_array();
+            gs::write_stat( jsout, {
+                .icon = "wallet",
+                .value = { .text = string_format( _( "Your Cash: %s" ), format_money( cash ) ) + " -> " + colorize( format_money( cash - total_price ), total_price > cash ? c_red : c_green ), .color = c_white },
+            } );
+            jsout.end_array();
+            jsout.member( "active_pane", current_window );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Categories" ) );
+            jsout.member( "icon", "list" );
+            jsout.member( "cursor", category_selected );
+            jsout.member( "stretch", 0.6 );
+            jsout.member( "confirm", "NEXT_TAB" );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto index : std::views::iota( 0, static_cast<int>( NUM_CARAVAN_CATEGORIES ) ) ) {
+                const auto in_cart = index == CARAVAN_CART ? std::ranges::fold_left( item_count[CARAVAN_CART], 0,
+                                     std::plus<>() ) : 0;
+                gs::write_row( jsout, {
+                    .text = { .text = caravan_category_name( static_cast<caravan_category>( index ) ), .color = c_white },
+.cells = in_cart > 0 ? std::vector<gs::span> { { .text = std::to_string( in_cart ) } } : std::vector<gs::span> {},
+                    .icon = index == CARAVAN_CART ? "shopping-cart" : "",
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.start_object();
+            jsout.member( "title", caravan_category_name( static_cast<caravan_category>
+                          ( category_selected ) ) );
+            jsout.member( "cursor", shown.empty() ? -1 : item_selected );
+            jsout.member( "confirm", "RIGHT" );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &[id, count] : std::views::zip( shown, counts ) ) {
+                const auto price = count > 0 ? price_of( id, count ) : 0;
+                gs::write_row( jsout, {
+                    .text = { .text = item::nname( id, count ), .color = c_white },
+                    .cells = {
+                        { .text = string_format( "x %d", count ), .color = count > 0 ? c_white : c_dark_gray },
+                        { .text = count > 0 ? format_money( price ) : "", .color = price > cash ? c_red : c_green },
+                    },
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "aside" );
+            jsout.start_object();
+            if( item_selected < static_cast<int>( shown.size() ) ) {
+                const auto &id = shown[item_selected];
+                const auto &tmp = *item::spawn_temporary( id, calendar::start_of_cataclysm );
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = tmp.display_name(), .color = c_white } );
+                jsout.member( "subtitle", format_money( price_of( id, 1 ) ) );
+                jsout.member( "sym", tmp.symbol() );
+                jsout.member( "sym_color", string_from_color( tmp.color() ) );
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = tmp.info_string( iteminfo_query::no_text ) } );
+            } else {
+                jsout.member( "empty", _( "Choose an item to see it here." ) );
+            }
+            // The buttons act on the item shown, whichever list has the cursor.
+            const auto item_pick = shown.empty() ? std::nullopt : std::optional<int>
+                                   ( gs::row_stride + item_selected );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Buy the cart" ), .icon = "shopping-cart", .category = category, .primary = true } );
+            gs::write_button( jsout, { .act = "RIGHT", .text = _( "One more" ), .icon = "plus", .category = category, .enabled = !shown.empty(), .pick = item_pick } );
+            gs::write_button( jsout, { .act = "LEFT", .text = _( "One less" ), .icon = "minus", .category = category, .enabled = !shown.empty() && counts[std::min<size_t>( item_selected, counts.size() - 1 )] > 0, .pick = item_pick } );
+            gs::write_button( jsout, { .act = "NEXT_TAB", .text = _( "Switch list" ), .icon = "arrow-left-right", .category = category } );
+            gs::write_button( jsout, { .act = "HELP", .text = _( "Help" ), .icon = "circle-question-mark", .category = category } );
+            jsout.end_array();
+            jsout.end_object();
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Buy less or more" ) );
+            gs::write_hint( jsout, "NEXT_TAB", category, _( "Switch list" ) );
+            gs::write_hint( jsout, "CONFIRM", category, _( "Buy" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Buy nothing" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_caravan_categories( w, category_selected, total_price, g->u.cash );
         draw_caravan_items( w, &( items[category_selected] ),
                             &( item_count[category_selected] ), offset, item_selected );
@@ -920,6 +1175,21 @@ void defense_game::caravan()
     while( !done ) {
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &items ) : std::nullopt ) {
+            namespace gs = cata::godot_screen;
+            const auto row = *pick % gs::row_stride;
+            if( *pick < gs::row_stride && row < NUM_CARAVAN_CATEGORIES && row != category_selected ) {
+                category_selected = row;
+                offset = 0;
+                item_selected = 0;
+            } else if( *pick >= gs::row_stride && row < static_cast<int>( items[category_selected].size() ) ) {
+                item_selected = row;
+                offset = std::clamp( offset, std::max( 0, item_selected - 12 ), item_selected );
+            }
+            current_window = *pick < gs::row_stride ? 0 : 1;
+        }
+#endif
         if( action == "HELP" ) {
             popup_top( _( "CARAVAN:\n"
                           "Start by selecting a category using your favorite up/down keys.\n"

@@ -16,19 +16,30 @@
 #include "character_oracle.h"
 #include "color.h"
 #include "cursesdef.h"
+#if defined(TILES)
+#include "cursesport.h"
+#endif
 #include "debug.h"
 #include "effect.h"
 #include "fstream_utils.h"
 #include "game.h"
+#include "godot_hotbar.h"
 #include "game_constants.h"
 #include "game_ui.h"
+#include "godot_bridge.h"
+#include "godot_hud.h"
 #include "input.h"
 #include "item.h"
+#include "itype.h"
 #include "json.h"
+#include "live_view.h"
 #include "lua_sidebar_widgets.h"
 #include "magic/magic.h"
 #include "map/map.h"
+#include "message_log_view.h"
 #include "messages.h"
+#include "mtype.h"
+#include "npc.h"
 #include "options.h"
 #include "output.h"
 #include "overmap/omdata.h"
@@ -43,6 +54,7 @@
 #include "sounds.h"
 #include "string_formatter.h"
 #include "string_id.h"
+#include "string_utils.h"
 #include "tileray.h"
 #include "translations.h"
 #include "type_id.h"
@@ -59,13 +71,17 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <initializer_list>
 #include <iosfwd>
 #include <iterator>
 #include <list>
+#include <map>
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -73,7 +89,12 @@ static const trait_id trait_THRESH_FELINE( "THRESH_FELINE" );
 static const trait_id trait_THRESH_BIRD( "THRESH_BIRD" );
 static const trait_id trait_THRESH_URSINE( "THRESH_URSINE" );
 
+static const efftype_id effect_bite( "bite" );
+static const efftype_id effect_bleed( "bleed" );
 static const efftype_id effect_got_checked( "got_checked" );
+static const efftype_id effect_infected( "infected" );
+
+static const itype_id fuel_type_muscle( "muscle" );
 
 static const flag_id json_flag_THERMOMETER( "THERMOMETER" );
 static const flag_id json_flag_SPLINT( "SPLINT" );
@@ -2606,6 +2627,12 @@ std::string panel_manager::get_current_layout_id() const
 
 int panel_manager::get_width_right()
 {
+#if defined(TILES)
+    // The Godot HUD's sidebar takes the sidebar's place; keep the map out from under it.
+    if( cata::godot_bridge::is_active() ) {
+        return cata::godot_bridge::map_insets().right;
+    }
+#endif
     if( get_option<std::string>( "SIDEBAR_POSITION" ) == "left" ) {
         return width_left;
     }
@@ -2614,6 +2641,11 @@ int panel_manager::get_width_right()
 
 int panel_manager::get_width_left()
 {
+#if defined(TILES)
+    if( cata::godot_bridge::is_active() ) {
+        return cata::godot_bridge::map_insets().left;
+    }
+#endif
     if( get_option<std::string>( "SIDEBAR_POSITION" ) == "left" ) {
         return width_right;
     }
@@ -3016,4 +3048,583 @@ void panel_manager::show_adm()
 
     g->show_panel_adm = false;
     g->invalidate_main_ui_adaptor();
+}
+
+namespace
+{
+
+/// Writes `{ "text": ..., "color": ... }` as member `name`.
+auto write_colored( JsonOut &jsout, const std::string &name, const std::string &text,
+                    const nc_color &color ) -> void
+{
+    jsout.member( name );
+    jsout.start_object();
+    jsout.member( "text", text );
+    jsout.member( "color", string_from_color( color ) );
+    jsout.end_object();
+}
+
+/// Writes `text` as `[text, color]` runs, resolving color tags; untagged text uses `base`.
+auto write_runs( JsonOut &jsout, const std::string &text, const nc_color &base ) -> void
+{
+    jsout.start_array();
+    auto colors = std::vector<nc_color> { base };
+    for( const auto &segment : split_by_color( text ) ) {
+        auto run = segment;
+        if( !segment.empty() && segment[0] == '<' ) {
+            const auto tag = get_color_from_tag( segment, report_color_error::no );
+            if( tag.type == color_tag_parse_result::open_color_tag ) {
+                colors.push_back( tag.color );
+            } else if( tag.type == color_tag_parse_result::close_color_tag && colors.size() > 1 ) {
+                colors.pop_back();
+            }
+            if( tag.type != color_tag_parse_result::non_color_tag ) {
+                run = rm_prefix( segment );
+            }
+        }
+        if( run.empty() ) {
+            continue;
+        }
+        jsout.start_array();
+        jsout.write( run );
+        jsout.write( string_from_color( colors.back() ) );
+        jsout.end_array();
+    }
+    jsout.end_array();
+}
+
+/// Actions the HUD offers as buttons, with the key each is bound to.
+auto write_action_keys( JsonOut &jsout ) -> void
+{
+    static const auto actions = std::array<std::string, 24> {
+        "inventory", "advinv", "craft", "construct", "pickup", "look", "fire", "wait", "map",
+        "eat", "wear", "apply", "sleep", "messages", "player_data", "safemode", "mutations",
+        "bionics", "reload_weapon", "wield", "drop", "open", "toggle_panel_adm", "toggle_pixel_minimap"
+    };
+    jsout.member( "keys" );
+    jsout.start_object();
+    for( const auto &action : actions ) {
+        const auto &events = inp_mngr.get_input_for_action( action, "DEFAULTMODE" );
+        const auto key = std::ranges::find_if( events, []( const input_event & ev ) { return ev.type == input_event_t::keyboard; } );
+        jsout.member( action, key == events.end() ? std::string() :
+                      inp_mngr.get_keyname( key->get_first_input(), key->type ) );
+    }
+    jsout.end_object();
+}
+
+/// Whether the sidebar would draw one of the panels called `names` in the current layout, so the
+/// sidebar options menu still decides what the HUD shows.
+auto panel_shown( std::initializer_list<std::string_view> names ) -> bool
+{
+    const auto &layout = panel_manager::get_manager().get_current_layout();
+    return std::ranges::any_of( layout, [&]( const window_panel & panel ) {
+        return panel.toggle && std::ranges::contains( names, panel.get_name() ) && panel.render();
+    } );
+}
+
+/// How full the sidebar's bar for `cur` out of `max` is, rounded down to tenths (the coarsest bar
+/// the game draws), so the HUD tells no more than the sidebar would.
+auto bar_level( const int cur, const int max ) -> double
+{
+    if( cur <= 0 || max <= 0 ) {
+        return 0.0;
+    }
+    const auto ratio = std::clamp( static_cast<double>( cur ) / max, 0.0, 1.0 );
+    return std::max( std::floor( ratio * 10.0 ) / 10.0, 0.05 );
+}
+
+/// Health of each body part as the sidebar shows it: a bar, or exact numbers when the health
+/// style option or a medical check allows them, plus bleeding, bites, infection and breaks.
+auto write_body( JsonOut &jsout, avatar &u ) -> void
+{
+    const auto numbers = get_option<std::string>( "HEALTH_STYLE" ) == "number" ||
+                         u.has_effect( effect_got_checked );
+    jsout.member( "body" );
+    jsout.start_array();
+    for( const auto &bp : u.get_all_body_parts( true ) ) {
+        const auto cur = u.get_part_hp_cur( bp );
+        const auto max = u.get_part_hp_max( bp );
+        const auto broken = u.is_limb_broken( bp ) && !bp->essential;
+        const auto splinted = broken && ( u.worn_with_flag( json_flag_SPLINT, bp ) ||
+                                          u.mutation_value( "mending_modifier" ) >= 1.0f );
+        jsout.start_object();
+        jsout.member( "id", bp.id().str() );
+        jsout.member( "label", body_part_name( bp ) );
+        if( broken ) {
+            // A broken limb's bar shows how far it has mended, in fifths.
+            jsout.member( "level", ( 100 * cur / std::max( max, 1 ) / 20 ) / 5.0 );
+            jsout.member( "color", string_from_color( splinted ? c_blue : c_dark_gray ) );
+            jsout.member( "broken", true );
+            jsout.member( "splinted", splinted );
+        } else {
+            jsout.member( "level", bar_level( cur, max ) );
+            jsout.member( "color", string_from_color( get_hp_bar( cur, max ).second ) );
+        }
+        if( numbers ) {
+            jsout.member( "cur", cur );
+            jsout.member( "max", max );
+        }
+        jsout.member( "status", string_from_color( u.limb_color( bp.id(), true, true, true ) ) );
+        jsout.member( "bleeding", u.has_effect( effect_bleed, bp.id() ) );
+        jsout.member( "bitten", u.has_effect( effect_bite, bp.id() ) );
+        jsout.member( "infected", u.has_effect( effect_infected, bp.id() ) );
+        jsout.member( "armor" );
+        write_runs( jsout, get_armor( u, bp ), c_light_gray );
+        jsout.end_object();
+    }
+    jsout.end_array();
+}
+
+/// The armor panel: the outermost layer on the head, torso, arms, legs and feet.
+auto write_armor( JsonOut &jsout, const avatar &u ) -> void
+{
+    struct slot {
+        std::string label;
+        bodypart_id part;
+    };
+    const auto slots = std::array<slot, 5> { {
+            { .label = _( "Head" ), .part = bodypart_id( "head" ) },
+            { .label = _( "Torso" ), .part = bodypart_id( "torso" ) },
+            { .label = _( "Arms" ), .part = bodypart_id( "arm_r" ) },
+            { .label = _( "Legs" ), .part = bodypart_id( "leg_r" ) },
+            { .label = _( "Feet" ), .part = bodypart_id( "foot_r" ) },
+        }
+    };
+    jsout.member( "armor" );
+    jsout.start_array();
+    for( const auto &s : slots ) {
+        jsout.start_object();
+        jsout.member( "label", s.label );
+        jsout.member( "item" );
+        write_runs( jsout, get_armor( u, s.part ), c_light_gray );
+        jsout.end_object();
+    }
+    jsout.end_array();
+}
+
+/// Stamina, mood, focus, speed, movement and body heat, as the sidebar shows them.
+auto write_condition( JsonOut &jsout, avatar &u ) -> void
+{
+    jsout.member( "stamina" );
+    jsout.start_object();
+    jsout.member( "level", bar_level( u.get_stamina(), u.get_stamina_max() ) );
+    jsout.member( "color", string_from_color( get_hp_bar( u.get_stamina(),
+                  u.get_stamina_max() ).second ) );
+    if( get_option<std::string>( "HEALTH_STYLE" ) == "number" ) {
+        jsout.member( "text", std::to_string( u.get_stamina() ) );
+    }
+    jsout.end_object();
+
+    const auto morale = morale_stat( u );
+    const auto horizontal = get_option<std::string>( "MORALE_STYLE" ) == "horizontal";
+    jsout.member( "morale", morale.second );
+    jsout.member( "morale_color", string_from_color( morale.first ) );
+    jsout.member( "morale_face", morale_emotion( morale.second, get_face_type( u ), horizontal ) );
+
+    // Focus drifts toward its equilibrium; the sidebar marks which way it is heading.
+    const auto equilibrium = character_effects::calc_focus_equilibrium( u );
+    write_colored( jsout, "focus", std::to_string( u.focus_pool ), focus_color( u.focus_pool ) );
+    const auto focus_trend = u.focus_pool < equilibrium ? 1 : ( u.focus_pool > equilibrium ? -1 : 0 );
+    jsout.member( "focus_trend", focus_trend );
+    write_colored( jsout, "speed", std::to_string( u.get_speed() ), focus_color( u.get_speed() ) );
+    write_colored( jsout, "move", move_mode_string( u ), move_mode_color( u ) );
+    jsout.member( "move_cost", u.movecounter );
+
+    const auto temp = temp_stat( u );
+    const auto arrows = temp_delta_arrows( u );
+    write_colored( jsout, "body_temp", temp.second, temp.first );
+    write_colored( jsout, "body_temp_trend", trim( temp_delta_string( u ) ), arrows.first );
+}
+
+/// Overmap coordinates in the format chosen in the options.
+auto omt_coordinates( const tripoint_abs_omt &pos ) -> std::string
+{
+    if( get_option<std::string>( "OVERMAP_COORDINATE_FORMAT" ) == "subdivided" ) {
+        const auto split = project_remain<coords::om>( pos );
+        return string_format( "%d'%d, %d'%d, %d", split.quotient.x(), split.remainder.x(),
+                              split.quotient.y(), split.remainder.y(), pos.z() );
+    }
+    return string_format( "%d, %d, %d", pos.x(), pos.y(), pos.z() );
+}
+
+/// Date, time, sky, wind and location, following the sidebar's rules for what the avatar knows.
+auto write_time_and_place( JsonOut &jsout, avatar &u ) -> void
+{
+    jsout.member( "season", calendar::name_season( season_of_year( calendar::turn ) ) );
+    jsout.member( "day", day_of_season<int>( calendar::turn ) + 1 );
+    // A watch tells the time; otherwise the sky gives a rough idea, and underground nothing does.
+    if( u.has_watch() ) {
+        jsout.member( "time", to_string_time_of_day( calendar::turn ) );
+        jsout.member( "time_kind", "clock" );
+    } else if( g->get_levz() >= 0 ) {
+        jsout.member( "time", time_approx() );
+        jsout.member( "time_kind", "approx" );
+    } else {
+        jsout.member( "time", std::string() );
+        jsout.member( "time_kind", "unknown" );
+    }
+    jsout.member( "moon", get_moon() );
+    jsout.member( "moon_phase", static_cast<int>( get_moon_phase( calendar::turn ) ) );
+    jsout.member( "underground", g->get_levz() < 0 );
+
+    const auto &weather = get_weather();
+    write_colored( jsout, "weather", weather.weather_id->name.translated(), weather.weather_id->color );
+    jsout.member( "temperature", get_temp( u ) );
+    const auto &omt = ACTIVE_OVERMAP_BUFFER.ter( u.abs_omt_pos() );
+    const auto windpower = get_local_windpower( weather.windspeed, omt, u.abs_pos(),
+                           weather.winddirection, g->is_sheltered( u.bub_pos() ) );
+    write_colored( jsout, "wind", get_wind_desc( windpower ), get_wind_color( windpower ) );
+    jsout.member( "wind_arrow", get_wind_arrow( weather.winddirection ) );
+    const auto light = get_light_level( character_funcs::fine_detail_vision_mod( u ) );
+    write_colored( jsout, "light", light.first, light.second );
+
+    jsout.member( "place", omt->get_name() );
+    jsout.member( "coords", omt_coordinates( u.abs_omt_pos() ) );
+    jsout.member( "z", g->get_levz() );
+    jsout.member( "deaf", u.is_deaf() );
+    jsout.member( "sound", get_sound( u ) );
+    jsout.member( "noisy", u.volume != 0 );
+}
+
+/// The fuel gauge the sidebar shows: the fuel of the first running engine, else the first fuel.
+auto write_fuel( JsonOut &jsout, const vehicle &veh ) -> void
+{
+    const auto fuels = veh.get_printable_fuel_types();
+    if( fuels.empty() ) {
+        return;
+    }
+    const auto engines = std::views::iota( 0, static_cast<int>( veh.engines.size() ) );
+    const auto running = std::ranges::find_if( engines, [&]( const int e ) {
+        return veh.is_engine_on( e ) && !veh.is_perpetual_type( e ) &&
+               !veh.is_engine_type( e, fuel_type_muscle );
+    } );
+    const auto fuel = running == engines.end() ? fuels.front() :
+                      veh.cpart( veh.engines[*running] ).fuel_current();
+    const auto capacity = veh.fuel_capacity( fuel );
+    const auto left = veh.fuel_left( fuel );
+    jsout.member( "fuel" );
+    jsout.start_object();
+    jsout.member( "name", item::nname( fuel ) );
+    // The gauge reads E, 1/4, 1/2, 3/4 or F.
+    jsout.member( "mark", ( capacity > 0 ? left * 99 / capacity : 0 ) / 20 % 5 );
+    jsout.member( "color", string_from_color( fuel->color ) );
+    jsout.end_object();
+}
+
+/// The vehicle panel: heading, speed colored by engine strain, cruise and takeoff speeds, fuel.
+auto write_vehicle( JsonOut &jsout, const avatar &u ) -> void
+{
+    auto *veh = g->remoteveh();
+    if( veh == nullptr && u.in_vehicle ) {
+        veh = veh_pointer_or_null( get_map().veh_at( u.bub_pos() ) );
+    }
+    if( veh == nullptr ) {
+        return;
+    }
+    const auto strain = veh->strain();
+    const auto speed_color = strain <= 0 ? c_light_blue : ( strain <= 0.2 ? c_yellow :
+                             ( strain <= 0.4 ? c_light_red : c_red ) );
+    const auto speed = static_cast<int>( convert_velocity( veh->velocity, VU_VEHICLE ) );
+    jsout.member( "vehicle" );
+    jsout.start_object();
+    jsout.member( "name", veh->name );
+    jsout.member( "heading", veh->face.to_string_azimuth_from_north() );
+    jsout.member( "unit", get_option<std::string>( "USE_METRIC_SPEEDS" ) );
+    write_colored( jsout, "speed", std::to_string( speed ), speed_color );
+    if( veh->cruise_on ) {
+        jsout.member( "cruise", static_cast<int>( convert_velocity( veh->cruise_velocity,
+                      VU_VEHICLE ) ) );
+    }
+    if( veh->has_part( "WING" ) ) {
+        const auto takeoff = veh->get_takeoff_speed();
+        write_colored( jsout, "takeoff", std::to_string( takeoff ),
+                       speed > takeoff ? c_light_green : c_light_red );
+    }
+    write_fuel( jsout, *veh );
+    jsout.end_object();
+}
+
+/// How the compass colors a monster's name by the threat it poses.
+auto danger_color( const mtype &mt ) -> nc_color
+{
+    if( mt.difficulty >= 30 ) {
+        return c_red;
+    } else if( mt.difficulty >= 16 ) {
+        return c_light_red;
+    } else if( mt.difficulty >= 8 ) {
+        return c_white;
+    } else if( mt.agro > 0 ) {
+        return c_light_gray;
+    }
+    return c_dark_gray;
+}
+
+/// How the compass colors an NPC by attitude.
+auto attitude_color( const npc_attitude attitude ) -> nc_color
+{
+    switch( attitude ) {
+        case NPCATT_KILL:
+            return c_red;
+        case NPCATT_FOLLOW:
+            return c_light_green;
+        default:
+            return c_pink;
+    }
+}
+
+/// One creature the compass lists, under the nearest direction it is seen in.
+struct compass_entry {
+    std::string sym;
+    nc_color color;
+    std::string name;
+    nc_color danger;
+    int difficulty = 0;
+    /// 0 to 7 clockwise from north; 8 is close by.
+    int dir = 0;
+};
+
+/// The creature compass: what the avatar sees in each direction, and who or what each one is.
+auto write_compass( JsonOut &jsout, avatar &u ) -> void
+{
+    const auto &seen = u.get_mon_visible();
+    auto entries = std::vector<compass_entry> {};
+    auto kinds = std::map<const mtype *, compass_entry> {};
+    auto counts = std::map<const mtype *, int> {};
+
+    jsout.member( "compass" );
+    jsout.start_object();
+    jsout.member( "dirs" );
+    jsout.start_array();
+    for( auto dir = 0; dir < 9; ++dir ) {
+        jsout.start_object();
+        jsout.member( "count", seen.visible_count_by_dir[dir] );
+        jsout.member( "danger", dir < 8 && seen.dangerous[dir] );
+        jsout.member( "syms" );
+        jsout.start_array();
+        for( const auto *who : seen.unique_types[dir] ) {
+            const auto color = attitude_color( who->get_attitude() );
+            jsout.start_array();
+            jsout.write( "@" );
+            jsout.write( string_from_color( color ) );
+            jsout.end_array();
+            entries.push_back( { .sym = "@", .color = color, .name = who->get_name(), .danger = color, .dir = dir } );
+        }
+        for( const auto &[type, count] : seen.unique_mons[dir] ) {
+            jsout.start_array();
+            jsout.write( type->sym );
+            jsout.write( string_from_color( type->color ) );
+            jsout.end_array();
+            // Like the sidebar, list each kind once, under the nearest direction it is in.
+            counts[type] += count;
+            kinds.insert_or_assign( type, compass_entry{ .sym = type->sym, .color = type->color, .name = {},
+                                    .danger = danger_color( *type ), .difficulty = type->difficulty, .dir = dir } );
+        }
+        jsout.end_array();
+        jsout.end_object();
+    }
+    jsout.end_array();
+
+    for( auto &[type, entry] : kinds ) {
+        const auto count = counts[type];
+        entry.name = count == 1 ? type->nname( count ) :
+                     string_format( pgettext( "monster count and name", "%1$d %2$s" ), count,
+                                    type->nname( count ) );
+        entries.push_back( entry );
+    }
+    std::ranges::sort( entries, []( const compass_entry & a, const compass_entry & b ) {
+        return a.dir != b.dir ? a.dir > b.dir : a.difficulty > b.difficulty;
+    } );
+    jsout.member( "list" );
+    jsout.start_array();
+    for( const auto &entry : entries ) {
+        jsout.start_object();
+        jsout.member( "sym", entry.sym );
+        jsout.member( "color", string_from_color( entry.color ) );
+        jsout.member( "name", entry.name );
+        jsout.member( "danger", string_from_color( entry.danger ) );
+        jsout.member( "dir", entry.dir );
+        jsout.end_object();
+    }
+    jsout.end_array();
+    jsout.end_object();
+}
+
+#if defined(TILES)
+/// Name of a curses palette index (0 to 15), as used in color names like `c_light_red`.
+auto palette_name( const int index ) -> std::string
+{
+    static const auto names = std::array<std::string, 16> {
+        "black", "red", "green", "brown", "blue", "magenta", "cyan", "light_gray",
+        "dark_gray", "light_red", "light_green", "yellow", "light_blue", "pink", "light_cyan", "white"
+    };
+    return names[std::clamp( index, 0, 15 )];
+}
+
+/// The overmap around the avatar exactly as the sidebar draws it (terrain, notes, vehicles, the
+/// mission marker and hordes at the edge), as rows of `[glyph, foreground, background]` cells.
+auto write_area( JsonOut &jsout, const avatar &u ) -> void
+{
+    constexpr auto size = 7;
+    static const auto w = catacurses::newwin( size, size, point_zero );
+    werase( w );
+    overmap_ui::draw_overmap_chunk( w, u, u.abs_omt_pos(), point( -1, -1 ), size, size );
+    const auto &cells = *w.get<cata_cursesport::WINDOW>();
+    jsout.member( "area" );
+    jsout.start_array();
+    for( const auto &line : cells.line ) {
+        jsout.start_array();
+        for( const auto &cell : line.chars ) {
+            jsout.start_array();
+            jsout.write( cell.ch );
+            jsout.write( palette_name( cell.FG ) );
+            jsout.write( palette_name( cell.BG ) );
+            jsout.end_array();
+        }
+        jsout.end_array();
+    }
+    jsout.end_array();
+}
+
+/// The square under the resting mouse as the "Mouse View" box describes it, for the hover card.
+auto write_hover( JsonOut &jsout ) -> void
+{
+    const auto at = godot_hover_position();
+    if( !at ) {
+        return;
+    }
+    const auto w = cata::godot_bridge::capture_window( 40, 52 );
+    auto line = 0;
+    g->pre_print_all_tile_info( *at, w, line, getmaxy( w ) - 1,
+                                get_map().get_visibility_variables_cache() );
+    jsout.member( "hover" );
+    cata::godot_bridge::write_window_spans( jsout, w );
+}
+#endif
+
+/// Panels that Lua mods add to the sidebar, with the lines they draw.
+auto write_lua_widgets( JsonOut &jsout ) -> void
+{
+    const auto &layout = panel_manager::get_manager().get_current_layout();
+    jsout.member( "widgets" );
+    jsout.start_array();
+    for( const auto &widget : cata::lua_sidebar_widgets::get_widgets() ) {
+        const auto name = lua_panel_name( widget );
+        const auto panel = std::ranges::find( layout, name, &window_panel::get_name );
+        if( panel == layout.end() || !panel->toggle || !panel->render() ) {
+            continue;
+        }
+        const auto height = std::max( widget.height, 1 );
+        const auto lines = get_lua_widget_lines( widget, panel->get_width(), height );
+        jsout.start_object();
+        jsout.member( "name", name );
+        jsout.member( "lines" );
+        jsout.start_array();
+        for( const auto &line : lines | std::views::take( height ) ) {
+            write_runs( jsout, line.text, line.color );
+        }
+        jsout.end_array();
+        jsout.end_object();
+    }
+    jsout.end_array();
+}
+
+} // namespace
+
+auto cata::godot_hud::build() -> std::string
+{
+    auto &u = get_avatar();
+    auto out = std::ostringstream();
+    auto jsout = JsonOut( out );
+    jsout.start_object();
+    jsout.member( "t", "hud" );
+    jsout.member( "name", u.get_name() );
+
+    jsout.member( "weapon" );
+    write_runs( jsout, character_funcs::fmt_wielded_weapon( u ), c_light_gray );
+    jsout.member( "style", u.martial_arts_data->selected_style_name( u ) );
+    jsout.member( "armed", u.is_armed() );
+    cata::godot_hotbar::write( jsout );
+
+    write_body( jsout, u );
+    const auto thirst = u.get_thirst_description();
+    const auto hunger = u.get_hunger_description();
+    const auto fatigue = u.get_fatigue_description();
+    const auto pain = u.get_pain_description();
+    write_colored( jsout, "thirst", thirst.first, thirst.second );
+    write_colored( jsout, "hunger", hunger.first, hunger.second );
+    write_colored( jsout, "fatigue", fatigue.first, fatigue.second );
+    write_colored( jsout, "pain", pain.first, pain.second );
+    write_condition( jsout, u );
+
+    write_colored( jsout, "str", value_trimmed( u.get_str() ), str_string( u ).first );
+    write_colored( jsout, "dex", value_trimmed( u.get_dex() ), dex_string( u ).first );
+    write_colored( jsout, "int", value_trimmed( u.get_int() ), int_string( u ).first );
+    write_colored( jsout, "per", value_trimmed( u.get_per() ), per_string( u ).first );
+    write_colored( jsout, "weight", carry_weight_string( u ), get_weight_color( u ) );
+    write_colored( jsout, "volume", carry_volume_string( u ), get_volume_color( u ) );
+    const auto power = power_stat( u );
+    write_colored( jsout, "power", power.second, power.first );
+    // The mana panel only appears for characters who use mana, as in the sidebar.
+    if( panel_shown( { "Mana" } ) ) {
+        const auto mana = mana_stat( u );
+        write_colored( jsout, "mana", mana.second, mana.first );
+        jsout.member( "mana_max", u.magic->max_mana( u ) );
+    }
+    jsout.member( "safe_mode", g->safe_mode != SAFE_MODE_OFF );
+    jsout.member( "safe_auto", get_option<bool>( "AUTOSAFEMODE" ) );
+    jsout.member( "safe_color", string_from_color( safe_color() ) );
+
+    write_time_and_place( jsout, u );
+    write_vehicle( jsout, u );
+#if defined(TILES)
+    write_area( jsout, u );
+    write_hover( jsout );
+#endif
+
+    // Optional panels follow their switches in the sidebar options menu.
+    const auto show_compass = panel_shown( { "Compass", "Comp.Compass", "Sim.Compass" } );
+    const auto show_map = pixel_minimap_option && panel_shown( { "Map" } );
+    const auto show_armor = panel_shown( { "Armor", "comp.Armor" } );
+    const auto show_goal = panel_shown( { "AI Needs" } );
+    jsout.member( "show" );
+    jsout.start_object();
+    jsout.member( "compass", show_compass );
+    jsout.member( "map", show_map );
+    jsout.member( "log", panel_shown( { "Log" } ) );
+    jsout.member( "armor", show_armor );
+    jsout.end_object();
+    if( show_compass ) {
+        write_compass( jsout, u );
+    }
+    if( show_armor ) {
+        write_armor( jsout, u );
+    }
+    if( show_goal ) {
+        auto needs = behavior::tree();
+        needs.add( &string_id<behavior::node_t>( "npc_needs" ).obj() );
+        auto oracle = behavior::character_oracle_t( &u );
+        jsout.member( "goal", needs.tick( &oracle ) );
+    }
+    write_lua_widgets( jsout );
+#if defined(TILES)
+    if( show_map ) {
+        cata::godot_bridge::request_minimap();
+    }
+#endif
+
+    jsout.member( "messages" );
+    jsout.start_array();
+    for( const auto &line : Messages::sidebar_lines( 14 ) ) {
+        jsout.start_object();
+        jsout.member( "time", line.time );
+        jsout.member( "fresh", line.fresh );
+        jsout.member( "text" );
+        write_runs( jsout, line.text, line.color );
+        jsout.end_object();
+    }
+    jsout.end_array();
+
+    write_action_keys( jsout );
+    jsout.end_object();
+    return out.str();
 }

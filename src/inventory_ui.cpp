@@ -41,6 +41,11 @@
 #include <SDL3/SDL.h>
 #endif
 
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "json.h"
+#endif
+
 #include <algorithm>
 #include <iterator>
 #include <limits>
@@ -88,6 +93,31 @@ struct inventory_input {
     int ch;
     inventory_entry *entry;
 };
+
+#if defined(TILES)
+/// The Godot front end's copy of an inventory screen; lives as long as the screen's `ui_adaptor`.
+struct inventory_selector::native_inventory {
+    explicit native_inventory( const inventory_selector *owner ) : view( "inventory", owner,
+                "INVENTORY" ) {}
+    cata::godot_bridge::native_view view;
+    std::string sent_rows;
+};
+
+namespace
+{
+
+/// A row clicked in Godot arrives as a pick of `column * native_column_stride + entry index`.
+constexpr auto native_column_stride = 100000;
+
+/// Inventory actions Godot offers as buttons, when the screen's input context has them.
+constexpr auto native_actions = std::array
+{
+    "CONFIRM", "QUIT", "INVENTORY_FILTER", "CATEGORY_SELECTION", "TOGGLE_FAVORITE", "EXAMINE",
+    "WIELD", "WEAR", "RIGHT", "LEFT", "DROP_NON_FAVORITE", "unload_all",
+};
+
+} // namespace
+#endif
 
 bool inventory_entry::operator==( const inventory_entry &other ) const
 {
@@ -894,8 +924,11 @@ void inventory_column::prepare_paging( const std::string &filter )
     }
     entries_cell_cache.clear();
     paging_is_valid = true;
-    // Select the uppermost possible entry
-    select( selected_index, selected_index ? scroll_direction::BACKWARD : scroll_direction::FORWARD );
+    // Select the uppermost possible entry. A filter can leave the old index past the end of the
+    // list, which would leave nothing selected.
+    const auto index = entries.empty() ? selected_index : std::min( selected_index,
+                       entries.size() - 1 );
+    select( index, index ? scroll_direction::BACKWARD : scroll_direction::FORWARD );
 }
 
 void inventory_column::clear()
@@ -1076,6 +1109,86 @@ void inventory_column::draw( const catacurses::window &win, point pos ) const
         mvwprintw( win, pos + point( 0, height - 1 ), _( "Page %d/%d" ), page_index() + 1, pages_count() );
     }
 }
+
+#if defined(TILES)
+auto inventory_column::write_native( JsonOut &jsout ) const -> void
+{
+    using cata::godot_bridge::write_spans;
+    jsout.member( "visible", visible() );
+    jsout.member( "selectable", allows_selecting() && activatable() );
+    jsout.member( "multi", multiselect && allows_selecting() );
+    jsout.member( "rows" );
+    jsout.start_array();
+    const item_category *last_category = nullptr;
+    for( auto index = size_t{ 0 }; index < entries.size(); ++index ) {
+        const auto &entry = entries[index];
+        if( !entry ) {
+            continue;
+        }
+        const auto &cache = get_entry_cell_cache( index );
+        if( entry.is_category() ) {
+            // Paging repeats a category's title at the top of each page; Godot shows one list.
+            if( entry.get_category_ptr() == last_category ) {
+                continue;
+            }
+            last_category = entry.get_category_ptr();
+            jsout.start_object();
+            jsout.member( "i", static_cast<int>( index ) );
+            jsout.member( "cat", cache.text.empty() ? std::string() : remove_color_tags( cache.text[0] ) );
+            jsout.member( "cells" );
+            jsout.start_array();
+            for( const auto &title : cache.text | std::views::drop( 1 ) ) {
+                jsout.write( remove_color_tags( title ) );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            continue;
+        }
+        const auto &it = *entry.any_item();
+        jsout.start_object();
+        jsout.member( "i", static_cast<int>( index ) );
+        jsout.member( "text" );
+        write_spans( jsout, cache.text.empty() ? std::string() : cache.text[0], cache.color );
+        jsout.member( "cells" );
+        jsout.start_array();
+        for( const auto &text : cache.text | std::views::drop( 1 ) ) {
+            write_spans( jsout, text, cache.color );
+        }
+        jsout.end_array();
+        if( !cache.denial.empty() ) {
+            jsout.member( "denial" );
+            write_spans( jsout, cache.denial, c_red );
+        }
+        const auto invlet = entry.get_invlet();
+        if( invlet != '\0' ) {
+            jsout.member( "key", utf32_to_utf8( invlet ) );
+            jsout.member( "key_color", string_from_color( entry.get_invlet_color() ) );
+        } else if( entry.invlet_hint ) {
+            jsout.member( "key", utf32_to_utf8( entry.invlet_hint->invlet ) );
+            jsout.member( "key_color", string_from_color( entry.invlet_hint->color ) );
+        }
+        jsout.member( "sym", it.symbol() );
+        jsout.member( "sym_color", string_from_color( it.color() ) );
+        jsout.member( "enabled", entry.is_selectable() );
+        jsout.member( "fav", it.is_favorite );
+        if( multiselect ) {
+            jsout.member( "chosen", static_cast<int>( entry.chosen_count ) );
+            jsout.member( "auto", static_cast<int>( entry.automatic_drop_count ) );
+            jsout.member( "avail", static_cast<int>( entry.get_available_count() ) );
+        }
+        auto weight = 0_gram;
+        auto volume = 0_ml;
+        for( const auto *location : entry.locations ) {
+            weight += location->weight();
+            volume += location->volume();
+        }
+        jsout.member( "weight", string_format( "%.2f %s", convert_weight( weight ), weight_units() ) );
+        jsout.member( "volume", string_format( "%s %s", format_volume( volume ), volume_units_abbr() ) );
+        jsout.end_object();
+    }
+    jsout.end_array();
+}
+#endif
 
 size_t inventory_column::visible_cells() const
 {
@@ -1585,6 +1698,22 @@ void inventory_selector::prepare_layout()
 shared_ptr_fast<ui_adaptor> inventory_selector::create_or_get_ui_adaptor()
 {
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
+#if defined(TILES)
+    if( !current_ui && cata::godot_bridge::native_screens() ) {
+        ui = current_ui = make_shared_fast<ui_adaptor>();
+        const auto state = std::make_shared<native_inventory>( this );
+        state->view.attach( *current_ui );
+        native = state;
+        current_ui->on_screen_resize( [this]( ui_adaptor & ) {
+            prepare_layout();
+        } );
+        current_ui->mark_resize();
+        current_ui->on_redraw( [this, state]( const ui_adaptor & ) {
+            publish_native( *state );
+        } );
+        return current_ui;
+    }
+#endif
     if( !current_ui ) {
         ui = current_ui = make_shared_fast<ui_adaptor>();
         current_ui->on_screen_resize( [this]( ui_adaptor & ) {
@@ -1753,6 +1882,13 @@ void inventory_selector::resize_window( int width, int height )
     }
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
     if( current_ui ) {
+#if defined(TILES)
+        // Godot draws the inventory, so it takes no room in the curses frame.
+        if( !native.expired() ) {
+            current_ui->position( point_zero, point_zero );
+            return;
+        }
+#endif
         current_ui->position_from_window( w_inv );
     }
 }
@@ -1773,6 +1909,14 @@ void inventory_selector::refresh_window() const
 
 void inventory_selector::set_filter()
 {
+#if defined(TILES)
+    // The Godot inventory shows the text being typed; keep the field out of the curses frame.
+    auto suppression = std::optional<cata::godot_bridge::curses_draw_suppression>();
+    if( !native.expired() ) {
+        suppression.emplace();
+    }
+#endif
+    spopup_purpose = "filter";
     spopup = std::make_unique<string_input_popup>();
     spopup->max_length( 256 ).identifier( "inventory" )
     .text( filter );
@@ -2004,6 +2148,9 @@ inventory_input inventory_selector::get_input()
     inventory_input res;
 
     res.action = ctxt.handle_input();
+#if defined(TILES)
+    apply_native_pick();
+#endif
     res.ch = ctxt.get_raw_input().get_first_input();
     res.entry = find_entry_by_invlet( res.ch );
 
@@ -2057,6 +2204,121 @@ void inventory_selector::on_change( const inventory_entry &entry )
     }
     refresh_active_column(); // Columns can react to changes by losing their activation capacity
 }
+
+#if defined(TILES)
+auto inventory_selector::publish_native( native_inventory &state ) -> void
+{
+    using cata::godot_bridge::write_spans;
+    state.view.publish( [this]( JsonOut & jsout ) {
+        jsout.member( "title" );
+        write_spans( jsout, title, c_white );
+        jsout.member( "hint" );
+        write_spans( jsout, hint, c_dark_gray );
+        if( display_stats ) {
+            jsout.member( "stats" );
+            jsout.start_array();
+            for( const auto &[caption, current, separator, limit] : get_raw_stats() ) {
+                if( caption.empty() ) {
+                    continue;
+                }
+                jsout.start_object();
+                jsout.member( "label", remove_color_tags( caption ) );
+                jsout.member( "current" );
+                write_spans( jsout, current, c_light_gray );
+                jsout.member( "limit" );
+                write_spans( jsout, limit, c_light_gray );
+                jsout.end_object();
+            }
+            jsout.end_array();
+        }
+        const auto [footer, footer_color] = get_footer( mode );
+        jsout.member( "footer" );
+        write_spans( jsout, footer, footer_color );
+        jsout.member( "category_mode", mode == navigation_mode::CATEGORY );
+        jsout.member( "filter", filter );
+        if( spopup ) {
+            jsout.member( "prompt", spopup_purpose );
+            jsout.member( "prompt_text", spopup->text() );
+        }
+        jsout.member( "empty", is_empty );
+        jsout.member( "available", has_available_choices() );
+        jsout.member( "confirm_label", confirm_label );
+        jsout.member( "active", static_cast<int>( active_column_index ) );
+        jsout.member( "cursors" );
+        jsout.start_array();
+        for( auto *column : columns ) {
+            jsout.write( static_cast<int>( column->get_selected_index() ) );
+        }
+        jsout.end_array();
+        const auto registered = ctxt.get_registered_actions_copy();
+        jsout.member( "keys" );
+        jsout.start_object();
+        for( const auto *action : native_actions ) {
+            if( std::ranges::contains( registered, action ) ) {
+                jsout.member( action, cata::godot_bridge::key_label( action, "INVENTORY" ) );
+            }
+        }
+        jsout.end_object();
+        const auto &selected = get_active_column().get_selected();
+        if( selected.is_item() ) {
+            const auto &it = *selected.any_item();
+            jsout.member( "detail" );
+            jsout.start_object();
+            jsout.member( "name" );
+            write_spans( jsout, it.display_name( selected.get_stack_size() ), it.color_in_inventory() );
+            jsout.member( "category", it.get_category().name() );
+            jsout.member( "sym", it.symbol() );
+            jsout.member( "sym_color", string_from_color( it.color() ) );
+            jsout.member( "fav", it.is_favorite );
+            if( const auto denial = preset.get_denial( selected ); !denial.empty() ) {
+                jsout.member( "denial" );
+                write_spans( jsout, denial, c_red );
+            }
+            jsout.member( "info" );
+            write_spans( jsout, format_item_info( it.info(), {} ), c_light_gray );
+            jsout.end_object();
+        }
+    } );
+
+    const auto rows = state.view.compose( "entries", [this]( JsonOut & jsout ) {
+        jsout.member( "entries" );
+        jsout.start_array();
+        for( const auto *column : columns ) {
+            jsout.start_object();
+            const auto role = column == &own_inv_column ? "carried" : column == &map_column ? "nearby" :
+                              column == &own_gear_column ? "worn" : "selection";
+            jsout.member( "role", role );
+            column->write_native( jsout );
+            jsout.end_object();
+        }
+        jsout.end_array();
+    } );
+    if( rows != state.sent_rows ) {
+        state.view.send( rows );
+        state.sent_rows = rows;
+    }
+}
+
+auto inventory_selector::apply_native_pick() -> void
+{
+    if( native.expired() ) {
+        return;
+    }
+    const auto pick = cata::godot_bridge::take_pick( this );
+    if( !pick || *pick < 0 ) {
+        return;
+    }
+    const auto column = static_cast<size_t>( *pick / native_column_stride );
+    const auto index = static_cast<size_t>( *pick % native_column_stride );
+    if( column >= columns.size() ) {
+        return;
+    }
+    set_active_column( column );
+    if( active_column_index == column ) {
+        get_active_column().select( index, scroll_direction::BACKWARD );
+    }
+}
+#endif
 
 std::vector<inventory_column *> inventory_selector::get_visible_columns() const
 {
@@ -2255,6 +2517,13 @@ size_t inventory_multiselector::query_count( size_t count = 0 )
         count_str = std::to_string( count );
     }
 
+#if defined(TILES)
+    auto suppression = std::optional<cata::godot_bridge::curses_draw_suppression>();
+    if( !native.expired() ) {
+        suppression.emplace();
+    }
+#endif
+    spopup_purpose = "count";
     spopup = std::make_unique<string_input_popup>();
     spopup->max_length( 256 ).identifier( "inventory" )
     .text( count_str );

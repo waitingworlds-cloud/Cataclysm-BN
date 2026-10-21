@@ -9,6 +9,11 @@
 #include "point.h"
 
 #if defined( TILES )
+namespace cata::godot_bridge
+{
+class native_view;
+} // namespace cata::godot_bridge
+
 struct loading_image_cache;
 struct loading_image_selection_state {
     std::vector<std::string> paths;
@@ -61,6 +66,8 @@ class loading_ui
         std::unique_ptr<loading_image_splash> ui_splash;
 #if defined( TILES )
         loading_image_selection_state loading_image_selection;
+        /// The progress card the Godot front end draws, while `ui` is up.
+        std::unique_ptr<cata::godot_bridge::native_view> native;
 #endif
 
         void init();

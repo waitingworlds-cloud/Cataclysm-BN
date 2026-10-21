@@ -8,6 +8,9 @@
 #include "flag.h"
 #include "flat_set.h"
 #include "game.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#endif
 #include "input.h"
 #include "item.h"
 #include "item_factory.h"
@@ -568,6 +571,14 @@ class wish_monster_callback: public uilist_callback
                        _( "[%s] find, [f]riendly, [h]allucination, [i]ncrease group, [d]ecrease group, [%s] quit" ),
                        ctxt.get_desc( "FILTER" ), ctxt.get_desc( "QUIT" ) );
 
+#if defined(TILES)
+            // The Godot front end only sees what is drawn into the menu's own window.
+            if( cata::godot_bridge::native_screens() ) {
+                cata::godot_bridge::copy_window( w_info, menu->window,
+                                                 point( menu->w_width - menu->pad_right, 1 ) );
+                return;
+            }
+#endif
             wnoutrefresh( w_info );
         }
 

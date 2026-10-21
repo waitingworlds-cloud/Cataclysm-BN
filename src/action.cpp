@@ -11,6 +11,7 @@
 #include "enum_conversions.h"
 #include "flag.h"
 #include "game.h"
+#include "godot_commands.h"
 #include "iexamine.h"
 #include "input.h"
 #include "item.h"
@@ -961,6 +962,14 @@ auto make_register_categories( std::vector<uilist_entry> &entries,
 
 action_id handle_action_menu()
 {
+#if defined(TILES)
+    if( const auto requested = cata::godot_commands::take_requested() ) {
+        return *requested;
+    }
+    if( cata::godot_commands::run_requested_task() ) {
+        return ACTION_NULL;
+    }
+#endif
     const input_context ctxt = get_default_mode_input_context();
 
     // Calculate weightings for the various actions to give the player suggestions

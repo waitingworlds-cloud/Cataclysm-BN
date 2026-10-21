@@ -6,15 +6,23 @@
 #include <climits>
 #include <cstdlib>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <optional>
+#include <ranges>
+#include <string>
+#include <utility>
 
 #include "avatar.h"
 #include "cata_utility.h"
 #include "catacharset.h"
 #include "debug.h"
 #include "game.h"
+#include "godot_bridge.h"
+#include "godot_menu_anchor.h"
 #include "ime.h"
 #include "input.h"
+#include "json.h"
 #include "output.h"
 #include "player.h"
 #include "string_input_popup.h"
@@ -26,6 +34,94 @@
 
 #include "options.h"
 #endif
+
+#if defined(TILES)
+namespace
+{
+
+/// A uilist that the Godot front end draws (see `godot_bridge.h`).
+struct native_menu {
+    native_menu( const uilist *menu, const std::string &category ) : view( "menu", menu, category ) {}
+    cata::godot_bridge::native_view view;
+    /// Last entry list sent, so unchanged entries aren't resent on every redraw.
+    std::string sent_entries;
+    /// Where to show the menu as a context menu (see `godot_menu_anchor.h`).
+    std::optional<point> anchor;
+};
+
+auto native_menus() -> std::map<const uilist *, std::weak_ptr<native_menu>> & // *NOPAD*
+{
+    static auto menus = std::map<const uilist *, std::weak_ptr<native_menu>> {};
+    return menus;
+}
+
+/// Menus whose last query ended on its timeout, kept open until they are queried again. A caller
+/// that asks on every cursor blink (the map editor) would otherwise close and reopen the Godot
+/// menu each time.
+using held_menus = std::map<const uilist *, shared_ptr_fast<ui_adaptor>>;
+auto menus_held_after_timeout() -> held_menus & // *NOPAD*
+{
+    static auto held = held_menus{};
+    return held;
+}
+
+auto pending_menu_anchor() -> std::optional<point> & // *NOPAD*
+{
+    static auto anchor = std::optional<point> {};
+    return anchor;
+}
+
+auto native_menu_of( const uilist *menu ) -> std::shared_ptr<native_menu>
+{
+    const auto found = native_menus().find( menu );
+    return found == native_menus().end() ? nullptr : found->second.lock();
+}
+
+/// Draws the menu's side panel (its callback's `refresh`, into the window `pad_left` or
+/// `pad_right` makes room in) and writes it as `side`: `{lines, cols, left}`.
+auto write_native_side( JsonOut &jsout, uilist &menu ) -> void
+{
+    if( ( menu.pad_left <= 0 && menu.pad_right <= 0 ) || !menu.window ) {
+        return;
+    }
+    werase( menu.window );
+    if( menu.callback != nullptr ) {
+        menu.callback->refresh( &menu );
+    }
+    // Callbacks draw a divider next to the entries and leave the menu's border alone.
+    const auto left = menu.pad_left > 0;
+    const auto columns = left ?
+                         cata::godot_bridge::window_columns{ .left = 1, .width = menu.pad_left - 1 } :
+                         cata::godot_bridge::window_columns{ .left = menu.w_width - menu.pad_right, .width = menu.pad_right - 1, .skip_divider = true };
+    jsout.member( "side" );
+    jsout.start_object();
+    jsout.member( "lines" );
+    cata::godot_bridge::write_window_spans( jsout, menu.window, columns );
+    jsout.member( "cols", columns.width );
+    jsout.member( "left", left );
+    jsout.end_object();
+}
+
+auto hotkey_label( int hotkey ) -> std::string
+{
+    if( hotkey <= 0 ) {
+        return {};
+    }
+    return inp_mngr.get_keyname( hotkey, input_event_t::keyboard );
+}
+
+} // namespace
+
+auto cata::godot_bridge::anchor_next_menu( const point px ) -> void
+{
+    pending_menu_anchor() = px;
+}
+
+auto cata::godot_bridge::take_menu_anchor() -> std::optional<point>
+{
+    return std::exchange( pending_menu_anchor(), std::nullopt );
+}
+#endif // TILES
 
 catacurses::window new_centered_win( int nlines, int ncols )
 {
@@ -123,6 +219,10 @@ uilist::uilist( const std::string &msg, std::initializer_list<const char *const>
 
 uilist::~uilist()
 {
+#if defined(TILES)
+    native_menus().erase( this );
+    menus_held_after_timeout().erase( this );
+#endif
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
     if( current_ui ) {
         current_ui->reset();
@@ -445,6 +545,13 @@ auto uilist::cycle_category( const bool forward ) -> void
 
 void uilist::inputfilter()
 {
+#if defined(TILES)
+    // The Godot menu shows the filter itself; keep the text field out of the curses frame.
+    auto suppression = std::optional<cata::godot_bridge::curses_draw_suppression>();
+    if( native_menu_of( this ) ) {
+        suppression.emplace();
+    }
+#endif
     input_context ctxt = create_filter_input_context();
     filter_popup = std::make_unique<string_input_popup>();
     filter_popup->context( ctxt ).text( filter )
@@ -1022,6 +1129,92 @@ bool uilist::scrollby( const int scrollby )
 shared_ptr_fast<ui_adaptor> uilist::create_or_get_ui_adaptor()
 {
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
+#if defined(TILES)
+    if( !current_ui && cata::godot_bridge::native_screens() ) {
+        ui = current_ui = make_shared_fast<ui_adaptor>();
+        auto menu = std::make_shared<native_menu>( this, input_category );
+        menu->anchor = cata::godot_bridge::take_menu_anchor();
+        menu->view.attach( *current_ui );
+        native_menus()[this] = menu;
+        current_ui->on_redraw( [this, menu]( ui_adaptor & ) {
+            using cata::godot_bridge::write_spans;
+            const auto entries_message = menu->view.compose( "entries", [this]( JsonOut & jsout ) {
+                jsout.member( "entries" );
+                jsout.start_array();
+                for( const auto &entry : entries ) {
+                    const auto &color = entry.enabled || entry.force_color ? entry.text_color : disabled_color;
+                    jsout.start_object();
+                    jsout.member( "text" );
+                    write_spans( jsout, entry.txt, color );
+                    if( !entry.ctxt.empty() ) {
+                        jsout.member( "column" );
+                        write_spans( jsout, entry.ctxt, color );
+                    }
+                    // A mark drawn over the start of the entry, such as a favorite's star.
+                    const auto &extra = entry.extratxt;
+                    const auto extra_text = extra.sym != 0 ? utf32_to_utf8( extra.sym ) : extra.txt;
+                    if( !extra_text.empty() ) {
+                        jsout.member( "extra" );
+                        write_spans( jsout, extra_text, extra.color == c_unset ? color : extra.color );
+                    }
+                    if( desc_enabled && !entry.desc.empty() ) {
+                        jsout.member( "desc" );
+                        write_spans( jsout, entry.desc, text_color );
+                    }
+                    jsout.member( "key", hotkey_label( entry.hotkey ) );
+                    jsout.member( "enabled", entry.enabled );
+                    jsout.end_object();
+                }
+                jsout.end_array();
+            } );
+            if( entries_message != menu->sent_entries ) {
+                menu->view.send( entries_message );
+                menu->sent_entries = entries_message;
+            }
+            menu->view.publish( [this, menu]( JsonOut & jsout ) {
+                if( menu->anchor ) {
+                    jsout.member( "anchor" );
+                    jsout.start_array();
+                    jsout.write( menu->anchor->x );
+                    jsout.write( menu->anchor->y );
+                    jsout.end_array();
+                }
+                jsout.member( "title" );
+                write_spans( jsout, title, title_color );
+                jsout.member( "text" );
+                write_spans( jsout, text, text_color );
+                jsout.member( "footer" );
+                write_spans( jsout, footer_text, text_color );
+                jsout.member( "shown", fentries );
+                jsout.member( "selected", selected );
+                jsout.member( "filter", filter );
+                jsout.member( "filtering", filter_popup != nullptr );
+                jsout.member( "can_filter", filtering );
+                jsout.member( "category", current_category < categories.size() ?
+                              categories[current_category] : std::string() );
+                jsout.member( "categories", categories.size() > 1 );
+                jsout.member( "describe", desc_enabled );
+                jsout.member( "cancel", allow_cancel );
+                jsout.member( "filter_key", cata::godot_bridge::key_label( "FILTER", input_category ) );
+                write_native_side( jsout, *this );
+            } );
+        } );
+        current_ui->on_screen_resize( [this]( ui_adaptor & ui ) {
+            setup();
+            // The callback draws its side panel into the menu's window, which is captured off screen
+            // and sent along (see `write_native_side`).
+            if( pad_left > 0 || pad_right > 0 ) {
+                w_x = TERMX + 1;
+                w_y = 0;
+                window = cata::godot_bridge::capture_window( w_height, w_width );
+            }
+            // Godot draws the menu, so it takes no room in the curses frame.
+            ui.position( point_zero, point_zero );
+        } );
+        current_ui->mark_resize();
+        return current_ui;
+    }
+#endif
     if( !current_ui ) {
         ui = current_ui = make_shared_fast<ui_adaptor>();
         current_ui->on_redraw( [this]( ui_adaptor & ui ) {
@@ -1056,6 +1249,9 @@ void uilist::query( bool loop, int timeout )
     input_context ctxt = create_main_input_context();
 
     shared_ptr_fast<ui_adaptor> ui = create_or_get_ui_adaptor();
+#if defined(TILES)
+    menus_held_after_timeout().erase( this );
+#endif
 
     ui_manager::redraw();
 
@@ -1100,6 +1296,19 @@ void uilist::query( bool loop, int timeout )
                 }
             }
         } else if( !fentries.empty() && ret_act == "CONFIRM" ) {
+#if defined(TILES)
+            // An entry clicked in the Godot menu arrives as a pick followed by CONFIRM.
+            if( const auto pick = cata::godot_bridge::take_pick( this ) ) {
+                const auto shown = std::ranges::find( fentries, *pick );
+                if( shown != fentries.end() ) {
+                    fselected = static_cast<int>( std::distance( fentries.begin(), shown ) );
+                    selected = *pick;
+                    if( callback != nullptr ) {
+                        callback->select( this );
+                    }
+                }
+            }
+#endif
             if( entries[ selected ].enabled ) {
                 ret = entries[ selected ].retval; // valid
             } else if( allow_disabled ) {
@@ -1127,6 +1336,11 @@ void uilist::query( bool loop, int timeout )
 
         ui_manager::redraw();
     } while( loop && ret == UILIST_WAIT_INPUT );
+#if defined(TILES)
+    if( ret == UILIST_TIMEOUT && cata::godot_bridge::native_screens() ) {
+        menus_held_after_timeout()[this] = ui;
+    }
+#endif
 }
 
 ///@}
