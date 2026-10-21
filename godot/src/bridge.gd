@@ -208,8 +208,8 @@ func _on_json(text: String) -> void:
 		"hello":
 			if not _said_hello:
 				_said_hello = true
-				var size := get_viewport().get_visible_rect().size
-				send({"t": "hello", "w": int(size.x), "h": int(size.y)})
+				var size := Display.game_size(get_viewport().get_visible_rect().size)
+				send({"t": "hello", "w": size.x, "h": size.y})
 				connected.emit()
 		"frame":
 			frame_meta.emit(bool(msg.get("main", false)), msg.get("views", []))
@@ -259,5 +259,6 @@ func press(view_id: int, act: String) -> void:
 	send({"t": "press", "id": view_id, "act": act})
 
 
-func send_resize(size: Vector2) -> void:
-	send({"t": "resize", "w": int(size.x), "h": int(size.y)})
+## Tells the game the window's size in game pixels.
+func send_resize(size: Vector2i) -> void:
+	send({"t": "resize", "w": size.x, "h": size.y})

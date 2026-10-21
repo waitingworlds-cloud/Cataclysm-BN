@@ -7,6 +7,7 @@ extends Control
 ## It shows everything the old sidebar did. Parts the sidebar lets players switch off (compass,
 ## minimap, log, armor, mod panels) follow the sidebar options menu, opened with the gear button.
 
+const DisplayCard := preload("res://src/ui/display_card.gd")
 const DOCK := [
 	["inventory", "Bag", "backpack", "Open your inventory"],
 	["craft", "Craft", "hammer", "Craft items"],
@@ -64,7 +65,7 @@ const SURVIVOR_WIDTH := 440
 const GAP := 16
 ## Action bar button widths, widest first; the narrowest drops the labels.
 const DOCK_WIDTHS := [70, 58, 44]
-const CORNER_WIDTH := 3 * 40 + 2 * 6
+const CORNER_WIDTH := 4 * 40 + 3 * 6
 
 ## Weather words and the icon that fits them, checked in order.
 const WEATHER_ICONS := [
@@ -148,13 +149,15 @@ func _ready() -> void:
 	_build_hover()
 	Bridge.minimap_received.connect(func(texture: ImageTexture): _minimap.texture = texture)
 	Bridge.connected.connect(_send_insets)
+	Display.changed.connect(_send_insets)
 	_send_insets()
 
 
 ## Tells the game which edges the bars cover, so it keeps the map view (and the player at its
 ## center) inside the space that is left.
 func _send_insets() -> void:
-	Bridge.send({"t": "insets", "left": 0, "top": HEADER_HEIGHT, "right": SIDE_WIDTH, "bottom": BAR_HEIGHT})
+	Bridge.send({"t": "insets", "left": 0, "top": Display.to_game(HEADER_HEIGHT),
+			"right": Display.to_game(SIDE_WIDTH), "bottom": Display.to_game(BAR_HEIGHT)})
 
 
 # --- Shared pieces -------------------------------------------------------------------------------
@@ -697,6 +700,7 @@ func _build_bar() -> void:
 	corner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(corner)
 	for z in [["zoom_out", "zoom-out", "Zoom out"], ["zoom_in", "zoom-in", "Zoom in"],
+			["", "monitor", "Display: interface and map size (Ctrl =, Ctrl −, with Shift for the map)"],
 			["toggle_panel_adm", "settings", "HUD options"]]:
 		var b := _icon_button(z[1], z[2], 40, 18)
 		var plain := Slate.box(Color(1, 1, 1, 0.05), 10, Slate.BORDER, 0)
@@ -709,12 +713,22 @@ func _build_bar() -> void:
 		b.add_theme_color_override("icon_normal_color", Slate.SOFT)
 		b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		var action: String = z[0]
-		b.pressed.connect(func(): Bridge.run_action(action))
+		if action == "":
+			b.pressed.connect(_open_display_card)
+		else:
+			b.pressed.connect(func(): Bridge.run_action(action))
 		corner.add_child(b)
 		if action == "toggle_panel_adm":
 			_options_button = b
 	resized.connect(_fit_bar)
 	_fit_bar()
+
+
+func _open_display_card() -> void:
+	if get_node_or_null("DisplayCard") == null:
+		var card := DisplayCard.new()
+		card.name = "DisplayCard"
+		add_child(card)
 
 
 ## Narrow windows first give up the room that centers the actions, then tighten the buttons.
@@ -747,6 +761,8 @@ func _build_hover() -> void:
 	_hover_text.add_theme_font_override("normal_font", Slate.mono())
 	_hover_text.add_theme_color_override("default_color", Slate.SOFT)
 	_hover_text.add_theme_constant_override("line_separation", 3)
+	# Its own width from the start, so the first card doesn't wrap at zero width and come out tall.
+	_hover_text.custom_minimum_size.x = HOVER_WIDTH - 28
 	_hover.add_child(_hover_text)
 
 

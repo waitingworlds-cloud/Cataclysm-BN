@@ -58,6 +58,18 @@ there. Icons and fonts use Godot's "Keep File" import so the app reads them as f
 from this folder and an exported app; a new icon needs an `.import` file holding
 `[remap]` and `importer="keep"`, like the others.
 
+## Big screens
+
+`src/display.gd` scales the interface with the screen: 1080p is 100%, 1440p 125%, 4K 200%. The
+map has its own integer scale (1×, 2× on 1440p, 3× on 4K): the game renders at the window size
+divided by it and Godot shows the frame enlarged with nearest filtering, so tiles stay sharp and
+the game draws far fewer pixels. Sizes, insets and mouse positions sent to the game are in game
+pixels (`Display.game_size`, `Display.to_game`).
+
+Ctrl+= / Ctrl+- change the interface size, Ctrl+Shift+= / Ctrl+Shift+- the map size, Ctrl+0 goes
+back to automatic. The monitor button in the action bar opens the same settings as a card. The
+choice is saved in `user://display.cfg`.
+
 ## What is drawn by Godot
 
 Almost everything outside the map. Each screen keeps every key it had, and shows everything the old

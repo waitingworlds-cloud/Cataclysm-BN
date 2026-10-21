@@ -20,7 +20,10 @@ var view_layer: Control
 var splash: Control
 var views := {}
 var visible_views := []
-var _last_size := Vector2.ZERO
+var _last_size := Vector2i.ZERO
+var _toast: PanelContainer
+var _toast_label: Label
+var _toast_tween: Tween
 
 
 func _ready() -> void:
@@ -54,6 +57,7 @@ func _ready() -> void:
 
 	splash = _make_splash()
 	add_child(splash)
+	_build_toast()
 
 	Bridge.connected.connect(_on_connected)
 	Bridge.frame_received.connect(_on_frame)
@@ -63,6 +67,7 @@ func _ready() -> void:
 	Bridge.entries_received.connect(_on_entries)
 	Bridge.view_closed.connect(_on_view_closed)
 	Bridge.game_exited.connect(_on_game_exited)
+	Display.changed.connect(_fit_frame)
 	if Bridge.launch_error != "":
 		_show_splash_message(Bridge.launch_error)
 
@@ -98,7 +103,7 @@ func _show_splash_message(text: String) -> void:
 
 
 func _on_connected() -> void:
-	_last_size = size
+	_last_size = Display.game_size(size)
 
 
 func _on_game_exited(reason: String) -> void:
@@ -107,15 +112,76 @@ func _on_game_exited(reason: String) -> void:
 
 
 func _process(_delta: float) -> void:
-	if Bridge.is_connected_to_game() and size != _last_size and size.x > 0:
-		_last_size = size
-		Bridge.send_resize(size)
+	var game_size := Display.game_size(size)
+	if Bridge.is_connected_to_game() and game_size != _last_size and size.x > 0:
+		_last_size = game_size
+		Bridge.send_resize(game_size)
 
 
 func _on_frame(texture: ImageTexture) -> void:
 	frame_view.texture = texture
-	frame_view.size = texture.get_size()
+	_fit_frame()
 	splash.visible = false
+
+
+## The game draws the map at a lower resolution than the screen; show it enlarged. Mouse
+## positions inside the frame stay in game pixels.
+func _fit_frame() -> void:
+	frame_view.scale = Vector2.ONE * Display.frame_scale()
+	if frame_view.texture != null:
+		frame_view.size = frame_view.texture.get_size()
+
+
+func _build_toast() -> void:
+	_toast = PanelContainer.new()
+	_toast.add_theme_stylebox_override("panel", Slate.pill_box(Slate.CARD_SOLID, 16, 8))
+	_toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_toast.anchor_left = 0.5
+	_toast.anchor_right = 0.5
+	_toast.offset_top = 72
+	_toast.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_toast.modulate.a = 0.0
+	_toast_label = Slate.label("", 14, Slate.TEXT, Slate.semibold())
+	_toast.add_child(_toast_label)
+	add_child(_toast)
+
+
+func _show_toast(text: String) -> void:
+	_toast_label.text = text
+	_toast.reset_size()
+	_toast.offset_left = -_toast.size.x / 2
+	_toast.offset_right = _toast.size.x / 2
+	if _toast_tween != null:
+		_toast_tween.kill()
+	_toast.modulate.a = 1.0
+	_toast_tween = create_tween()
+	_toast_tween.tween_interval(1.6)
+	_toast_tween.tween_property(_toast, "modulate:a", 0.0, 0.4)
+
+
+## Display shortcuts handled here instead of in the game: Ctrl+= / Ctrl+- change the interface
+## size, with Shift the map size, and Ctrl+0 goes back to automatic.
+func _display_shortcut(event: InputEventKey) -> bool:
+	if not event.pressed or not event.ctrl_pressed or event.alt_pressed or event.meta_pressed:
+		return false
+	var direction := 0
+	match event.keycode:
+		KEY_EQUAL, KEY_PLUS, KEY_KP_ADD:
+			direction = 1
+		KEY_MINUS, KEY_KP_SUBTRACT:
+			direction = -1
+		KEY_0, KEY_KP_0:
+			Display.reset()
+			_show_toast(Display.describe())
+			return true
+		_:
+			return false
+	if event.shift_pressed:
+		Display.step_map(direction)
+	else:
+		Display.step_ui(direction)
+	_show_toast(Display.describe())
+	return true
 
 
 func _on_frame_meta(main_view: bool, shown: Array) -> void:
@@ -176,6 +242,9 @@ func _on_view_closed(id: int) -> void:
 func _input(event: InputEvent) -> void:
 	# The game owns the keyboard: every key goes to it, even while a Godot menu is open.
 	if event is InputEventKey:
+		if _display_shortcut(event):
+			get_viewport().set_input_as_handled()
+			return
 		for msg in Keys.translate(event):
 			if OS.has_environment("BN_BRIDGE_DEBUG"):
 				print("key ", event, " -> ", msg)

@@ -15,6 +15,7 @@ boot_splash/show_image=false
 
 [autoload]
 
+Display="*res://src/display.gd"
 Bridge="*res://src/bridge.gd"
 
 [display]

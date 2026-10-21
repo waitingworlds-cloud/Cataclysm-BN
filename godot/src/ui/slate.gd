@@ -51,6 +51,7 @@ const CURSES := {
 
 static var _fonts := {}
 static var _icons := {}
+static var _icon_scale := 1.0
 static var _theme: Theme
 static var _separator: RegEx
 static var _lead: RegEx
@@ -123,16 +124,34 @@ static func mono_bold() -> FontFile:
 	return font("JetBrainsMono-Bold")
 
 
-## White line icon from icons/, rendered crisply at `size` pixels; tint with modulate.
+## White line icon from icons/, `size` interface units wide and rendered crisply at the current
+## interface scale; tint with modulate.
 static func icon(name: String, size := 20) -> Texture2D:
 	var key := "%s@%d" % [name, size]
 	if not _icons.has(key):
-		var data := FileAccess.get_file_as_bytes("res://icons/%s.svg" % name)
-		var image := Image.new()
-		if data.is_empty() or image.load_svg_from_buffer(data, size / 24.0) != Error.OK:
-			image = Image.create(size, size, false, Image.FORMAT_RGBA8)
-		_icons[key] = ImageTexture.create_from_image(image)
+		var texture := ImageTexture.new()
+		_draw_icon(texture, name, size)
+		_icons[key] = texture
 	return _icons[key]
+
+
+## Redraws every icon for a new interface scale; nodes showing them update on their own.
+static func set_icon_scale(scale: float) -> void:
+	if is_equal_approx(scale, _icon_scale):
+		return
+	_icon_scale = scale
+	for key in _icons:
+		var parts := String(key).split("@")
+		_draw_icon(_icons[key], parts[0], int(parts[1]))
+
+
+static func _draw_icon(texture: ImageTexture, name: String, size: int) -> void:
+	var data := FileAccess.get_file_as_bytes("res://icons/%s.svg" % name)
+	var image := Image.new()
+	if data.is_empty() or image.load_svg_from_buffer(data, size * _icon_scale / 24.0) != Error.OK:
+		image = Image.create(size, size, false, Image.FORMAT_RGBA8)
+	texture.set_image(image)
+	texture.set_size_override(Vector2i(size, size))
 
 
 static func box(bg: Color, radius := 16, border := BORDER, border_width := 1) -> StyleBoxFlat:
