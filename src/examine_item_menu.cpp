@@ -32,6 +32,7 @@
 #if defined(TILES)
 #include "color.h"
 #include "godot_bridge.h"
+#include "godot_hotbar.h"
 #include "json.h"
 #endif
 
@@ -63,6 +64,7 @@ auto publish_native( cata::godot_bridge::native_view &view, const native_item_me
         jsout.member( "name" );
         write_spans( jsout, menu.it.display_name(), menu.it.color_in_inventory() );
         jsout.member( "category", menu.it.get_category().name() );
+        jsout.member( "type", cata::godot_hotbar::type_for( menu.it ) );
         jsout.member( "sym", menu.it.symbol() );
         jsout.member( "sym_color", string_from_color( menu.it.color() ) );
         jsout.member( "info" );

@@ -162,6 +162,8 @@ func _show_toast(text: String) -> void:
 ## Shortcuts handled here instead of in the game: Ctrl+= / Ctrl+- change the interface size, with
 ## Shift the map size, Ctrl+0 goes back to automatic, and Ctrl+K opens the command search.
 func _display_shortcut(event: InputEventKey) -> bool:
+	if _hotbar_shortcut(event):
+		return true
 	if not event.pressed or not event.ctrl_pressed or event.alt_pressed or event.meta_pressed:
 		return false
 	var direction := 0
@@ -192,6 +194,25 @@ func _display_shortcut(event: InputEventKey) -> bool:
 ## True when the map and HUD are showing with no game screen over them.
 func _on_map() -> bool:
 	return hud.visible and visible_views.is_empty()
+
+
+## Alt+1 to Alt+9: on the map, use that hotbar slot; on an item card, pin the item to it.
+func _hotbar_shortcut(event: InputEventKey) -> bool:
+	if not event.pressed or not event.alt_pressed or event.ctrl_pressed or event.meta_pressed:
+		return false
+	if event.keycode < KEY_1 or event.keycode > KEY_9:
+		return false
+	var slot := int(event.keycode - KEY_1)
+	if event.echo:
+		return true
+	if _on_map():
+		Hotbar.use(slot)
+		return true
+	for id in visible_views:
+		if views.has(id) and views[id] is ItemActionsView:
+			views[id].pin_to(slot)
+			return true
+	return false
 
 
 func _on_frame_meta(main_view: bool, shown: Array) -> void:

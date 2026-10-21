@@ -17,6 +17,7 @@ boot_splash/show_image=false
 
 Display="*res://src/display.gd"
 Bridge="*res://src/bridge.gd"
+Hotbar="*res://src/hotbar.gd"
 
 [display]
 

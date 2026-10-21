@@ -23,6 +23,7 @@
 #include "effect.h"
 #include "fstream_utils.h"
 #include "game.h"
+#include "godot_hotbar.h"
 #include "game_constants.h"
 #include "game_ui.h"
 #include "godot_bridge.h"
@@ -3542,6 +3543,7 @@ auto cata::godot_hud::build() -> std::string
     write_runs( jsout, character_funcs::fmt_wielded_weapon( u ), c_light_gray );
     jsout.member( "style", u.martial_arts_data->selected_style_name( u ) );
     jsout.member( "armed", u.is_armed() );
+    cata::godot_hotbar::write( jsout );
 
     write_body( jsout, u );
     const auto thirst = u.get_thirst_description();

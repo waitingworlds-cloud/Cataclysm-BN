@@ -966,6 +966,9 @@ action_id handle_action_menu()
     if( const auto requested = cata::godot_commands::take_requested() ) {
         return *requested;
     }
+    if( cata::godot_commands::run_requested_task() ) {
+        return ACTION_NULL;
+    }
 #endif
     const input_context ctxt = get_default_mode_input_context();
 

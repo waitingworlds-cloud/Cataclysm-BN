@@ -14,7 +14,11 @@ const ACTION_ICONS := {
 	"AUTOPICKUP_ADD": "hand", "AUTOPICKUP_REMOVE": "hand",
 }
 
+const SlateButton := preload("res://src/ui/slate_button.gd")
+
 var view_id := 0
+## Item type id, for pinning the item to the hotbar.
+var item_type := ""
 
 var _card: PanelContainer
 var _glyph: Label
@@ -28,6 +32,7 @@ var _rows: Array = []
 var _hints: HBoxContainer
 var _sent_actions: Array = []
 var _selected := -1
+var _pin: SlateButton
 
 
 func _ready() -> void:
@@ -175,11 +180,35 @@ func _build_footer() -> Control:
 	sb.content_margin_bottom = 10
 	bar.add_theme_stylebox_override("panel", sb)
 	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	bar.add_child(row)
+	_pin = SlateButton.new("star", "Pin to hotbar")
+	_pin.set_key("Alt 1–9")
+	_pin.tooltip_text = "Put this item on the hotbar. Alt+1 to Alt+9 pick the slot; on the map they use it."
+	_pin.pressed.connect(func(): pin_to(-1))
+	row.add_child(_pin)
 	_hints = HBoxContainer.new()
 	_hints.add_theme_constant_override("separation", 16)
 	_hints.alignment = BoxContainer.ALIGNMENT_END
-	bar.add_child(_hints)
+	_hints.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(_hints)
 	return bar
+
+
+## Pins the item to hotbar `slot` (0 to 8), or the first free one when -1.
+func pin_to(slot: int) -> void:
+	if item_type == "":
+		return
+	var used := Hotbar.pin(item_type, slot)
+	_update_pin()
+	if used < 0:
+		_pin.set_text("Hotbar is full: use Alt+1–9")
+
+
+func _update_pin() -> void:
+	var at := Hotbar.slots.find(item_type)
+	_pin.set_text("On hotbar · slot %d" % (at + 1) if at >= 0 else "Pin to hotbar")
 
 
 func _layout() -> void:
@@ -190,6 +219,9 @@ func _layout() -> void:
 
 
 func apply(msg: Dictionary) -> void:
+	item_type = String(msg.get("type", ""))
+	_pin.visible = item_type != ""
+	_update_pin()
 	_glyph.text = String(msg.get("sym", "?"))
 	_glyph.add_theme_color_override("font_color", Slate.curses(String(msg.get("sym_color", "c_white"))))
 	_name.text = Slate.bbcode(msg.get("name", []), Slate.TEXT)

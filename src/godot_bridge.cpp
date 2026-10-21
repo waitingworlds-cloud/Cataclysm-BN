@@ -26,6 +26,7 @@
 #include "debug.h"
 #include "godot_bridge_socket.h"
 #include "godot_commands.h"
+#include "godot_hotbar.h"
 #include "input.h"
 #include "json.h"
 #include "output.h"
@@ -478,6 +479,17 @@ auto translate_event( SDL_Event &ev ) -> event_result
                 return press_action( id, "DEFAULTMODE" );
             }
             cata::godot_commands::request( id );
+            return press_action( "action_menu", "DEFAULTMODE" );
+        }
+        if( type == "hotbar" ) {
+            cata::godot_hotbar::set_slots( obj.get_string_array( "slots" ) );
+            // Redraw so the HUD reports the new slots.
+            return press_action( "", "DEFAULTMODE" );
+        }
+        if( type == "hotbar_use" ) {
+            cata::godot_commands::request_task( [slot = obj.get_int( "slot" )] {
+                cata::godot_hotbar::use( slot );
+            } );
             return press_action( "action_menu", "DEFAULTMODE" );
         }
         if( type == "pick" || type == "press" ) {

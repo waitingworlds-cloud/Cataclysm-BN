@@ -9,6 +9,7 @@ extends Control
 
 const DisplayCard := preload("res://src/ui/display_card.gd")
 const CommandPalette := preload("res://src/ui/command_palette.gd")
+const HotbarStrip := preload("res://src/ui/hotbar_strip.gd")
 const DOCK := [
 	["inventory", "Bag", "backpack", "Open your inventory"],
 	["craft", "Craft", "hammer", "Craft items"],
@@ -131,6 +132,7 @@ var _bar: PanelContainer
 var _balance: Control
 var _dock_buttons := {}
 var _options_button: Button
+var _hotbar: HotbarStrip
 
 # Hover card: what is under the mouse on the map (the game's "Mouse View" box), shown like a
 # tooltip once the mouse rests.
@@ -146,6 +148,7 @@ func _ready() -> void:
 	_build_header()
 	_build_side()
 	_build_bar()
+	_build_hotbar()
 	_build_survivor_card()
 	_build_hover()
 	Bridge.minimap_received.connect(func(texture: ImageTexture): _minimap.texture = texture)
@@ -728,6 +731,17 @@ func _build_bar() -> void:
 	_fit_bar()
 
 
+## Item hotbar in the map's bottom-left corner, just above the action bar.
+func _build_hotbar() -> void:
+	_hotbar = HotbarStrip.new()
+	_hotbar.anchor_top = 1.0
+	_hotbar.anchor_bottom = 1.0
+	_hotbar.offset_left = 16
+	_hotbar.offset_bottom = -BAR_HEIGHT - 12
+	_hotbar.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	add_child(_hotbar)
+
+
 func open_commands() -> void:
 	if get_node_or_null("CommandPalette") == null:
 		var palette := CommandPalette.new()
@@ -852,6 +866,7 @@ func apply(hud: Dictionary) -> void:
 		_dock_buttons[action].set_key(_key(action))
 	_options_button.tooltip_text = _with_key("HUD options: choose what the HUD shows", "toggle_panel_adm")
 	_update_hover()
+	_hotbar.apply(hud.get("hotbar", []))
 
 
 func _update_needs(hud: Dictionary) -> void:

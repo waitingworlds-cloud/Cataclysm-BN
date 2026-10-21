@@ -148,6 +148,12 @@ auto requested_action() -> std::optional<action_id> & // *NOPAD*
     return requested;
 }
 
+auto requested_task() -> std::function<void()> & // *NOPAD*
+{
+    static auto task = std::function<void()> {};
+    return task;
+}
+
 } // namespace
 
 auto cata::godot_commands::write( JsonOut &jsout ) -> void
@@ -182,6 +188,21 @@ auto cata::godot_commands::request( const std::string &id ) -> void
 {
     const auto act = look_up_action( id );
     requested_action() = act == ACTION_NULL ? std::nullopt : std::optional<action_id>( act );
+}
+
+auto cata::godot_commands::request_task( std::function<void()> task ) -> void
+{
+    requested_task() = std::move( task );
+}
+
+auto cata::godot_commands::run_requested_task() -> bool
+{
+    const auto task = std::exchange( requested_task(), {} );
+    if( !task ) {
+        return false;
+    }
+    task();
+    return true;
 }
 
 auto cata::godot_commands::take_requested() -> std::optional<action_id>
