@@ -256,23 +256,13 @@ auto cata::godot_square::options_at( const tripoint_bub_ms &target ) -> std::vec
     };
 
     if( critter != nullptr ) {
-        // Talking comes first with someone who isn't hostile, attacking first with one who is.
+        // Attacking comes first with someone hostile; with anyone else it is offered last.
         const auto hostile = critter->attitude_to( u ) == Attitude::A_HOSTILE;
-        const auto add_attack = [&] {
-            if( is_adjacent )
-            {
-                add( choice::attack, string_format( hostile ? _( "Attack %s" ) : _( "Push or attack %s" ),
-                                                    critter->disp_name() ), ACTION_NULL );
-            }
-        };
-        if( hostile ) {
-            add_attack();
+        if( hostile && is_adjacent ) {
+            add( choice::attack, string_format( _( "Attack %s" ), critter->disp_name() ), ACTION_NULL );
         }
         if( critter->is_npc() && dist <= 6 ) {
             add( choice::talk, string_format( _( "Talk to %s" ), critter->disp_name() ), ACTION_CHAT );
-        }
-        if( !hostile ) {
-            add_attack();
         }
         if( u.primary_weapon().is_gun() ) {
             add( choice::fire, string_format( _( "Fire at %s" ), critter->disp_name() ), ACTION_FIRE );
@@ -298,6 +288,11 @@ auto cata::godot_square::options_at( const tripoint_bub_ms &target ) -> std::vec
     }
     if( is_adjacent && iexamine::can_jump_over_tile( u, target ) ) {
         add( choice::jump, _( "Jump over" ), ACTION_JUMP );
+    }
+    // Hitting someone who isn't hostile is never the first thing offered.
+    if( critter != nullptr && is_adjacent && critter->attitude_to( u ) != Attitude::A_HOSTILE ) {
+        add( choice::attack, string_format( _( "Push or attack %s" ), critter->disp_name() ),
+             ACTION_NULL );
     }
     if( !is_self && u.sees( target ) ) {
         add( choice::describe, _( "Look closer" ), ACTION_NULL );
@@ -390,7 +385,10 @@ auto cata::godot_square::write_tip( JsonOut &jsout, const tripoint_bub_ms &targe
         const auto mood = mon != nullptr ? mon->get_attitude() :
                           std::pair<std::string, nc_color>( Creature::get_attitude_ui_data( attitude ).first.translated(),
                                   Creature::get_attitude_ui_data( attitude ).second );
-        lines.push_back( { .text = string_format( "%s  ·  %s", mood.first, health_word( *critter ) ),
+        // The game's attitude words end in a full stop ("Friendly."); the tip joins them instead.
+        const auto word = mood.first.ends_with( '.' ) ? mood.first.substr( 0, mood.first.size() - 1 ) :
+                          mood.first;
+        lines.push_back( { .text = string_format( "%s  ·  %s", word, health_word( *critter ) ),
                            .color = mood.second } );
     } else if( is_self ) {
         title = _( "You" );
@@ -432,7 +430,7 @@ auto cata::godot_square::write_tip( JsonOut &jsout, const tripoint_bub_ms &targe
     jsout.member( "acts" );
     jsout.start_array();
     for( const auto &o : options_at( target ) | std::views::take( shown_acts ) ) {
-        jsout.write( o.text );
+        jsout.write( name_of( o.what ) );
     }
     jsout.end_array();
     jsout.end_object();

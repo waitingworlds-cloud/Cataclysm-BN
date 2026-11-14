@@ -39,7 +39,7 @@ func _refresh() -> void:
 		var info = _hud[i] if i < _hud.size() else null
 		# Until the game reports a newly pinned slot, show it as pinned but unknown.
 		if info == null and Hotbar.slots[i] != "":
-			info = {"type": Hotbar.slots[i], "name": Hotbar.slots[i], "count": 0, "sym": "?"}
+			info = {"type": Hotbar.slots[i], "name": Hotbar.slots[i], "count": -1, "sym": "?"}
 		if info != null and String(info.get("type", "")) != Hotbar.slots[i]:
 			info = null
 		(_slots[i] as Slot).show_item(info)
@@ -61,15 +61,16 @@ class Slot extends ItemSlot:
 			tooltip_text = "Empty slot %d. Pin an item from its item card (Alt+%d there)." % [index + 1, index + 1]
 			mouse_default_cursor_shape = Control.CURSOR_ARROW
 			return
+		# A count below zero is a pin the game hasn't reported on yet: shown plain, without a count.
 		var carried := int(info.get("count", 0))
 		selected = bool(info.get("wielded", false))
-		dimmed = carried <= 0
-		count = "x%d" % carried if carried != 1 else ""
+		dimmed = carried == 0
+		count = "x%d" % carried if carried > 1 or carried == 0 else ""
 		count_color = Slate.TEXT if carried > 0 else Slate.DANGER
 		set_item(String(info.get("type", "")), String(info.get("sym", "?")),
 				Slate.curses(String(info.get("color", "c_white"))))
 		tooltip_text = "%s%s\nAlt+%d or click: use  ·  right-click: remove  ·  drag: move" % [
-			String(info.get("name", "")), "" if carried > 0 else " (none carried)", index + 1]
+			String(info.get("name", "")), "" if carried != 0 else " (none carried)", index + 1]
 		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 
 	func _on_input(event: InputEvent) -> void:

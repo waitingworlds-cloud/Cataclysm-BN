@@ -55,7 +55,7 @@ auto take_choice() -> std::optional<choice>;
 auto write_reach( JsonOut &jsout ) -> void;
 
 /// Writes the HUD's `tip` member for the square under the resting mouse: a short summary (who or
-/// what is there, the ground, items) and what a right-click offers. Nothing for a square the
+/// what is there, the ground, items) and the names of the first choices a right-click offers. Nothing for a square the
 /// avatar can't see clearly; the full description stays in the look screens.
 auto write_tip( JsonOut &jsout, const tripoint_bub_ms &target ) -> void;
 

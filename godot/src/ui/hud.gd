@@ -81,6 +81,7 @@ const INJURY_NOTES := {
 const REACH_LABELS := {
 	"attack": "Attack", "talk": "Talk", "fire": "Fire", "open": "Open", "close": "Close",
 	"pick_up": "Pick up", "butcher": "Butcher", "examine": "Examine", "jump": "Jump over",
+	"walk": "Walk here", "describe": "Look closer",
 }
 
 const GUT := 8
@@ -262,6 +263,10 @@ func _layout() -> void:
 	_frame.queue_redraw()
 	_fit_deck()
 	_fit_status()
+	# A panel can't be made smaller than its content, so set the sizes again now that the deck
+	# and the status strip have been fitted to the new width.
+	_deck.size = Vector2(maxf(size.x - 2 * GUT, 80), DECK_HEIGHT)
+	_status.size = Vector2(map.size.x, TOP_HEIGHT)
 	_send_insets()
 
 
@@ -523,7 +528,7 @@ func _fit_status() -> void:
 		_groups[id][0].visible = bool(_wanted.get(id, false))
 	var hidden: PackedStringArray = []
 	for id in ["moon", "wind", "light", "temperature"]:
-		if _status_needed() <= _status.size.x - 32:
+		if _status_needed() <= map_rect().size.x - 32:
 			break
 		if _groups[id][0].visible:
 			_groups[id][0].visible = false
@@ -941,7 +946,7 @@ func _show_tip(tip: Dictionary) -> void:
 	_hover_title.add_theme_color_override("font_color", tones.get(tone, Slate.TEXT))
 	var lines: PackedStringArray = []
 	for line in (tip.get("lines", []) as Array).slice(0, HOVER_LINES):
-		var text := Slate.cap(String(line[0]).strip_edges())
+		var text := Slate.cap(String(line[0]).strip_edges().trim_suffix("."))
 		if text != "":
 			lines.append("[color=#%s]%s[/color]" % [_hex(Slate.curses(String(line[1]))), Slate.escape(text)])
 	_hover_text.visible = not lines.is_empty()
@@ -951,7 +956,7 @@ func _show_tip(tip: Dictionary) -> void:
 	if not acts.is_empty():
 		var names: PackedStringArray = []
 		for act in acts:
-			names.append(Slate.escape(String(act)))
+			names.append(Slate.escape(String(REACH_LABELS.get(String(act), String(act)))))
 		_hover_acts.text = "[color=#%s]RIGHT-CLICK[/color]  %s" % [_hex(Slate.CYAN), "  ·  ".join(names)]
 
 
