@@ -1,52 +1,65 @@
 class_name Slate
 extends RefCounted
-## The Slate visual language: map first, floating rounded cards, Manrope for interface text and
-## JetBrains Mono for numbers and key hints, amber accent.
+## The interface's visual language ("Holo Terminal"): opaque dark teal modules in a gunmetal
+## frame, cyan hairlines and chamfered corners, hazard yellow for the primary action and the
+## selection, red for threats. Rajdhani for interface text, Oxanium for headings and Share Tech
+## Mono for numbers and key hints.
 
-const GROUND := Color("#10151c")
-const CARD := Color(0.063, 0.082, 0.110, 0.92)
-const CARD_SOLID := Color("#151b24")
-const RAISED := Color("#1c2430")
-const BORDER := Color(1, 1, 1, 0.08)
-const BORDER_STRONG := Color(1, 1, 1, 0.14)
-const HOVER := Color(1, 1, 1, 0.07)
-const TRACK := Color(1, 1, 1, 0.10)
-const TEXT := Color("#eef2f6")
-const SOFT := Color("#c9d2dd")
-const MUTED := Color("#a7b3c2")
-const FAINT := Color("#6b7686")
-const ACCENT := Color("#f4b63f")
-const ACCENT_TEXT := Color("#10151c")
-const GOOD := Color("#5fd39a")
-const WARN := Color("#f4b63f")
-const DANGER := Color("#ff6b5e")
-const INFO := Color("#6aa8ff")
-const SCRIM := Color(0.02, 0.03, 0.05, 0.55)
+## The frame between modules.
+const GROUND := Color("#1a2d31")
+const CARD := Color("#07161a")
+const CARD_SOLID := Color("#07161a")
+const RAISED := Color("#0f272c")
+const BORDER := Color(0.369, 0.918, 0.831, 0.22)
+const BORDER_STRONG := Color(0.369, 0.918, 0.831, 0.45)
+const HOVER := Color(0.369, 0.918, 0.831, 0.10)
+const TRACK := Color(0.369, 0.918, 0.831, 0.13)
+const TEXT := Color("#d9f7f3")
+const SOFT := Color("#b4dfd9")
+const MUTED := Color("#8fc4bd")
+const FAINT := Color("#5f918b")
+## Hazard yellow: the primary action and whatever is selected.
+const ACCENT := Color("#fcee0a")
+const ACCENT_TEXT := Color("#0a1214")
+## Cyan: frames, headings and healthy readouts.
+const CYAN := Color("#5eead4")
+const GOOD := Color("#7cffb2")
+const WARN := Color("#ffb000")
+const DANGER := Color("#ff5a6a")
+const INFO := Color("#7cc8ff")
+const SCRIM := Color(0.016, 0.047, 0.055, 0.72)
+## Item slot plate: lit steel, so pixel sprites read against it.
+const PLATE_LIGHT := Color("#71888f")
+const PLATE_MID := Color("#475a61")
+const PLATE_DARK := Color("#2e3d43")
+const PLATE_BORDER := Color("#86aaaf")
+## Text sizes are tuned for a wider face; Rajdhani runs small, so sizes scale up to match.
+const TEXT_SCALE := 1.14
 
 ## Game (curses) color names mapped onto colors that read well on Slate cards.
 const CURSES := {
-	"black": Color("#8a94a3"),
-	"white": Color("#eef2f6"),
-	"light_gray": Color("#c9d2dd"),
-	"ltgray": Color("#c9d2dd"),
-	"dark_gray": Color("#7d8794"),
-	"dkgray": Color("#7d8794"),
-	"red": Color("#ff6b5e"),
-	"light_red": Color("#ff8a7f"),
-	"ltred": Color("#ff8a7f"),
-	"green": Color("#5fd39a"),
-	"light_green": Color("#8ee6b5"),
-	"ltgreen": Color("#8ee6b5"),
-	"blue": Color("#6aa8ff"),
-	"light_blue": Color("#9cc6ff"),
-	"ltblue": Color("#9cc6ff"),
-	"cyan": Color("#4fd1d9"),
-	"light_cyan": Color("#8de9ee"),
-	"ltcyan": Color("#8de9ee"),
-	"magenta": Color("#c58cff"),
-	"pink": Color("#f59ad2"),
-	"brown": Color("#d39a5f"),
-	"yellow": Color("#f4d35e"),
+	"black": Color("#7f9c98"),
+	"white": Color("#d9f7f3"),
+	"light_gray": Color("#b4dfd9"),
+	"ltgray": Color("#b4dfd9"),
+	"dark_gray": Color("#6f9590"),
+	"dkgray": Color("#6f9590"),
+	"red": Color("#ff5a6a"),
+	"light_red": Color("#ff8a7a"),
+	"ltred": Color("#ff8a7a"),
+	"green": Color("#7cffb2"),
+	"light_green": Color("#a8ffcc"),
+	"ltgreen": Color("#a8ffcc"),
+	"blue": Color("#7cc8ff"),
+	"light_blue": Color("#a6dbff"),
+	"ltblue": Color("#a6dbff"),
+	"cyan": Color("#5eead4"),
+	"light_cyan": Color("#9af5e6"),
+	"ltcyan": Color("#9af5e6"),
+	"magenta": Color("#d79bff"),
+	"pink": Color("#ff9fd6"),
+	"brown": Color("#e0a56a"),
+	"yellow": Color("#ffd84a"),
 }
 
 static var _fonts := {}
@@ -71,6 +84,35 @@ static func curses(name: String, fallback := TEXT) -> Color:
 		if CURSES.has(head):
 			return CURSES[head]
 	return fallback
+
+
+## Upper-cases the first letter only; `capitalize()` would also split names like "McNeal".
+## `text` made safe to put inside BBCode.
+static func escape(text: String) -> String:
+	return text.replace("[", "[lb]")
+
+
+static func cap(text: String) -> String:
+	return text.substr(0, 1).to_upper() + text.substr(1) if text != "" else text
+
+
+## Health in the look's colors, from the color the game gives a health bar: healthy is the
+## frame's cyan, then amber, then red.
+static func health_color(name: String) -> Color:
+	match name:
+		"c_green":
+			return CYAN
+		"c_light_green":
+			return Color("#8fe9c4")
+		"c_yellow":
+			return WARN
+		"c_light_red":
+			return Color("#ff8a5a")
+		"c_red":
+			return DANGER
+		"c_dark_gray", "c_light_gray":
+			return FAINT
+	return curses(name, CYAN)
 
 
 ## Severity of a game color, used to size bars for needs the game only describes in words.
@@ -100,28 +142,55 @@ static func font(name: String) -> FontFile:
 	return _fonts[name]
 
 
-static func body() -> FontFile:
-	return font("Manrope-Medium")
+static func body() -> Font:
+	return font("Rajdhani-Medium")
 
 
-static func semibold() -> FontFile:
-	return font("Manrope-SemiBold")
+static func semibold() -> Font:
+	return font("Rajdhani-SemiBold")
 
 
-static func bold() -> FontFile:
-	return font("Manrope-Bold")
+static func bold() -> Font:
+	return font("Rajdhani-Bold")
 
 
-static func heavy() -> FontFile:
-	return font("Manrope-ExtraBold")
+## Headings and names.
+static func heavy() -> Font:
+	return font("Oxanium-Bold")
 
 
-static func mono() -> FontFile:
-	return font("JetBrainsMono-Regular")
+static func heading() -> Font:
+	return font("Oxanium-SemiBold")
 
 
-static func mono_bold() -> FontFile:
-	return font("JetBrainsMono-Bold")
+static func mono() -> Font:
+	return font("ShareTechMono-Regular")
+
+
+## Share Tech Mono has one weight; the bold is the same face thickened slightly.
+static func mono_bold() -> Font:
+	if not _fonts.has("#mono_bold"):
+		var v := FontVariation.new()
+		v.base_font = font("ShareTechMono-Regular")
+		v.variation_embolden = 0.35
+		_fonts["#mono_bold"] = v
+	return _fonts["#mono_bold"]
+
+
+## `base` with extra space between letters, for headings in capitals.
+static func spaced(base: Font, extra: int) -> Font:
+	var key := "#spaced:%d:%d" % [base.get_instance_id(), extra]
+	if not _fonts.has(key):
+		var v := FontVariation.new()
+		v.base_font = base
+		v.spacing_glyph = extra
+		_fonts[key] = v
+	return _fonts[key]
+
+
+## A text size in interface units, scaled for the interface faces.
+static func fs(size: float) -> int:
+	return roundi(size * TEXT_SCALE)
 
 
 ## White line icon from icons/, `size` interface units wide and rendered crisply at the current
@@ -154,34 +223,58 @@ static func _draw_icon(texture: ImageTexture, name: String, size: int) -> void:
 	texture.set_size_override(Vector2i(size, size))
 
 
+## Flat panel with the look's chamfer: the top left and bottom right corners are cut, the other
+## two square. `radius` sets how deep the cut is; small boxes (bars, cells) stay square.
 static func box(bg: Color, radius := 16, border := BORDER, border_width := 1) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = bg
-	sb.set_corner_radius_all(radius)
-	sb.corner_detail = 10
+	var cut := 0 if radius < 6 else clampi(roundi(radius * 0.6), 4, 10)
+	sb.corner_radius_top_left = cut
+	sb.corner_radius_bottom_right = cut
+	sb.corner_detail = 1
 	sb.anti_aliasing = true
-	sb.anti_aliasing_size = 0.8
+	sb.anti_aliasing_size = 0.6
 	if border_width > 0:
 		sb.border_color = border
 		sb.set_border_width_all(border_width)
 	return sb
 
 
+## A card over a dimmed screen (menus, prompts): an opaque module with a strong frame.
 static func card_box(radius := 16, padding := 16) -> StyleBoxFlat:
-	var sb := box(CARD, radius)
-	sb.shadow_color = Color(0, 0, 0, 0.35)
-	sb.shadow_size = 22
-	sb.shadow_offset = Vector2(0, 8)
+	var sb := box(CARD, radius, BORDER_STRONG)
+	sb.shadow_color = Color(0, 0, 0, 0.45)
+	sb.shadow_size = 10
+	sb.shadow_offset = Vector2(0, 4)
 	sb.set_content_margin_all(padding)
 	return sb
 
 
 static func pill_box(bg: Color, padding_h := 10, padding_v := 4) -> StyleBoxFlat:
-	var sb := box(bg, 999, BORDER, 0)
+	var sb := box(bg, 8, BORDER, 0)
 	sb.content_margin_left = padding_h
 	sb.content_margin_right = padding_h
 	sb.content_margin_top = padding_v
 	sb.content_margin_bottom = padding_v
+	return sb
+
+
+## One module of the frame: opaque, hairline border, no shadow.
+static func module_box(padding := 0) -> StyleBoxFlat:
+	var sb := box(CARD, 12, BORDER_STRONG, 1)
+	sb.set_content_margin_all(padding)
+	return sb
+
+
+## Lit steel plate behind an item sprite.
+static func plate_box(selected := false, hot := false) -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = PLATE_MID.lightened(0.08) if hot else PLATE_MID
+	sb.border_color = ACCENT if selected else (PLATE_BORDER.lightened(0.2) if hot else PLATE_BORDER)
+	sb.set_border_width_all(2 if selected else 1)
+	sb.shadow_color = Color(0, 0, 0, 0.45)
+	sb.shadow_size = 3
+	sb.shadow_offset = Vector2(0, 2)
 	return sb
 
 
@@ -191,7 +284,7 @@ static func theme() -> Theme:
 		return _theme
 	var t := Theme.new()
 	t.default_font = body()
-	t.default_font_size = 14
+	t.default_font_size = fs(14)
 	t.set_color("font_color", "Label", TEXT)
 	t.set_color("default_color", "RichTextLabel", TEXT)
 	t.set_font("normal_font", "RichTextLabel", body())
@@ -200,15 +293,19 @@ static func theme() -> Theme:
 	t.set_constant("line_separation", "RichTextLabel", 2)
 
 	var tip := box(RAISED, 10, BORDER_STRONG)
-	tip.set_content_margin_all(10)
+	tip.content_margin_left = 10
+	tip.content_margin_right = 10
+	tip.content_margin_top = 6
+	tip.content_margin_bottom = 6
 	tip.shadow_color = Color(0, 0, 0, 0.4)
-	tip.shadow_size = 12
+	tip.shadow_size = 6
 	t.set_stylebox("panel", "TooltipPanel", tip)
 	t.set_color("font_color", "TooltipLabel", TEXT)
-	t.set_font_size("font_size", "TooltipLabel", 13)
+	t.set_font("font", "TooltipLabel", semibold())
+	t.set_font_size("font_size", "TooltipLabel", fs(13))
 
-	var grabber := box(Color(1, 1, 1, 0.18), 4, BORDER, 0)
-	var grabber_hot := box(Color(1, 1, 1, 0.30), 4, BORDER, 0)
+	var grabber := box(Color(CYAN, 0.30), 4, BORDER, 0)
+	var grabber_hot := box(Color(CYAN, 0.55), 4, BORDER, 0)
 	var track := StyleBoxEmpty.new()
 	track.content_margin_left = 4
 	track.content_margin_right = 4
@@ -221,7 +318,7 @@ static func theme() -> Theme:
 	flat.set_content_margin_all(8)
 	var hover := box(HOVER, 10, BORDER, 0)
 	hover.set_content_margin_all(8)
-	var pressed := box(Color(1, 1, 1, 0.12), 10, BORDER, 0)
+	var pressed := box(Color(CYAN, 0.20), 10, BORDER, 0)
 	pressed.set_content_margin_all(8)
 	for state in ["normal", "disabled"]:
 		t.set_stylebox(state, "Button", flat)
@@ -286,7 +383,7 @@ static func lead_color(spans, fallback := TEXT) -> Color:
 static func label(text: String, size := 14, color := TEXT, f: Font = null) -> Label:
 	var l := Label.new()
 	l.text = text
-	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_font_size_override("font_size", fs(size))
 	l.add_theme_color_override("font_color", color)
 	if f != null:
 		l.add_theme_font_override("font", f)
@@ -300,8 +397,8 @@ static func rich(size := 14, fit := true) -> RichTextLabel:
 	r.fit_content = fit
 	r.scroll_active = false
 	r.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	r.add_theme_font_size_override("normal_font_size", size)
-	r.add_theme_font_size_override("bold_font_size", size)
+	r.add_theme_font_size_override("normal_font_size", fs(size))
+	r.add_theme_font_size_override("bold_font_size", fs(size))
 	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return r
 
@@ -309,10 +406,13 @@ static func rich(size := 14, fit := true) -> RichTextLabel:
 ## Small rounded key hint, e.g. the `i` on the Bag button.
 static func key_chip(key: String, size := 11) -> PanelContainer:
 	var chip := PanelContainer.new()
-	chip.add_theme_stylebox_override("panel", pill_box(Color(1, 1, 1, 0.08), 6, 1))
+	var sb := box(Color(0, 0, 0, 0), 0, Color(CYAN, 0.55), 1)
+	sb.content_margin_left = 5
+	sb.content_margin_right = 5
+	chip.add_theme_stylebox_override("panel", sb)
 	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	var l := label(key, size, MUTED, mono())
+	var l := label(key, size, CYAN, mono())
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	chip.add_child(l)
 	chip.visible = key != ""

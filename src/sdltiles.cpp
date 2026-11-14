@@ -526,14 +526,13 @@ SDL_FRect get_android_render_rect( float DisplayBufferWidth, float DisplayBuffer
 /// Renders the pixel minimap into a texture of its own and sends it to the Godot HUD.
 static auto send_bridge_minimap() -> void
 {
-    // Pixel size of the HUD's map card.
-    constexpr auto size = 288;
+    const auto size = cata::godot_bridge::minimap_size;
     if( !g || !tilecontext ) {
         return;
     }
     if( !bridge_minimap ) {
         bridge_minimap.reset( SDL_CreateTexture( renderer.get(), SDL_PIXELFORMAT_ARGB8888,
-                              SDL_TEXTUREACCESS_TARGET, size, size ) );
+                              SDL_TEXTUREACCESS_TARGET, size.x, size.y ) );
         if( !bridge_minimap ) {
             return;
         }
@@ -544,9 +543,54 @@ static auto send_bridge_minimap() -> void
     SetRenderDrawColor( renderer, 0, 0, 0, 255 );
     RenderClear( renderer );
     tilecontext->draw_minimap( point_zero, tripoint_bub_ms( g->u.bub_pos().xy(), g->ter_view_p.z() ),
-                               size, size );
+                               size.x, size.y );
     std::swap( display_buffer, bridge_minimap );
     cata::godot_bridge::send_minimap( renderer.get(), bridge_minimap.get() );
+    SetRenderTarget( renderer, display_buffer );
+}
+
+/// Draws the tile sprites the Godot front end asked for, side by side at the tileset's own
+/// size, and sends them. Ids are `category:id`, e.g. `item:knife_combat`.
+static auto send_bridge_sprites( const std::vector<std::string> &ids ) -> void
+{
+    // One strip stays well inside the largest texture a renderer takes.
+    constexpr auto per_strip = std::size_t{ 48 };
+    if( !g || !tilecontext || ids.empty() ) {
+        return;
+    }
+    static const auto categories = std::map<std::string, TILE_CATEGORY> {
+        { "item", C_ITEM }, { "monster", C_MONSTER }, { "furniture", C_FURNITURE }, { "terrain", C_TERRAIN },
+    };
+    tilecontext->set_draw_scale( DEFAULT_TILESET_ZOOM );
+    const auto tile = point( tilecontext->get_tile_width(), tilecontext->get_tile_height() );
+    for( auto start = std::size_t{ 0 }; start < ids.size(); start += per_strip ) {
+        const auto count = std::min( per_strip, ids.size() - start );
+        auto strip = SDL_Texture_Ptr( SDL_CreateTexture( renderer.get(), SDL_PIXELFORMAT_ARGB8888,
+                                      SDL_TEXTUREACCESS_TARGET, tile.x * static_cast<int>( count ), tile.y ) );
+        if( !strip ) {
+            break;
+        }
+        // Tiles draw into whatever the display buffer is, so stand the strip in for it.
+        std::swap( display_buffer, strip );
+        SetRenderTarget( renderer, display_buffer );
+        SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_NONE );
+        SetRenderDrawColor( renderer, 0, 0, 0, 0 );
+        RenderClear( renderer );
+        auto sent = cata::godot_bridge::sprite_strip{ .renderer = renderer.get(), .tile = tile };
+        for( auto i = std::size_t{ 0 }; i < count; ++i ) {
+            const auto &id = ids[start + i];
+            const auto split = id.find( ':' );
+            const auto category = categories.find( id.substr( 0, split ) );
+            sent.ids.push_back( id );
+            sent.found.push_back( split != std::string::npos && category != categories.end() &&
+                                  tilecontext->draw_ui_sprite( id.substr( split + 1 ), category->second,
+                                          point( tile.x * static_cast<int>( i ), 0 ) ) );
+        }
+        std::swap( display_buffer, strip );
+        sent.image = strip.get();
+        cata::godot_bridge::send_sprites( sent );
+    }
+    tilecontext->set_draw_scale( g->get_zoom() );
     SetRenderTarget( renderer, display_buffer );
 }
 
@@ -3281,6 +3325,8 @@ static void CheckMessages()
     while( SDL_PollEvent( &ev ) ) {
         const auto bridged = cata::godot_bridge::translate_event( ev );
         if( bridged == cata::godot_bridge::event_result::consumed ) {
+            // Sprites are answered right away; the game may not draw another frame for a while.
+            send_bridge_sprites( cata::godot_bridge::take_sprite_requests() );
             continue;
         }
         if( bridged == cata::godot_bridge::event_result::input ) {

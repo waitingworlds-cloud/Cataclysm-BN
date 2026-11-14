@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <ranges>
@@ -27,6 +28,7 @@
 #include "godot_bridge_socket.h"
 #include "godot_commands.h"
 #include "godot_hotbar.h"
+#include "godot_square.h"
 #include "input.h"
 #include "json.h"
 #include "output.h"
@@ -52,6 +54,8 @@ enum class message_kind : std::uint8_t {
     json = 2,
     /// The pixel minimap the HUD shows, laid out like `frame`.
     minimap = 3,
+    /// A strip of tile sprites: `[u32 JSON length][JSON][image laid out like frame]`.
+    sprites = 4,
 };
 
 struct pending_pick {
@@ -88,6 +92,8 @@ struct bridge_state {
     std::string sent_meta;
     std::vector<std::uint8_t> frame_bytes;
     bool minimap_requested = false;
+    /// Tile ids Godot asked sprites for and has not been sent yet.
+    std::vector<std::string> sprites_wanted;
     std::vector<std::uint8_t> minimap_bytes;
     std::vector<std::uint8_t> sent_minimap;
 };
@@ -492,6 +498,21 @@ auto translate_event( SDL_Event &ev ) -> event_result
             } );
             return press_action( "action_menu", "DEFAULTMODE" );
         }
+        if( type == "square" ) {
+            // Act on a square from the HUD: its menu opens beside the mouse, where Godot says it is.
+            if( obj.has_member( "x" ) ) {
+                set_mouse( obj );
+            }
+            cata::godot_square::request( point( obj.get_int( "dx", 0 ), obj.get_int( "dy", 0 ) ),
+                                         obj.get_string( "choice", "" ) );
+            cata::godot_commands::request( "SEC_SELECT" );
+            return press_action( "action_menu", "DEFAULTMODE" );
+        }
+        if( type == "sprites" ) {
+            auto &wanted = s.sprites_wanted;
+            std::ranges::copy( obj.get_string_array( "ids" ), std::back_inserter( wanted ) );
+            return event_result::consumed;
+        }
         if( type == "pick" || type == "press" ) {
             const auto *view = find_view( obj.get_int( "id", 0 ) );
             if( view == nullptr ) {
@@ -552,6 +573,38 @@ auto send_minimap( SDL_Renderer *renderer, SDL_Texture *image ) -> void
     }
     s.sent_minimap = s.minimap_bytes;
     send_message( message_kind::minimap, nullptr, 0, s.minimap_bytes.data(), s.minimap_bytes.size() );
+}
+
+auto take_sprite_requests() -> std::vector<std::string>
+{
+    return std::exchange( state().sprites_wanted, {} );
+}
+
+auto send_sprites( const sprite_strip &strip ) -> void
+{
+    auto &s = state();
+    auto pixels = std::vector<std::uint8_t> {};
+    if( !s.link || !read_image( strip.renderer, strip.image, pixels ) ) {
+        return;
+    }
+    auto meta = std::ostringstream();
+    auto jsout = JsonOut( meta );
+    jsout.start_object();
+    jsout.member( "ids", strip.ids );
+    jsout.member( "found" );
+    jsout.start_array();
+    for( const auto found : strip.found ) {
+        jsout.write( static_cast<bool>( found ) );
+    }
+    jsout.end_array();
+    jsout.member( "w", strip.tile.x );
+    jsout.member( "h", strip.tile.y );
+    jsout.end_object();
+    const auto json = meta.str();
+    auto head = std::vector<std::uint8_t>( 4 + json.size() );
+    put_u32( head.data(), static_cast<std::uint32_t>( json.size() ) );
+    std::ranges::copy( json, head.begin() + 4 );
+    send_message( message_kind::sprites, head.data(), head.size(), pixels.data(), pixels.size() );
 }
 
 auto sync_screens() -> void

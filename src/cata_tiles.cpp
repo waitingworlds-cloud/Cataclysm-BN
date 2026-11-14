@@ -22,6 +22,7 @@
 #    include "fstream_utils.h"
 #    include "game.h"
 #    include "game_constants.h"
+#    include "godot_bridge.h"
 #    include "init.h"
 #    include "input.h"
 #    include "int_id.h"
@@ -408,6 +409,13 @@ void cata_tiles::on_options_changed()
                                      get_option<int>( "PIXEL_MINIMAP_BLINK" ) : 0;
     settings.square_pixels = get_option<bool>( "PIXEL_MINIMAP_RATIO" );
     settings.scale_to_fit = get_option<bool>( "PIXEL_MINIMAP_SCALE_TO_FIT" );
+    if( cata::godot_bridge::is_active() ) {
+        // The Godot HUD redraws the minimap as an inked paper map and marks creatures itself:
+        // it wants every square filled and nothing blinking.
+        settings.mode = pixel_minimap_mode::solid;
+        settings.beacon_size = 1;
+        settings.beacon_blink_interval = 0;
+    }
 
     minimap->set_settings( settings );
 }
@@ -4476,6 +4484,17 @@ bool cata_tiles::find_overlay_looks_like( const bool male, const std::string &ov
         looks_like = iid->looks_like.str();
     }
     return exists;
+}
+
+auto cata_tiles::draw_ui_sprite( const std::string &id, const TILE_CATEGORY category,
+                                 const point at ) -> bool
+{
+    if( !find_tile_looks_like( id, category ) ) {
+        return false;
+    }
+    static const auto no_subcategory = std::string();
+    return draw_from_id_string( { .id = id, .category = category, .subcategory = no_subcategory, .subtile = 0, .rota = 0 },
+                                tripoint_bub_ms( at.x, at.y, 0 ), {}, {}, lit_level::BRIGHT, false, 0, true );
 }
 
 bool cata_tiles::draw_from_id_string(

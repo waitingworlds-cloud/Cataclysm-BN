@@ -2,8 +2,9 @@
 
 A new interface for Cataclysm: Bright Nights, drawn by [Godot](https://godotengine.org). Godot owns
 the window. It starts the game in the background, shows the map the game renders, and draws the HUD,
-menus and prompts itself in the Slate style: a map framed by a header, a sidebar and an action bar,
-rounded cards, Manrope and JetBrains Mono, amber accent.
+menus and prompts itself: the map sits in a bordered viewport inside a frame of opaque modules (a
+top bar, a column on each side and a bottom deck), in dark teal with cyan lines and hazard-yellow
+actions, set in Oxanium, Rajdhani and Share Tech Mono.
 
 Every action still runs through the game's own code and keybindings. Godot never changes game state
 directly; clicking a button presses the key bound to that action.
@@ -67,7 +68,7 @@ the game draws far fewer pixels. Sizes, insets and mouse positions sent to the g
 pixels (`Display.game_size`, `Display.to_game`).
 
 Ctrl+= / Ctrl+- change the interface size, Ctrl+Shift+= / Ctrl+Shift+- the map size, Ctrl+0 goes
-back to automatic. The monitor button in the action bar opens the same settings as a card. The
+back to automatic. The monitor button in the bottom deck opens the same settings as a card. The
 choice is saved in `user://display.cfg`.
 
 ## What is drawn by Godot
@@ -77,7 +78,7 @@ one did.
 
 | Area                | Screens drawn by Godot                                                       |
 | ------------------- | ---------------------------------------------------------------------------- |
-| Playing             | HUD (header, sidebar, action bar, survivor card, map hover card), message log, look around and descriptions, nearby items, monsters and vehicles, aiming, tombstone and last words |
+| Playing             | HUD (top bar, side columns, bottom deck, map hover tip), message log, look around and descriptions, nearby items, monsters and vehicles, aiming, tombstone and last words |
 | Items               | Inventory and every item list built on it, item actions, item info, comparison, pickup, advanced inventory, sort armor, vending machines, enchanting, the defense mode caravan |
 | Making things       | Crafting, construction                                                       |
 | Character           | Character sheet, morale, bionics, mutations, martial arts and technique details, blood test results, missions, factions, scores, diary |
@@ -98,33 +99,54 @@ every cursor blink stays open between those asks instead of closing and reopenin
 ## The HUD
 
 The HUD replaces the game's sidebar and shows everything the sidebar shows, following the same rules
-(health as bars unless the health style is numbers, a clock only with a watch, and so on). Three
-bars are docked to the window edges and the game keeps its map view in the space between them, so
-the survivor stays centered in what you can see:
+(health as bars unless the health style is numbers, a clock only with a watch, and so on). It is a
+frame around the map: nothing floats over the map and the map never runs to the window's edge. The
+game keeps its map view inside the viewport, so the survivor stays centered in what you can see.
 
-- **Header**, along the top: season, day and time, weather, temperature, light, wind and moon, and
-  on the right the place and coordinates. While driving it also shows the vehicle's speed, cruise
-  control, heading and fuel.
-- **Sidebar**, on the right: the pixel minimap or the nearby overmap, every creature in view with
-  its threat level and direction (the sidebar compass), Lua sidebar widgets from mods, and the
-  message log.
-- **Action bar**, along the bottom: the action dock in the middle, and zoom and HUD options on the
-  right.
-- **Survivor card**, floating at the top left of the map: a body figure colored by each limb's
-  health, with bleeding, bites, infections and breaks outlined. Click a limb, or open the body tab,
-  to see its health, injuries and outer armor. Tabs switch between needs (thirst, hunger, rest,
-  stamina, warmth), body, and stats (attributes, weight, volume, bionic power, mana, armor). Mood,
-  focus, speed, move cost and noise are always shown, with chips for injuries, pain, move mode and
-  safe mode.
-- **Hover card**: rest the mouse on the map and a card beside it shows what is there (terrain,
-  furniture, items, creatures and their gear), as the game's "Mouse View" box did. It hides when
-  the mouse moves on or a key is pressed.
+- **Top bar**: who you are, what you wield and how you move, with the safe mode chip; season, day
+  and time; the creature compass as a strip (marks under each direction something is seen in);
+  weather, temperature, light, wind and moon; the place and coordinates. While driving a row below
+  it shows the vehicle's speed, cruise control, heading and fuel.
+- **Left column**: *Rig // Vitals* (a body figure and a bar per limb; click one for its health,
+  injuries and outer armor; a striped alert with a use-item button for bleeding, bites and
+  infections), *Needs // State* (thirst, hunger, rest, stamina, warmth and pain, then mood, focus,
+  speed, move cost, noise, attributes, weight, volume, bionic power, mana and armor) and the
+  *Event log*.
+- **Viewport**: the map in a bezel. Threats in view get red corner brackets, the nearest with a
+  name tag, and the thing the *In reach* panel leads with gets yellow ones.
+- **Right column**: the *Area map* (the pixel minimap redrawn as a gray paper map with a ring for
+  you, a red cross per seen threat and a dot for anyone else, or the nearby overmap), *In sight*
+  (every creature in view, nearest first, with distance, direction and health) and *In reach*
+  (what is on your square and the eight around it: items with their sprites, doors, furniture,
+  people, each with its actions as buttons). Lua sidebar widgets from mods go here too.
+- **Bottom deck**: the wielded item and the nine hotbar slots on lit steel plates, the move mode,
+  the action buttons with their keys, and zoom, display and HUD options.
 
 The HUD options button (or `}`, the sidebar options key) opens the game's sidebar options: turning a
 panel off there hides the matching part of the HUD.
 
 Every key still goes to the game first: the HUD never takes keyboard focus, and its buttons press
 the key bound to their action.
+
+### Mouse
+
+Everything on the main screen can be done with the mouse as well as the keys.
+
+- **Rest the mouse on a map square** for a short tip: who or what is there, the ground, what lies
+  on it, and what a right-click offers. The tip stays inside the viewport. The full description is
+  in the look screens.
+- **Right-click a square** (or click a row of *In sight*) for a menu, beside the mouse, of what
+  can be done there right now: walk, attack, talk, fire, open, close, pick up, butcher, examine,
+  jump over, look closer. `src/godot_square.cpp` decides the choices; the *In reach* buttons run
+  the same choices without the menu.
+- **Left-click a square** to walk there, as in the game.
+- Parts of the frame act on a click: a limb (inspect), thirst and hunger (eat), rest (sleep), the
+  wielded slot (wield), a hotbar slot (use; right-click clears, drag swaps), the move mode
+  buttons, the safe mode chip, the event log (full log) and the area map (overmap).
+
+Item sprites come from the game's tileset: Godot asks for the ids it needs (`sprites`), the game
+draws them into a strip and sends it back, and `src/sprites.gd` caches them. Until a sprite
+arrives, or when the tileset has none, a slot shows the item's map symbol.
 
 ## The inventory
 
@@ -207,6 +229,8 @@ Game to Godot: `[u32 length, little endian][u8 kind][payload]`
   - `close {id}`: the screen is gone.
 - kind 3, minimap: same layout as a frame; the game's pixel minimap, sent when it changes while
   the HUD shows the map.
+- kind 4, sprites: `[u32 json length][JSON {ids, found, w, h}][u32 width][u32 height][RGBA8]`, a
+  strip of `w` by `h` tiles, one per asked id, in answer to `sprites`.
 
 Godot to game: `[u32 length][JSON]`
 
@@ -216,20 +240,26 @@ Godot to game: `[u32 length][JSON]`
 - `key {k, m, r, down}`: SDL keycode and modifiers. `text {s}`: typed text.
 - `mouse {e: move|down|up|wheel, x, y, b, dy}`: mouse over the map.
 - `action {id, cat}`: press the key bound to a game action, e.g. `inventory`.
+- `square {dx, dy, choice, x, y}`: act on the map square at that offset from the avatar as if it
+  had been right-clicked. With an empty `choice` its menu opens at `x, y`; otherwise that choice
+  (`pick_up`, `examine`, ...) runs at once.
+- `sprites {ids}`: ask for tileset sprites, e.g. `item:rock`.
 - `pick {id, index, act}`: choose entry `index` in native screen `id`, then press `act`. An empty
   `act` only moves the cursor there. Inventory entries are `list * 100000 + row`.
 - `press {id, act}`: press the key bound to `act` in native screen `id`'s input context.
 - `quit`: the window was closed.
 
 Game side: `src/godot_bridge.{h,cpp}` (connection, input, frames, native screens),
-`src/godot_hud.h` with the builder at the end of `src/panels.cpp`, `src/godot_screen.h` (helpers
+`src/godot_hud.h` with the builder at the end of `src/panels.cpp`, `src/godot_square.{h,cpp}`
+(what can be done on a map square, the *In reach* list and the hover tip), `src/godot_screen.h` (helpers
 for `screen` views), and a native branch in each screen's own file, found by searching for
 `native_view`.
 
 Godot side: `src/bridge.gd` (process and socket), `src/main.gd` (layers), `src/ui/hud.gd`,
-`src/views/*.gd`, and `src/ui/slate.gd` (colors, fonts, icons and shared styles).
+`src/ui/item_slot.gd` (the steel item slot), `src/sprites.gd`, `src/views/*.gd`, and
+`src/ui/slate.gd` (colors, fonts, icons and shared styles).
 
 ## Credits
 
-- Fonts: Manrope and JetBrains Mono, SIL Open Font License (`fonts/`).
+- Fonts: Oxanium, Rajdhani and Share Tech Mono, SIL Open Font License (`fonts/`).
 - Icons: [Lucide](https://lucide.dev), ISC License (`icons/LICENSE-lucide.txt`).

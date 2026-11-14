@@ -36,6 +36,7 @@
 #include "game_inventory.h"
 #include "gamemode.h"
 #include "gates.h"
+#include "godot_square.h"
 #include "gun_mode.h"
 #include "help.h"
 #include "iexamine.h"
@@ -2022,7 +2023,13 @@ bool game::handle_action()
                 return false;
             }
 
-            const std::optional<tripoint_bub_ms> mouse_pos = ctxt.get_coordinates( w_terrain );
+            std::optional<tripoint_bub_ms> mouse_pos = ctxt.get_coordinates( w_terrain );
+#if defined(TILES)
+            // The Godot HUD can ask to act on a square without the mouse being over it.
+            if( const auto asked = cata::godot_square::take_target() ) {
+                mouse_pos = asked;
+            }
+#endif
             if( !mouse_pos ) {
                 return false;
             }

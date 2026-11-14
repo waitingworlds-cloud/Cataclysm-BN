@@ -28,6 +28,7 @@
 #include "game_ui.h"
 #include "godot_bridge.h"
 #include "godot_hud.h"
+#include "godot_square.h"
 #include "input.h"
 #include "item.h"
 #include "itype.h"
@@ -38,6 +39,7 @@
 #include "map/map.h"
 #include "message_log_view.h"
 #include "messages.h"
+#include "monster.h"
 #include "mtype.h"
 #include "npc.h"
 #include "options.h"
@@ -51,6 +53,10 @@
 #include "player.h"
 #include "pldata.h"
 #include "point.h"
+#if defined(TILES)
+#include "cata_tiles.h"
+#include "sdltiles.h"
+#endif
 #include "sounds.h"
 #include "string_formatter.h"
 #include "string_id.h"
@@ -3096,10 +3102,12 @@ auto write_runs( JsonOut &jsout, const std::string &text, const nc_color &base )
 /// Actions the HUD offers as buttons, with the key each is bound to.
 auto write_action_keys( JsonOut &jsout ) -> void
 {
-    static const auto actions = std::array<std::string, 24> {
+    static const auto actions = std::array<std::string, 36> {
         "inventory", "advinv", "craft", "construct", "pickup", "look", "fire", "wait", "map",
         "eat", "wear", "apply", "sleep", "messages", "player_data", "safemode", "mutations",
-        "bionics", "reload_weapon", "wield", "drop", "open", "toggle_panel_adm", "toggle_pixel_minimap"
+        "bionics", "reload_weapon", "wield", "drop", "open", "toggle_panel_adm", "toggle_pixel_minimap",
+        "close", "examine", "butcher", "chat", "listitems", "cycle_move", "reset_move", "toggle_run",
+        "toggle_crouch", "toggle_prone", "zoom_in", "zoom_out"
     };
     jsout.member( "keys" );
     jsout.start_object();
@@ -3450,6 +3458,82 @@ auto write_compass( JsonOut &jsout, avatar &u ) -> void
 }
 
 #if defined(TILES)
+/// Every creature the avatar sees, nearest first: who it is, where (as an offset from the
+/// avatar, a distance and a compass direction), how dangerous and how hurt.
+auto write_sight( JsonOut &jsout, const avatar &u ) -> void
+{
+    auto seen = u.get_visible_creatures( MAX_VIEW_DISTANCE );
+    const auto distance_to = [&u]( const Creature * critter ) { return rl_dist( u.bub_pos(), critter->bub_pos() ); };
+    std::ranges::sort( seen, {}, distance_to );
+    jsout.member( "sight" );
+    jsout.start_array();
+    for( const auto *critter : seen ) {
+        const auto offset = ( critter->bub_pos() - u.bub_pos() ).xy().raw();
+        const auto *const mon = critter->as_monster();
+        const auto *const who = critter->as_npc();
+        const auto danger = mon != nullptr ? danger_color( *mon->type ) :
+                            who != nullptr ? attitude_color( who->get_attitude() ) : c_white;
+        jsout.start_object();
+        jsout.member( "name", critter->get_name() );
+        jsout.member( "dx", offset.x );
+        jsout.member( "dy", offset.y );
+        jsout.member( "dist", distance_to( critter ) );
+        jsout.member( "dir", cata::godot_square::direction_index( offset ) );
+        jsout.member( "hostile", critter->attitude_to( u ) == Attitude::A_HOSTILE );
+        jsout.member( "danger", string_from_color( danger ) );
+        jsout.member( "health", cata::godot_square::health_word( *critter ) );
+        jsout.end_object();
+    }
+    jsout.end_array();
+}
+
+/// What the avatar wields, for the deck's wielded slot; nothing when bare-handed.
+auto write_wielded( JsonOut &jsout, const avatar &u ) -> void
+{
+    const auto &weapon = u.primary_weapon();
+    if( weapon.is_null() ) {
+        return;
+    }
+    jsout.member( "wielded" );
+    jsout.start_object();
+    jsout.member( "type", weapon.typeId().str() );
+    jsout.member( "name", weapon.tname() );
+    jsout.member( "sym", weapon.symbol() );
+    jsout.member( "color", string_from_color( weapon.color() ) );
+    jsout.end_object();
+}
+
+/// How many pixels one map square takes in the minimap image, so the HUD can mark squares on
+/// it. Mirrors how `pixel_minimap::draw` picks its view for the image's size.
+auto write_minimap_scale( JsonOut &jsout ) -> void
+{
+    constexpr auto min_view_diameter = 120;
+    const auto size = cata::godot_bridge::minimap_size;
+    const auto total = ( get_map().getmapsize() - 2 ) * SEEX;
+    const auto view = total > min_view_diameter ? std::min( total, size.x / 2 ) : size.x / 3;
+    jsout.member( "minimap" );
+    jsout.start_object();
+    jsout.member( "tile", std::max( size.x / std::max( view, 1 ), 1 ) );
+    jsout.end_object();
+}
+
+/// Where the avatar's square is drawn in the frame and how big a square is, in pixels, so the
+/// HUD can mark squares on the map. Left out for isometric tilesets, whose squares aren't boxes.
+auto write_view( JsonOut &jsout, const avatar &u ) -> void
+{
+    if( !tilecontext || tile_iso ) {
+        return;
+    }
+    const auto at = tilecontext->player_to_screen( u.bub_pos().xy() );
+    jsout.member( "view" );
+    jsout.start_object();
+    jsout.member( "x", at.x );
+    jsout.member( "y", at.y );
+    jsout.member( "w", tilecontext->get_tile_width() );
+    jsout.member( "h", tilecontext->get_tile_height() );
+    jsout.end_object();
+}
+
 /// Name of a curses palette index (0 to 15), as used in color names like `c_light_red`.
 auto palette_name( const int index ) -> std::string
 {
@@ -3498,6 +3582,7 @@ auto write_hover( JsonOut &jsout ) -> void
                                 get_map().get_visibility_variables_cache() );
     jsout.member( "hover" );
     cata::godot_bridge::write_window_spans( jsout, w );
+    cata::godot_square::write_tip( jsout, *at );
 }
 #endif
 
@@ -3544,6 +3629,13 @@ auto cata::godot_hud::build() -> std::string
     jsout.member( "style", u.martial_arts_data->selected_style_name( u ) );
     jsout.member( "armed", u.is_armed() );
     cata::godot_hotbar::write( jsout );
+#if defined(TILES)
+    write_wielded( jsout, u );
+    write_sight( jsout, u );
+    cata::godot_square::write_reach( jsout );
+    write_minimap_scale( jsout );
+    write_view( jsout, u );
+#endif
 
     write_body( jsout, u );
     const auto thirst = u.get_thirst_description();

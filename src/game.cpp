@@ -70,6 +70,7 @@
 #include "godot_hud.h"
 #include "godot_menu_anchor.h"
 #include "godot_screen.h"
+#include "godot_square.h"
 #include "gamemode.h"
 #include "gates.h"
 #include "harvest.h"
@@ -3872,88 +3873,47 @@ bool game::try_get_left_click_action( action_id &act, const tripoint_bub_ms &mou
 namespace
 {
 
-/// What the right-click menu can do on a square.
-enum class square_choice : int {
-    walk, attack, talk, fire, open, close, examine, pick_up, butcher, jump
-};
-
 /// Right-click menu for a map square in the Godot front end: everything that can be done there,
 /// shown beside the mouse. Picking one runs it as if its key had been pressed (on that square).
+/// The HUD can ask for one of the choices directly, which skips the menu.
 auto right_click_menu( game &g, action_id &act, const tripoint_bub_ms &target ) -> bool
 {
+    using cata::godot_square::choice;
     auto &m = g.m;
     auto &u = g.u;
-    const auto here = tripoint_bub_ms( target.xy(), u.bub_pos().z() );
-    const auto dist = square_dist( target.xy(), u.bub_pos().xy() );
-    const auto is_self = dist == 0;
-    const auto is_adjacent = dist == 1;
-    const auto inside = !m.is_outside( u.bub_pos() );
-    const auto key = [&]( const action_id id ) {
-        return cata::godot_bridge::key_label( action_ident( id ), "DEFAULTMODE" );
-    };
-
-    Creature *const critter = g.critter_at<Creature>( target );
-    const auto seen_critter = critter != nullptr && !is_self && u.sees( *critter ) ? critter : nullptr;
-
-    auto menu = uilist();
-    menu.title = is_self ? _( "Here" ) : seen_critter != nullptr ? seen_critter->disp_name( false,
-                 true ) :
-                 m.disp_name( target );
-    const auto add = [&]( const square_choice choice, const std::string & text, const action_id id ) {
-        const auto hint = id == ACTION_NULL ? std::string() : key( id );
-        menu.addentry_col( static_cast<int>( choice ), true, -1, text, hint );
-    };
-
-    if( seen_critter != nullptr ) {
-        const auto hostile = seen_critter->attitude_to( u ) == Attitude::A_HOSTILE;
-        if( is_adjacent ) {
-            add( square_choice::attack, string_format( hostile ? _( "Attack %s" ) : _( "Push or attack %s" ),
-                    seen_critter->disp_name() ), ACTION_NULL );
-        }
-        if( seen_critter->is_npc() && dist <= 6 ) {
-            add( square_choice::talk, string_format( _( "Talk to %s" ), seen_critter->disp_name() ),
-                 ACTION_CHAT );
-        }
-        if( u.primary_weapon().is_gun() ) {
-            add( square_choice::fire, string_format( _( "Fire at %s" ), seen_critter->disp_name() ),
-                 ACTION_FIRE );
-        }
-    }
-    if( !is_self && seen_critter == nullptr && avatar_knows_travel_destination( u, target ) ) {
-        add( square_choice::walk, is_adjacent ? _( "Step here" ) : _( "Walk here" ), ACTION_NULL );
-    }
-    if( is_adjacent && m.can_open_door( &u, here, inside ) ) {
-        add( square_choice::open, _( "Open" ), ACTION_OPEN );
-    }
-    if( is_adjacent && m.close_door( here, inside, true ) ) {
-        add( square_choice::close, _( "Close" ), ACTION_CLOSE );
-    }
-    if( is_self || is_adjacent ) {
-        if( m.has_items( target ) ) {
-            add( square_choice::pick_up, _( "Pick up items" ), ACTION_PICKUP );
-        }
-        if( is_self && std::ranges::any_of( m.i_at( target ), &item::is_corpse ) ) {
-            add( square_choice::butcher, _( "Butcher or dissect" ), ACTION_BUTCHER );
-        }
-        add( square_choice::examine, string_format( _( "Examine %s" ), m.disp_name( target ) ),
-             ACTION_EXAMINE );
-    }
-    if( is_adjacent && iexamine::can_jump_over_tile( u, target ) ) {
-        add( square_choice::jump, _( "Jump over" ), ACTION_JUMP );
-    }
-    if( menu.entries.empty() ) {
+    const auto options = cata::godot_square::options_at( target );
+    const auto asked = cata::godot_square::take_choice();
+    if( options.empty() ) {
         add_msg( _( "Nothing to do there." ) );
         return false;
     }
 
-    cata::godot_bridge::anchor_next_menu( cata::godot_bridge::mouse_position() );
-    menu.query();
-    if( menu.ret < 0 ) {
-        return false;
+    auto picked = choice::examine;
+    if( asked ) {
+        if( !std::ranges::contains( options, *asked, &cata::godot_square::option::what ) ) {
+            add_msg( m_info, _( "You can't do that there any more." ) );
+            return false;
+        }
+        picked = *asked;
+    } else {
+        auto menu = uilist();
+        menu.title = cata::godot_square::title_at( target );
+        for( const auto &option : options ) {
+            const auto hint = option.key == ACTION_NULL ? std::string() :
+                              cata::godot_bridge::key_label( action_ident( option.key ), "DEFAULTMODE" );
+            menu.addentry_col( static_cast<int>( option.what ), true, -1, option.text, hint );
+        }
+        cata::godot_bridge::anchor_next_menu( cata::godot_bridge::mouse_position() );
+        menu.query();
+        if( menu.ret < 0 ) {
+            return false;
+        }
+        picked = static_cast<choice>( menu.ret );
     }
+
     const auto step = get_movement_action_from_delta( target - u.bub_pos(), iso_rotate::yes );
-    switch( static_cast<square_choice>( menu.ret ) ) {
-        case square_choice::walk: {
+    switch( picked ) {
+        case choice::walk: {
             const auto route = m.route( u.bub_pos(), target, u.get_legacy_pathfinding_settings(),
                                         u.get_legacy_path_avoid() );
             if( route.empty() ) {
@@ -3968,29 +3928,32 @@ auto right_click_menu( game &g, action_id &act, const tripoint_bub_ms &target ) 
             }
             return true;
         }
-        case square_choice::attack:
-        case square_choice::open:
+        case choice::attack:
+        case choice::open:
             act = step;
             return true;
-        case square_choice::talk:
+        case choice::talk:
             act = ACTION_CHAT;
             return true;
-        case square_choice::fire:
+        case choice::fire:
             act = ACTION_FIRE;
             return true;
-        case square_choice::close:
+        case choice::close:
             act = ACTION_CLOSE;
             return true;
-        case square_choice::examine:
+        case choice::examine:
             act = ACTION_EXAMINE;
             return true;
-        case square_choice::pick_up:
+        case choice::pick_up:
             act = ACTION_PICKUP;
             return true;
-        case square_choice::butcher:
+        case choice::butcher:
             act = ACTION_BUTCHER;
             return true;
-        case square_choice::jump:
+        case choice::describe:
+            g.extended_description( target );
+            return false;
+        case choice::jump:
             act = ACTION_JUMP;
             return true;
     }

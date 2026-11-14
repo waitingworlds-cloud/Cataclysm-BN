@@ -5,6 +5,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "cursesdef.h"
 #include "point.h"
@@ -75,6 +76,9 @@ auto send_frame( SDL_Renderer *renderer, SDL_Texture *frame ) -> void;
 /// screens draw nothing in curses, so opening one doesn't produce a frame on its own.
 auto sync_screens() -> void;
 
+/// Size in pixels of the minimap image rendered for the HUD's area map.
+constexpr auto minimap_size = point( 336, 252 );
+
 /// Asks for the pixel minimap to be rendered for Godot with the next frame; the HUD builder calls
 /// this while the HUD shows the map.
 auto request_minimap() -> void;
@@ -82,6 +86,22 @@ auto request_minimap() -> void;
 auto take_minimap_request() -> bool;
 /// Sends the minimap held in the render target `image` to Godot, unless it is unchanged.
 auto send_minimap( SDL_Renderer *renderer, SDL_Texture *image ) -> void;
+
+/// Tile ids Godot wants sprites for (`category:id`, e.g. `item:knife_combat`), each asked once;
+/// taking them clears the list. The frame code draws them and answers with `send_sprites`.
+auto take_sprite_requests() -> std::vector<std::string>;
+
+/// A row of tile sprites drawn for Godot, one `tile`-sized cell per id, left to right.
+struct sprite_strip {
+    SDL_Renderer *renderer = nullptr;
+    /// Render target holding the cells.
+    SDL_Texture *image = nullptr;
+    std::vector<std::string> ids;
+    /// Per id, whether the tileset has a sprite for it.
+    std::vector<bool> found;
+    point tile;
+};
+auto send_sprites( const sprite_strip &strip ) -> void;
 
 auto shutdown() -> void;
 

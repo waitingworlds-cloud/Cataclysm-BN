@@ -3,7 +3,8 @@ extends Node
 ##
 ## Godot listens on a local port, starts the game with BN_GODOT_BRIDGE pointing at it, then
 ## exchanges length-prefixed messages over the socket:
-##   game -> Godot: [u32 length][u8 kind][payload]; kind 1 = frame, 2 = JSON, 3 = minimap
+##   game -> Godot: [u32 length][u8 kind][payload]; kind 1 = frame, 2 = JSON, 3 = minimap,
+##   4 = sprites ([u32 JSON length][JSON][image])
 ##   Godot -> game: [u32 length][JSON]
 ## See README.md for the message types.
 
@@ -16,11 +17,14 @@ signal view_received(view: Dictionary)
 signal entries_received(id: int, entries: Array)
 signal view_closed(id: int)
 signal commands_received(list: Array, suggested: Array)
+## A strip of tile sprites the game drew for `Sprites`: `meta` lists the ids, left to right.
+signal sprites_received(meta: Dictionary, strip: Image)
 signal game_exited(reason: String)
 
 const KIND_FRAME := 1
 const KIND_JSON := 2
 const KIND_MINIMAP := 3
+const KIND_SPRITES := 4
 
 var _server := TCPServer.new()
 var _peer: StreamPeerTCP
@@ -174,6 +178,8 @@ func _read() -> void:
 				minimap_received.emit(_minimap)
 		elif kind == KIND_JSON:
 			_on_json(_buf.slice(start, end).get_string_from_utf8())
+		elif kind == KIND_SPRITES:
+			_on_sprites(start, end)
 		_pos = end
 	if _pos > 0 and _pos >= _buf.size():
 		_buf.clear()
@@ -195,6 +201,22 @@ func _decode_image(start: int, end: int, texture: ImageTexture) -> ImageTexture:
 		texture.update(image)
 		return texture
 	return ImageTexture.create_from_image(image)
+
+
+func _on_sprites(start: int, end: int) -> void:
+	var json_size := _buf.decode_u32(start)
+	if _debug:
+		print("game: sprites ", _buf.slice(start + 4, start + 4 + json_size).get_string_from_utf8().left(300))
+	var meta = JSON.parse_string(_buf.slice(start + 4, start + 4 + json_size).get_string_from_utf8())
+	var at := start + 4 + json_size
+	if typeof(meta) != TYPE_DICTIONARY or end - at < 8:
+		return
+	var width := _buf.decode_u32(at)
+	var height := _buf.decode_u32(at + 4)
+	var pixels := _buf.slice(at + 8, end)
+	if width <= 0 or height <= 0 or pixels.size() != width * height * 4:
+		return
+	sprites_received.emit(meta, Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, pixels))
 
 
 func _on_json(text: String) -> void:
@@ -230,6 +252,8 @@ func _on_json(text: String) -> void:
 func send(msg: Dictionary) -> void:
 	if not is_connected_to_game():
 		return
+	if _debug and String(msg.get("t", "")) in ["sprites", "square", "run"]:
+		print("to game: ", JSON.stringify(msg).left(300))
 	var body := JSON.stringify(msg).to_utf8_buffer()
 	var header := PackedByteArray()
 	header.resize(4)
@@ -250,6 +274,20 @@ func send_mouse(kind: String, pos: Vector2, button := 1, dy := 0) -> void:
 ## Runs a game action (as named in the keybindings) by pressing the key bound to it.
 func run_action(action_id: String, category := "DEFAULTMODE") -> void:
 	send({"t": "action", "id": action_id, "cat": category})
+
+
+## Runs a game action whether or not it has a key: unbound ones go through the action menu.
+func run(action_id: String) -> void:
+	send({"t": "run", "id": action_id})
+
+
+## Acts on the map square `offset` squares from the player. With an empty `choice` the game
+## opens the square's menu of actions beside the mouse; otherwise it runs that one (`pick_up`,
+## `examine`, `attack`, `open`, `close`, `talk`, `fire`, `butcher`, `jump`, `walk`).
+func square(offset: Vector2i, choice := "") -> void:
+	# The menu opens beside the mouse, wherever on the window that is.
+	var mouse := get_viewport().get_mouse_position() / Display.frame_scale()
+	send({"t": "square", "dx": offset.x, "dy": offset.y, "choice": choice, "x": int(mouse.x), "y": int(mouse.y)})
 
 
 ## Picks entry `index` in native view `view_id`, then presses `act` (CONFIRM by default).
