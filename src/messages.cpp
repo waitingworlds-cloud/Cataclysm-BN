@@ -845,6 +845,7 @@ auto Messages::dialog::publish_native() -> void
         }
         const auto total = size();
         jsout.member( "title", _( "Messages" ) );
+        jsout.member( "nav", "messages" );
         jsout.member( "icon", "message-square" );
         jsout.member( "subtitle" );
         gs::write_span( jsout, { .text = filter_str.empty() ? string_format( _( "%d messages" ), total ) : string_format( _( "%1$d of %2$d messages match" ), shown.size(), total ) } );

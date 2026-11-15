@@ -1776,6 +1776,9 @@ auto write_sheet( JsonOut &jsout, const sheet_state &st ) -> void
                           st.line, 1u ) : st.line, count - 1 );
 
     jsout.member( "title", you.name );
+    if( you.is_avatar() ) {
+        jsout.member( "nav", "player_data" );
+    }
     jsout.member( "icon", "user-round" );
     jsout.member( "subtitle" );
     gs::write_span( jsout, { .text = sheet_subtitle( st ) } );

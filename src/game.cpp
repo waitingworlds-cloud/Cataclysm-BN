@@ -10351,7 +10351,7 @@ look_around_result game::look_around( bool show_window, tripoint_bub_ms &center,
         ui->on_screen_resize( [&]( ui_adaptor & ui ) {
 #if defined(TILES)
             if( native ) {
-                w_info = cata::godot_bridge::capture_window( 120, 54 );
+                w_info = cata::godot_bridge::capture_window( 120, 46 );
                 ui.position( point_zero, point_zero );
                 return;
             }

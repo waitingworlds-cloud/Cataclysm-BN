@@ -948,6 +948,9 @@ std::optional<construction_id> construction_menu( const bool blueprint )
         const auto has_line = select >= 0 && select < static_cast<int>( constructs.size() );
         native->publish( [&]( JsonOut & jsout ) {
             jsout.member( "title", blueprint ? _( "Plan a construction" ) : _( "Construction" ) );
+            if( !blueprint ) {
+                jsout.member( "nav", "construct" );
+            }
             jsout.member( "icon", "brick-wall" );
             if( !tab_status_line.empty() ) {
                 jsout.member( "subtitle" );

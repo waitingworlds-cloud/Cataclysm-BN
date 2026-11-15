@@ -30,6 +30,10 @@ const TABS := [
 	["messages", "Log"],
 ]
 
+## True while a game is running and its map is on screen behind this frame. Outside a game
+## (the main menu's screens, character creation) there is no map strip and no one to name.
+static var in_game := false
+
 ## Where modules go: the area right of the map strip, between the top bar and the hints.
 var body: Control
 ## The small module under the map strip; hidden when there is no strip.
@@ -54,6 +58,7 @@ var _hints: HBoxContainer
 var _footer: RichTextLabel
 var _active_tab := ""
 var _back_label := "Back to map"
+var _laid_in_game := false
 var _foot_body: Control
 
 
@@ -172,6 +177,11 @@ func _ready() -> void:
 		show_in_hand()
 
 
+func _process(_delta: float) -> void:
+	if _laid_in_game != in_game:
+		_layout()
+
+
 # --- What a screen sets --------------------------------------------------------------------------
 
 ## A plain title, for screens you can't tab away from (pickers and prompts), with the screen's
@@ -204,7 +214,8 @@ func set_hints(hints: Array) -> void:
 		var item := HBoxContainer.new()
 		item.add_theme_constant_override("separation", 7)
 		item.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		item.add_child(Slate.key_chip(String(h[0]).to_upper(), 10))
+		if String(h[0]) != "":
+			item.add_child(Slate.key_chip(String(h[0]).to_upper(), 10))
 		item.add_child(Slate.label(String(h[1]), 13, Slate.MUTED))
 		_hints.add_child(item)
 
@@ -219,6 +230,10 @@ func set_back(label: String, key: String) -> void:
 	_back.set_label(label)
 	_back.set_key(key)
 	_back.tooltip_text = label
+
+
+func set_back_visible(on: bool) -> void:
+	_back.visible = on
 
 
 ## The wielded item in the small module under the map strip: what most screens show there.
@@ -269,7 +284,8 @@ func _layout() -> void:
 	var column_height := maxf(size.y - top - GUT - FOOT - GUT, 80)
 	var hud := _hud()
 	strip = Rect2()
-	if hud != null and size.x >= STRIP_MIN_WINDOW:
+	_laid_in_game = in_game
+	if hud != null and in_game and size.x >= STRIP_MIN_WINDOW:
 		# The strip shows a cut of the main screen's map, so it can't be bigger than that.
 		var map := hud.map_rect()
 		var width := minf(clampf(roundf(size.x * 0.235), 320, 460), map.size.x)
@@ -282,9 +298,10 @@ func _layout() -> void:
 	_strip_click.size = strip.size
 
 	var left_width := strip.size.x if has_strip else clampf(size.x * 0.25, 220, 340)
+	_identity.visible = in_game
 	_identity.position = Vector2(GUT, GUT)
 	_identity.size = Vector2(left_width, TOP)
-	_bar.position = Vector2(GUT + left_width + GUT, GUT)
+	_bar.position = Vector2(GUT + left_width + GUT if in_game else GUT, GUT)
 	_bar.size = Vector2(maxf(size.x - _bar.position.x - GUT, 80), TOP)
 	_fit_bar()
 	_bar.size = Vector2(maxf(size.x - _bar.position.x - GUT, 80), TOP)

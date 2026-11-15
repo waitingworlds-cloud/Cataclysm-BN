@@ -26,6 +26,8 @@ var soft := false
 var mark := ""
 ## A favorite: a small star at the bottom left.
 var star := false
+## A colored frame in place of the plain one: green for a part you have, red for one you lack.
+var edge := Color(0, 0, 0, 0)
 var _art: Control
 
 
@@ -103,6 +105,9 @@ func _draw() -> void:
 	draw_texture_rect(plate(), rect, false, Color(1.12, 1.12, 1.12) if hot else Color.WHITE)
 	var border := Slate.ACCENT if selected else Slate.CYAN if soft else (Slate.PLATE_BORDER.lightened(0.25) if hot else Slate.PLATE_BORDER)
 	var width := 2.0 if selected or soft else 1.0
+	if edge.a > 0 and not selected:
+		border = edge
+		width = 2.0
 	draw_rect(rect.grow(-width / 2), border, false, width)
 
 

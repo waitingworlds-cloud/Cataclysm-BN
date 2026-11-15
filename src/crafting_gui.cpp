@@ -430,6 +430,109 @@ auto nested_toggle( const recipe_id &rec, bool &recalc, bool &keepline ) -> void
     recalc = true;
     keepline = true;
 }
+#if defined(TILES)
+struct recipe_row_options {
+    const recipe &rec;
+    const availability &avail;
+    /// The row is one batch size of a recipe, not a recipe of its own.
+    bool batch = false;
+};
+
+struct recipe_row_state {
+    std::string text;
+    std::string tone;
+};
+
+/// What Godot shows beside a recipe's name: its result as an item slot, how long it takes and
+/// the skill it uses, what it needs as small slots (marked when you have them) and whether you
+/// can craft it now. The availability check that built `avail` left each part's `available`
+/// mark set, so nothing is looked up in the inventory again here.
+auto write_recipe_row( JsonOut &jsout, const recipe_row_options &opts ) -> void
+{
+    const auto &rec = opts.rec;
+    if( rec.is_nested() || !rec.result().is_valid() ) {
+        return;
+    }
+    const auto write_slot = [&]( const itype_id & id ) {
+        const auto &type = id.obj();
+        jsout.member( "type", id.str() );
+        jsout.member( "sym", type.sym );
+        jsout.member( "color", string_from_color( type.color ) );
+    };
+    jsout.member( "slot" );
+    jsout.start_object();
+    write_slot( rec.result() );
+    jsout.end_object();
+
+    const auto turns = std::max( 1, rec.batch_time( 1, 1.0f, 0 ) / to_moves<int>( 1_turns ) );
+    auto meta = to_string_approx( time_duration::from_turns( turns ) );
+    if( !rec.skill_used.is_null() ) {
+        meta += string_format( " // %s %d", rec.skill_used->name(), rec.difficulty );
+    }
+    jsout.member( "meta", meta );
+
+    constexpr auto max_parts = 4;
+    auto missing = 0;
+    auto groups = 0;
+    auto shown = 0;
+    const auto &req = rec.simple_requirements();
+    const auto write_group = [&]( const auto & alternatives ) {
+        if( alternatives.empty() ) {
+            return;
+        }
+        const auto found = std::ranges::find( alternatives, available_status::a_true,
+                                              &component::available );
+        const auto have = found != alternatives.end();
+        missing += have ? 0 : 1;
+        ++groups;
+        const auto &pick = have ? *found : alternatives.front();
+        if( shown >= max_parts || pick.requirement || !pick.type.is_valid() ) {
+            return;
+        }
+        ++shown;
+        jsout.start_object();
+        write_slot( pick.type );
+        jsout.member( "name", item::nname( pick.type, static_cast<unsigned int>( std::max( pick.count,
+                                           1 ) ) ) );
+        jsout.member( "have", have );
+        jsout.end_object();
+    };
+    if( !opts.batch ) {
+        jsout.member( "parts" );
+        jsout.start_array();
+        std::ranges::for_each( req.get_components(), write_group );
+        std::ranges::for_each( req.get_tools(), write_group );
+        jsout.end_array();
+        for( const auto &alternatives : req.get_qualities() ) {
+            ++groups;
+            ++shown;
+            missing += std::ranges::contains( alternatives, available_status::a_true,
+                                              &quality_requirement::available ) ? 0 : 1;
+        }
+        if( groups > shown ) {
+            jsout.member( "parts_more", groups - shown );
+        }
+    }
+
+    const auto &avail = opts.avail;
+    const auto state = !avail.known
+                       ? recipe_row_state{ .text = _( "Locked" ), .tone = "locked" }
+                       :
+                       avail.can_craft &&avail.has_all_skills
+                       ? recipe_row_state{ .text = _( "Ready" ), .tone = "ready" }
+                       :
+                       avail.can_craft
+                       ? recipe_row_state{ .text = _( "Low skill" ), .tone = "missing" }
+                       :
+                       missing > 0
+                       ? recipe_row_state{ .text = string_format( _( "Missing %d" ), missing ), .tone = "missing" }
+                       :
+                       recipe_row_state{ .text = _( "Can't craft" ), .tone = "missing" };
+    jsout.member( "status", state.text );
+    jsout.member( "tone", state.tone );
+}
+#endif
+
 } // namespace
 
 static std::vector<std::string> recipe_info(
@@ -955,6 +1058,7 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
         };
         native->publish( [&]( JsonOut & jsout ) {
             jsout.member( "title", _( "Crafting" ) );
+            jsout.member( "nav", "craft" );
             jsout.member( "icon", "hammer" );
             if( !show_hidden ) {
                 auto hidden = num_hidden == 0
@@ -1061,7 +1165,7 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
             jsout.start_object();
             jsout.member( "title", std::string( batch ? _( "Batch size" ) : _( "Recipes" ) ) );
             jsout.member( "icon", "list" );
-            jsout.member( "stretch", 0.8 );
+            jsout.member( "stretch", 1.5 );
             jsout.member( "cursor", line );
             jsout.member( "empty", _( "No recipes here." ) );
             jsout.member( "rows" );
@@ -1084,6 +1188,7 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
                 if( rec->is_nested() ) {
                     jsout.member( "icon", "folder-open" );
                 }
+                write_recipe_row( jsout, { .rec = *rec, .avail = available[i], .batch = batch } );
                 jsout.end_object();
             }
             jsout.end_array();
@@ -1092,7 +1197,7 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
             jsout.start_object();
             jsout.member( "title", _( "Requirements" ) );
             jsout.member( "icon", "list-checks" );
-            jsout.member( "stretch", 1.1 );
+            jsout.member( "stretch", 1.0 );
             jsout.member( "body" );
             if( has_line && !current[line]->is_nested() ) {
                 const auto &avail = available[line];
@@ -1117,6 +1222,7 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
             jsout.member( "aside" );
             jsout.start_object();
             jsout.member( "width", 400 );
+            jsout.member( "heading", _( "Selected recipe" ) );
             jsout.member( "empty", _( "Pick a recipe to see what it makes." ) );
             if( has_line ) {
                 const auto &rec = *current[line];
@@ -1146,6 +1252,7 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
                     cata::godot_bridge::write_spans( jsout, result.tname( batch_size ), result.color_in_inventory() );
                     jsout.member( "sym", result.symbol() );
                     jsout.member( "sym_color", string_from_color( result.color() ) );
+                    jsout.member( "type", result.typeId().str() );
                     const auto body = format_item_info( data.get_item_display(), {} );
                     const auto lines = static_cast<int>( std::ranges::count( body, '\n' ) );
                     item_info_scroll = std::clamp( item_info_scroll, 0, std::max( 0, lines - 8 ) );

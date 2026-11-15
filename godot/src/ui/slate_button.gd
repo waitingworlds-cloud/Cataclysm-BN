@@ -1,6 +1,7 @@
 extends PanelContainer
-## Rounded button with an icon, a label and the key that does the same thing. `primary` buttons
-## are amber; `set_on` outlines a toggle that is switched on.
+## Button with an icon, a label and the key that does the same thing. The `primary` one is
+## hazard yellow with a cut corner; the rest are outlined. `set_on` lights a toggle that is
+## switched on.
 
 signal pressed
 
@@ -11,6 +12,9 @@ var _hover := false
 var _icon: TextureRect
 var _label: Label
 var _key: PanelContainer
+var _size := 12
+## Smallest text size a fitting label shrinks to before it ends in "..." (0: never shrinks).
+var _least := 0
 
 
 func _init(icon_name: String, text: String, primary := false, small := false) -> void:
@@ -26,12 +30,17 @@ func _init(icon_name: String, text: String, primary := false, small := false) ->
 	_icon = Slate.icon_rect(icon_name if icon_name != "" else "chevron-right", 14 if small else 16, fg)
 	_icon.visible = icon_name != ""
 	row.add_child(_icon)
-	_label = Slate.label(text, 12 if small else 13, fg, Slate.bold())
+	_size = 11 if small else (16 if primary else 12)
+	_label = Slate.label(text, _size, fg, Slate.spaced(Slate.heading(), 1 if small else 2))
+	_label.uppercase = true
 	_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(_label)
 	_key = Slate.key_chip("", 10)
 	if primary:
-		_key.add_theme_stylebox_override("panel", Slate.pill_box(Color(0, 0, 0, 0.16), 6, 1))
+		var chip := Slate.box(Color(0, 0, 0, 0), 0, Color(Slate.ACCENT_TEXT, 0.8), 1)
+		chip.content_margin_left = 5
+		chip.content_margin_right = 5
+		_key.add_theme_stylebox_override("panel", chip)
 		(_key.get_child(0) as Label).add_theme_color_override("font_color", Slate.ACCENT_TEXT)
 	_key.visible = false
 	row.add_child(_key)
@@ -53,6 +62,29 @@ func set_text(text: String) -> void:
 func set_compressible() -> void:
 	_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	tooltip_text = _label.text
+
+
+## Lets the label get smaller, down to `least`, when the button is narrower than its text (the
+## main action in a narrow panel), and only then end in "...".
+func set_fitting(least := 11) -> void:
+	_least = least
+	set_compressible()
+	_label.custom_minimum_size.y = _label.get_minimum_size().y
+	if not _label.resized.is_connected(_fit):
+		_label.resized.connect(_fit)
+	_fit()
+
+
+func _fit() -> void:
+	if _least <= 0 or _label.size.x <= 0:
+		return
+	var font := _label.get_theme_font("font")
+	var text := _label.text.to_upper()
+	var size := _size
+	while size > _least and font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(size)).x > _label.size.x:
+		size -= 1
+	if _label.get_theme_font_size("font_size") != Slate.fs(size):
+		_label.add_theme_font_size_override("font_size", Slate.fs(size))
 
 
 func get_text() -> String:
@@ -82,19 +114,19 @@ func set_text_color(color: Color) -> void:
 
 
 func _restyle() -> void:
-	var bg: Color
-	if _primary:
-		bg = Slate.ACCENT.lightened(0.12) if _hover and _enabled else Slate.ACCENT
-	elif _on:
-		bg = Color(Slate.ACCENT, 0.16 if _hover else 0.12)
-	else:
-		bg = Color(1, 1, 1, 0.11 if _hover and _enabled else 0.06)
 	var small: bool = get_meta("small", false)
-	var sb := Slate.box(bg, 8 if small else 10, Color(Slate.ACCENT, 0.6) if _on else Slate.BORDER, 1 if _on else 0)
-	sb.content_margin_left = 10 if small else 12
-	sb.content_margin_right = 8 if small else 10
-	sb.content_margin_top = 5 if small else 8
-	sb.content_margin_bottom = 5 if small else 8
+	var hot := _hover and _enabled
+	var sb: StyleBoxFlat
+	if _primary:
+		sb = Slate.box(Slate.ACCENT.lightened(0.3) if hot else Slate.ACCENT, 14, Slate.BORDER, 0)
+	elif _on:
+		sb = Slate.box(Color(Slate.CYAN, 0.3 if hot else 0.22), 0, Color(Slate.CYAN, 0.9), 1)
+	else:
+		sb = Slate.box(Color(Slate.CYAN, 0.14) if hot else Color(0, 0, 0, 0), 0, Color(Slate.CYAN, 0.35), 1)
+	sb.content_margin_left = 9 if small else (14 if _primary else 10)
+	sb.content_margin_right = 7 if small else 10
+	sb.content_margin_top = 4 if small else (11 if _primary else 7)
+	sb.content_margin_bottom = 4 if small else (11 if _primary else 7)
 	add_theme_stylebox_override("panel", sb)
 
 

@@ -110,6 +110,7 @@ func _on_connected() -> void:
 func _on_game_exited(reason: String) -> void:
 	_show_splash_message(reason)
 	_main_view = false
+	Cockpit.in_game = false
 	hud.visible = false
 
 
@@ -244,6 +245,7 @@ func _hotbar_shortcut(event: InputEventKey) -> bool:
 
 func _on_frame_meta(main_view: bool, shown: Array) -> void:
 	_main_view = main_view
+	Cockpit.in_game = main_view
 	visible_views = shown.map(func(id): return int(id))
 	for id in views:
 		views[id].visible = id in visible_views

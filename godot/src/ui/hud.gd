@@ -250,6 +250,13 @@ func map_rect() -> Rect2:
 	return Rect2(x, y, maxf(size.x - x - GUT - _right_width - GUT, 80), maxf(size.y - y - GUT - DECK_HEIGHT - GUT, 80))
 
 
+## Where the right column's modules stand. A docked screen (look around) takes their place, so
+## nothing ever lies over the map.
+func right_rect() -> Rect2:
+	var y := GUT + TOP_HEIGHT + GUT
+	return Rect2(size.x - GUT - _right_width, y, _right_width, maxf(size.y - y - GUT - DECK_HEIGHT - GUT, 80))
+
+
 func _layout() -> void:
 	# Narrow windows give the map room by slimming the columns.
 	_left_width = clampf(size.x * 0.21, 320, LEFT_WIDTH)
