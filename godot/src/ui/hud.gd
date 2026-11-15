@@ -215,6 +215,7 @@ var _last := {}
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_to_group("hud")
 	_frame = FrameView.new()
 	_frame.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(_frame)
@@ -228,6 +229,16 @@ func _ready() -> void:
 	Display.changed.connect(_layout)
 	resized.connect(_layout)
 	_layout()
+
+
+## The last state the game sent, for screens that show who you are while the HUD is hidden.
+func state() -> Dictionary:
+	return _hud
+
+
+## The key bound to one of the main screen's actions.
+func key(action: String) -> String:
+	return _key(action)
 
 
 # --- Layout --------------------------------------------------------------------------------------
@@ -1896,6 +1907,10 @@ class KeyButton extends Button:
 	func set_key(key: String) -> void:
 		_chip.text = " %s " % key if key.length() > 1 else key
 		_chip.visible = key != ""
+		custom_minimum_size = (get_child(0) as Control).get_combined_minimum_size()
+
+	func set_label(text: String) -> void:
+		_text.text = text.to_upper()
 		custom_minimum_size = (get_child(0) as Control).get_combined_minimum_size()
 
 

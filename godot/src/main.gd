@@ -21,6 +21,7 @@ var splash: Control
 var views := {}
 var visible_views := []
 var _last_size := Vector2i.ZERO
+var _main_view := false
 var _toast: PanelContainer
 var _toast_label: Label
 var _toast_tween: Tween
@@ -108,6 +109,7 @@ func _on_connected() -> void:
 
 func _on_game_exited(reason: String) -> void:
 	_show_splash_message(reason)
+	_main_view = false
 	hud.visible = false
 
 
@@ -116,6 +118,31 @@ func _process(_delta: float) -> void:
 	if Bridge.is_connected_to_game() and game_size != _last_size and size.x > 0:
 		_last_size = game_size
 		Bridge.send_resize(game_size)
+	_place_frame()
+
+
+## Full screens in the frame (inventory, crafting, ...) show the map in a strip at the left: the
+## same picture, moved so that you, in the middle of the main screen's viewport, stand in the
+## middle of the strip. Back on the main screen the picture goes back to its place.
+func _place_frame() -> void:
+	var at := Vector2.ZERO
+	var framed := false
+	var frames := get_tree().get_nodes_in_group("cockpit")
+	for i in range(frames.size() - 1, -1, -1):
+		var frame := frames[i] as Cockpit
+		if frame == null or not frame.is_visible_in_tree():
+			continue
+		framed = true
+		if frame.strip.size.x > 0:
+			at = frame.strip.get_center() - hud.map_rect().get_center()
+			# Whole screen pixels keep the map's pixel art sharp.
+			var ui := maxf(Display.ui_scale(), 1.0)
+			at = (at * ui).round() / ui
+		break
+	if frame_view.position != at:
+		frame_view.position = at
+	# The frame of a full screen takes the HUD's place while it is open.
+	hud.visible = _main_view and not framed
 
 
 func _on_frame(texture: ImageTexture) -> void:
@@ -216,10 +243,11 @@ func _hotbar_shortcut(event: InputEventKey) -> bool:
 
 
 func _on_frame_meta(main_view: bool, shown: Array) -> void:
-	hud.visible = main_view
+	_main_view = main_view
 	visible_views = shown.map(func(id): return int(id))
 	for id in views:
 		views[id].visible = id in visible_views
+	_place_frame()
 
 
 func _on_view(msg: Dictionary) -> void:

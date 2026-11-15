@@ -1,343 +1,184 @@
 extends Control
 ## The inventory: the game's `inventory_selector` and its variants (inventory, drop, pick up, use,
-## and every "choose an item" prompt). A large card with weight and volume at the top, one pane
-## per list the game shows (carried, nearby, worn, chosen) and the selected item's details with
-## its actions. The game owns the lists, the cursor and the filter; a click selects a row or
-## presses the key bound to an action, exactly as the keyboard would.
+## and every "choose an item" prompt), in the frame the main screen uses. One module per list the
+## game shows, side by side in the game's order so the left and right keys move the way they
+## look: what you carry and what is nearby as grids of item slots grouped by category, what you
+## wear and what you have chosen as rows, and the selected item with its actions at the right.
+## Lists with their own columns (calories, damage, ...) are shown as rows so nothing the old
+## screen showed is lost, and any grid can be switched to rows.
+##
+## The game owns the lists, the cursor and the filter; a click selects a slot or presses the key
+## bound to an action, exactly as the keyboard would.
 
+const Hud := preload("res://src/ui/hud.gd")
 ## Picks arrive in the game as `pane * STRIDE + row index` (see `inventory_ui.cpp`).
 const STRIDE := 100000
-const ROW_HEIGHT := 36
+const SLOT := 66.0
+const SLOT_GAP := 6
+const ROW_HEIGHT := 40
 ## Narrowest extra column a list shows (damage, encumbrance, ...), and the gap between them.
 const MIN_CELL_WIDTH := 30
 const MAX_CELL_WIDTH := 190
 const CELL_GAP := 10
-const ASIDE_WIDTH := 390.0
-const MAX_SIZE := Vector2(1440, 920)
-const PANE_NAMES := {"carried": "Carried", "nearby": "Nearby", "worn": "Worn", "selection": "Chosen"}
-const PANE_ICONS := {"carried": "backpack", "nearby": "map-pin", "worn": "shirt", "selection": "square-check-big"}
-## Item actions offered next to the details, when the screen's input context has them.
+const PANE_TITLES := {"carried": "Carried", "nearby": "Nearby // In reach", "worn": "Rig // Equipment", "selection": "Chosen"}
+## Actions on the selected item, when the screen's input context has them.
 const ITEM_ACTIONS := [
-	["WIELD", "Wield", "sword"],
-	["WEAR", "Wear", "shirt"],
-	["EXAMINE", "Examine", "eye"],
-	["TOGGLE_FAVORITE", "Favorite", "star"],
+	["WIELD", "Wield", "Hold this item in your hands"],
+	["WEAR", "Wear", "Put this item on"],
+	["EXAMINE", "Examine", "Read the item's full description"],
+	["TOGGLE_FAVORITE", "Favorite", "Favorites are kept when you drop everything else"],
 ]
+## Actions on the whole list.
+const LIST_ACTIONS := [
+	["CATEGORY_SELECTION", "By category", "Move between categories instead of items"],
+	["unload_all", "Unload all", "Unload every carried item that can be unloaded"],
+	["DROP_NON_FAVORITE", "Not favorites", "Mark or unmark everything that is not a favorite or worn"],
+]
+const SETTINGS := "user://interface.cfg"
+
+## Slots or rows for plain item lists; the player's choice, kept between runs.
+static var grid_view := true
+static var _settings_loaded := false
 
 var view_id := 0
 
 var _msg := {}
 var _columns: Array = []
-var _rows := {}
-var _panes: Array = []
+## Vector2i(pane, row index) -> the slot or row showing it.
+var _cells := {}
+var _pane_modules: Array = []
 var _cursor := Vector2i(-1, -1)
 var _multi := false
-var _has_cells := false
 
-var _card: PanelContainer
-var _title: Label
-var _hint: RichTextLabel
-var _stats: HBoxContainer
+var _cockpit: Cockpit
+var _cols: HBoxContainer
+var _panes: HBoxContainer
+var _keyed := false
+var _load_module: Hud.Module
+var _load_inline: VBoxContainer
+var _load_foot: VBoxContainer
+var _foot_kind := ""
 var _search: PanelContainer
 var _search_text: Label
 var _search_key: PanelContainer
-var _category_button: PillButton
-var _unload_button: PillButton
-var _count_chip: PanelContainer
-var _count_label: Label
-var _pane_row: HBoxContainer
-var _aside: PanelContainer
-var _glyph: Label
-var _glyph_tile: PanelContainer
+var _detail: Hud.Module
+var _slot: ItemSlot
 var _name: RichTextLabel
 var _category: Label
+var _facts: HBoxContainer
 var _denial: PanelContainer
 var _denial_text: RichTextLabel
 var _info_scroll: ScrollContainer
 var _info: RichTextLabel
 var _no_item: Label
+var _amount: Label
+var _confirm: ActionButton
 var _actions: GridContainer
-var _confirm: PillButton
-var _item_buttons := {}
-var _footer: RichTextLabel
-var _hints: HBoxContainer
+var _buttons := {}
 
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var scrim := ColorRect.new()
-	scrim.color = Slate.SCRIM
-	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
-	scrim.mouse_filter = Control.MOUSE_FILTER_STOP
-	scrim.gui_input.connect(func(e: InputEvent):
-		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
-			Bridge.press(view_id, "QUIT"))
-	add_child(scrim)
+	_load_settings()
+	_cockpit = Cockpit.new()
+	add_child(_cockpit)
+	_cockpit.close_pressed.connect(func(): Bridge.press(view_id, "QUIT"))
+	_cockpit.tab_pressed.connect(func(action: String):
+		# Leave this screen, then open the other one as its key would.
+		Bridge.press(view_id, "QUIT")
+		Bridge.run(action))
+	_cockpit.laid_out.connect(_layout)
 
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(center)
-
-	_card = PanelContainer.new()
-	# Solid, unlike the HUD's cards: a full screen reads better without the map showing through.
-	var card_style := Slate.card_box(18, 0)
-	card_style.bg_color = Slate.CARD_SOLID
-	_card.add_theme_stylebox_override("panel", card_style)
-	_card.mouse_filter = Control.MOUSE_FILTER_STOP
-	center.add_child(_card)
-
-	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 0)
-	_card.add_child(col)
-	col.add_child(_build_header())
-	col.add_child(_build_toolbar())
-	col.add_child(_rule())
-	var body := HBoxContainer.new()
-	body.add_theme_constant_override("separation", 0)
-	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	col.add_child(body)
-	_pane_row = HBoxContainer.new()
-	_pane_row.add_theme_constant_override("separation", 0)
-	_pane_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	body.add_child(_pane_row)
-	body.add_child(_build_aside())
-	col.add_child(_build_footer())
-	resized.connect(_layout)
+	_cols = HBoxContainer.new()
+	_cols.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_cols.add_theme_constant_override("separation", Cockpit.GUT)
+	_cols.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_cockpit.body.add_child(_cols)
+	var middle := VBoxContainer.new()
+	middle.add_theme_constant_override("separation", Cockpit.GUT)
+	middle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	middle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_cols.add_child(middle)
+	_panes = HBoxContainer.new()
+	_panes.add_theme_constant_override("separation", Cockpit.GUT)
+	_panes.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_panes.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	middle.add_child(_panes)
+	# Weight and volume sit under the map strip; without the strip they get a module here.
+	_load_module = Hud.Module.new("Load")
+	_load_inline = VBoxContainer.new()
+	_load_inline.add_theme_constant_override("separation", 6)
+	_load_module.set_body(_load_inline, 12, 8)
+	_load_module.visible = false
+	middle.add_child(_load_module)
+	_cols.add_child(_build_detail())
 	_layout()
+
+
+static func _load_settings() -> void:
+	if _settings_loaded:
+		return
+	_settings_loaded = true
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS) == OK:
+		grid_view = bool(cfg.get_value("inventory", "grid", true))
+
+
+static func _save_settings() -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	cfg.set_value("inventory", "grid", grid_view)
+	cfg.save(SETTINGS)
 
 
 # --- Building ------------------------------------------------------------------------------------
 
-func _rule(vertical := false) -> ColorRect:
+func _rule() -> ColorRect:
 	var line := ColorRect.new()
 	line.color = Slate.BORDER
-	if vertical:
-		line.custom_minimum_size.x = 1
-	else:
-		line.custom_minimum_size.y = 1
+	line.custom_minimum_size.y = 1
 	line.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return line
 
 
-func _margin(child: Control, left: int, top: int, right: int, bottom: int) -> MarginContainer:
-	var m := MarginContainer.new()
-	m.add_theme_constant_override("margin_left", left)
-	m.add_theme_constant_override("margin_top", top)
-	m.add_theme_constant_override("margin_right", right)
-	m.add_theme_constant_override("margin_bottom", bottom)
-	m.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	m.add_child(child)
-	return m
-
-
-func _build_header() -> Control:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 14)
-	var badge := PanelContainer.new()
-	badge.add_theme_stylebox_override("panel", Slate.box(Color(Slate.ACCENT, 0.14), 10, Slate.BORDER, 0))
-	badge.custom_minimum_size = Vector2(38, 38)
-	badge.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	var icon := Slate.icon_rect("backpack", 20, Slate.ACCENT)
-	badge.add_child(icon)
-	row.add_child(badge)
-
-	var titles := VBoxContainer.new()
-	titles.add_theme_constant_override("separation", 1)
-	titles.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	titles.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	row.add_child(titles)
-	_title = Slate.label("", 19, Slate.TEXT, Slate.heavy())
-	_title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	titles.add_child(_title)
-	_hint = Slate.rich(12)
-	_hint.autowrap_mode = TextServer.AUTOWRAP_OFF
-	_hint.add_theme_color_override("default_color", Slate.FAINT)
-	titles.add_child(_hint)
-
-	_stats = HBoxContainer.new()
-	_stats.add_theme_constant_override("separation", 22)
-	_stats.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	row.add_child(_stats)
-
-	var close := Button.new()
-	close.icon = Slate.icon("x", 18)
-	close.tooltip_text = "Close"
-	close.focus_mode = Control.FOCUS_NONE
-	close.custom_minimum_size = Vector2(36, 36)
-	close.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	close.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	close.add_theme_color_override("icon_normal_color", Slate.MUTED)
-	close.add_theme_color_override("icon_hover_color", Slate.TEXT)
-	close.pressed.connect(func(): Bridge.press(view_id, "QUIT"))
-	row.add_child(close)
-	return _margin(row, 22, 18, 16, 14)
-
-
-## Weight or volume carried, as a bar against the limit.
-func _stat(label: String, current: Array, limit: Array) -> Control:
-	var parts := label.trim_suffix(":").split("(")
-	var name := parts[0].strip_edges()
-	var unit := parts[1].trim_suffix(")").strip_edges() if parts.size() > 1 else ""
-	var now := Slate.plain(current).strip_edges()
-	var most := Slate.plain(limit).strip_edges()
-	var ratio := 0.0
-	if most.is_valid_float() and float(most) > 0.0 and now.is_valid_float():
-		ratio = float(now) / float(most)
-	var color := Slate.GOOD
-	if ratio > 1.0:
-		color = Slate.DANGER
-	elif ratio > 0.85:
-		color = Slate.WARN
-
+func _build_detail() -> Control:
+	_detail = Hud.Module.new("Selected item", Slate.ACCENT)
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 6)
-	col.custom_minimum_size.x = 170
-	col.tooltip_text = "%s carried: %s of %s %s" % [name, now, most, unit]
-	col.mouse_filter = Control.MOUSE_FILTER_PASS
-	var top := HBoxContainer.new()
-	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(top)
-	var title := Slate.label(name, 12, Slate.MUTED, Slate.semibold())
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	top.add_child(title)
-	var value := Slate.rich(12)
-	value.autowrap_mode = TextServer.AUTOWRAP_OFF
-	value.add_theme_font_override("normal_font", Slate.mono())
-	value.text = "%s[color=#%s] / %s %s[/color]" % [
-			Slate.bbcode(current, Slate.TEXT), Slate.FAINT.to_html(false), most, unit]
-	top.add_child(value)
-	var track := PanelContainer.new()
-	track.add_theme_stylebox_override("panel", Slate.box(Slate.TRACK, 3, Slate.BORDER, 0))
-	track.custom_minimum_size.y = 6
-	track.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(track)
-	# A PanelContainer stretches its child, so the fill sits in a plain holder where anchors apply.
-	var holder := Control.new()
-	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	track.add_child(holder)
-	var fill := Panel.new()
-	fill.add_theme_stylebox_override("panel", Slate.box(color, 3, Slate.BORDER, 0))
-	fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	fill.anchor_bottom = 1.0
-	fill.anchor_right = clampf(ratio, 0.0, 1.0)
-	holder.add_child(fill)
-	return col
-
-
-func _build_toolbar() -> Control:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
-
-	_search = PanelContainer.new()
-	_search.add_theme_stylebox_override("panel", _search_box(false))
-	_search.mouse_filter = Control.MOUSE_FILTER_STOP
-	_search.mouse_default_cursor_shape = Control.CURSOR_IBEAM
-	_search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_search.tooltip_text = "Search your items"
-	_search.gui_input.connect(func(e: InputEvent):
-		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
-			if String(_msg.get("prompt", "")) == "":
-				Bridge.press(view_id, "INVENTORY_FILTER"))
-	var search_row := HBoxContainer.new()
-	search_row.add_theme_constant_override("separation", 10)
-	search_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_search.add_child(search_row)
-	search_row.add_child(Slate.icon_rect("search", 16, Slate.MUTED))
-	_search_text = Slate.label("", 14, Slate.FAINT)
-	_search_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_search_text.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	search_row.add_child(_search_text)
-	_search_key = Slate.key_chip("/")
-	search_row.add_child(_search_key)
-	row.add_child(_search)
-
-	_count_chip = PanelContainer.new()
-	_count_chip.add_theme_stylebox_override("panel", _search_box(true))
-	_count_chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_count_label = Slate.label("", 14, Slate.TEXT, Slate.mono())
-	_count_chip.add_child(_count_label)
-	_count_chip.visible = false
-	row.add_child(_count_chip)
-
-	_category_button = PillButton.new("layers", "Jump by category", false)
-	_category_button.tooltip_text = "Move between categories instead of items"
-	_category_button.pressed.connect(func(): Bridge.press(view_id, "CATEGORY_SELECTION"))
-	row.add_child(_category_button)
-	_unload_button = PillButton.new("package-open", "Unload all", false)
-	_unload_button.tooltip_text = "Unload every carried item that can be unloaded"
-	_unload_button.pressed.connect(func(): Bridge.press(view_id, "unload_all"))
-	row.add_child(_unload_button)
-	return _margin(row, 22, 0, 22, 14)
-
-
-func _search_box(active: bool) -> StyleBoxFlat:
-	var sb := Slate.box(Color(1, 1, 1, 0.05), 10, Slate.ACCENT if active else Slate.BORDER, 1)
-	sb.content_margin_left = 12
-	sb.content_margin_right = 8
-	sb.content_margin_top = 8
-	sb.content_margin_bottom = 8
-	return sb
-
-
-func _build_aside() -> Control:
-	_aside = PanelContainer.new()
-	var sb := Slate.box(Color(1, 1, 1, 0.025), 0, Slate.BORDER, 0)
-	sb.border_width_left = 1
-	sb.border_color = Slate.BORDER
-	sb.content_margin_left = 22
-	sb.content_margin_right = 22
-	sb.content_margin_top = 18
-	sb.content_margin_bottom = 18
-	_aside.add_theme_stylebox_override("panel", sb)
-	_aside.custom_minimum_size.x = ASIDE_WIDTH
-	_aside.mouse_filter = Control.MOUSE_FILTER_PASS
-
-	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 14)
-	_aside.add_child(col)
+	col.add_theme_constant_override("separation", 12)
+	_detail.set_body(col, 16, 14)
 
 	var head := HBoxContainer.new()
 	head.add_theme_constant_override("separation", 14)
 	col.add_child(head)
-	_glyph_tile = PanelContainer.new()
-	_glyph_tile.add_theme_stylebox_override("panel", Slate.box(Color(1, 1, 1, 0.06), 12, Slate.BORDER, 1))
-	_glyph_tile.custom_minimum_size = Vector2(52, 52)
-	_glyph_tile.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	_glyph = Slate.label("", 26, Slate.TEXT, Slate.mono_bold())
-	_glyph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_glyph_tile.add_child(_glyph)
-	head.add_child(_glyph_tile)
+	_slot = ItemSlot.new(92)
+	_slot.selected = true
+	_slot.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	head.add_child(_slot)
 	var names := VBoxContainer.new()
-	names.add_theme_constant_override("separation", 4)
+	names.add_theme_constant_override("separation", 5)
 	names.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	names.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	head.add_child(names)
-	_name = Slate.rich(17)
-	_name.add_theme_font_override("normal_font", Slate.bold())
+	_name = Slate.rich(19)
+	_name.add_theme_font_override("normal_font", Slate.heading())
 	names.add_child(_name)
-	_category = Slate.label("", 11, Slate.FAINT, Slate.bold())
+	_category = Slate.label("", 11, Slate.MUTED, Slate.mono())
 	names.add_child(_category)
+	_facts = HBoxContainer.new()
+	_facts.add_theme_constant_override("separation", 6)
+	names.add_child(_facts)
 
 	# Why the selected item can't be chosen here, in full (rows only have room for the start).
 	_denial = PanelContainer.new()
-	var denial_box := Slate.box(Color(Slate.DANGER, 0.1), 10, Color(Slate.DANGER, 0.35), 1)
+	var denial_box := Slate.box(Color(Slate.DANGER, 0.1), 0, Color(Slate.DANGER, 0.5), 1)
 	denial_box.content_margin_left = 12
 	denial_box.content_margin_right = 12
 	denial_box.content_margin_top = 8
 	denial_box.content_margin_bottom = 8
 	_denial.add_theme_stylebox_override("panel", denial_box)
-	var denial_row := HBoxContainer.new()
-	denial_row.add_theme_constant_override("separation", 10)
-	_denial.add_child(denial_row)
-	var alert := Slate.icon_rect("circle-alert", 16, Slate.DANGER)
-	alert.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	denial_row.add_child(alert)
 	_denial_text = Slate.rich(13)
-	_denial_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_denial_text.add_theme_color_override("default_color", Slate.DANGER)
-	denial_row.add_child(_denial_text)
+	_denial.add_child(_denial_text)
 	col.add_child(_denial)
 
 	col.add_child(_rule())
@@ -357,141 +198,164 @@ func _build_aside() -> Control:
 	_no_item.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(_no_item)
 
-	_confirm = PillButton.new("corner-down-left", "Select", true)
+	# How many of a stack to mark, while you type it.
+	_amount = Slate.label("", 14, Slate.ACCENT, Slate.mono())
+	_amount.visible = false
+	col.add_child(_amount)
+	_confirm = ActionButton.new(true)
 	_confirm.pressed.connect(func(): Bridge.press(view_id, "CONFIRM"))
 	col.add_child(_confirm)
 	_actions = GridContainer.new()
 	_actions.columns = 2
-	_actions.add_theme_constant_override("h_separation", 8)
-	_actions.add_theme_constant_override("v_separation", 8)
+	_actions.add_theme_constant_override("h_separation", 6)
+	_actions.add_theme_constant_override("v_separation", 6)
 	col.add_child(_actions)
-	for a in ITEM_ACTIONS:
-		var b := PillButton.new(a[2], a[1], false)
+	for a in ITEM_ACTIONS + LIST_ACTIONS:
+		var b := ActionButton.new(false)
+		b.set_label(String(a[1]))
+		b.tooltip_text = String(a[2])
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var act: String = a[0]
 		b.pressed.connect(func(): Bridge.press(view_id, act))
 		_actions.add_child(b)
-		_item_buttons[act] = b
-	return _aside
+		_buttons[act] = b
+	return _detail
 
 
-func _build_footer() -> Control:
-	var bar := PanelContainer.new()
-	var sb := Slate.box(Color(0, 0, 0, 0.18), 0, Slate.BORDER, 0)
-	sb.border_width_top = 1
-	sb.border_color = Slate.BORDER
-	sb.corner_radius_bottom_left = 18
-	sb.corner_radius_bottom_right = 18
-	sb.content_margin_left = 22
-	sb.content_margin_right = 18
-	sb.content_margin_top = 10
-	sb.content_margin_bottom = 10
-	bar.add_theme_stylebox_override("panel", sb)
-	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+func _build_search(head: HBoxContainer) -> void:
+	_search = PanelContainer.new()
+	_search.mouse_filter = Control.MOUSE_FILTER_STOP
+	_search.mouse_default_cursor_shape = Control.CURSOR_IBEAM
+	_search.custom_minimum_size = Vector2(190, 22)
+	_search.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_search.tooltip_text = "Search your items"
+	_search.gui_input.connect(func(e: InputEvent):
+		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
+			if String(_msg.get("prompt", "")) == "":
+				Bridge.press(view_id, "INVENTORY_FILTER"))
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 14)
-	bar.add_child(row)
-	_footer = Slate.rich(12)
-	_footer.add_theme_color_override("default_color", Slate.MUTED)
-	_footer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_footer.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	row.add_child(_footer)
-	_hints = HBoxContainer.new()
-	_hints.add_theme_constant_override("separation", 16)
-	row.add_child(_hints)
-	return bar
+	row.add_theme_constant_override("separation", 6)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_search.add_child(row)
+	row.add_child(Slate.label(">", 11, Slate.CYAN, Slate.mono()))
+	_search_text = Slate.label("", 11, Slate.FAINT, Slate.mono())
+	_search_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_search_text.clip_text = true
+	row.add_child(_search_text)
+	_search_key = Slate.key_chip("/", 10)
+	row.add_child(_search_key)
+	head.add_child(_search)
+
+
+func _search_box(active: bool) -> StyleBoxFlat:
+	var sb := Slate.box(Color(0, 0, 0, 0.25), 0, Slate.ACCENT if active else Color(Slate.CYAN, 0.4), 1)
+	sb.content_margin_left = 8
+	sb.content_margin_right = 4
+	sb.content_margin_top = 1
+	sb.content_margin_bottom = 1
+	return sb
 
 
 func _layout() -> void:
-	if _card == null:
+	if _cols == null:
 		return
-	var viewport := get_viewport_rect().size
-	var target := Vector2(minf(viewport.x - 48, MAX_SIZE.x), minf(viewport.y - 48, MAX_SIZE.y))
-	_card.custom_minimum_size = target
-	# Narrow windows, and lists with extra columns, give the details less room.
-	var aside := clampf(target.x * 0.3, 300, ASIDE_WIDTH)
-	_aside.custom_minimum_size.x = 300.0 if _has_cells else aside
+	var width := _cockpit.body.size.x
+	_detail.custom_minimum_size.x = clampf(roundf(width * 0.29), 280, 420)
+	_update_load()
 
 
 # --- Updates from the game -----------------------------------------------------------------------
 
 func set_entries(columns: Array) -> void:
 	_columns = columns
-	_has_cells = columns.any(func(c): return c.get("visible", false) and c.get("rows", []).any(
-			func(r): return not r.has("cat") and not r.get("cells", []).is_empty()))
-	_layout()
 	_build_panes()
+	if not _msg.is_empty():
+		apply(_msg)
 	_apply_cursor(true)
 
 
 func apply(msg: Dictionary) -> void:
 	_msg = msg
-	_title.text = Slate.plain(msg.get("title", [])).strip_edges()
-	if _title.text == "":
-		_title.text = "Inventory"
-	var hint: Array = msg.get("hint", [])
-	_hint.text = Slate.bbcode(hint, Slate.FAINT).strip_edges()
-	_hint.visible = Slate.plain(hint).strip_edges() != ""
-
-	for c in _stats.get_children():
-		c.queue_free()
-	for s in msg.get("stats", []):
-		_stats.add_child(_stat(String(s.get("label", "")), s.get("current", []), s.get("limit", [])))
-
+	var title := Slate.plain(msg.get("title", [])).strip_edges()
+	if title == "":
+		title = "Inventory"
 	var keys: Dictionary = msg.get("keys", {})
+	var quit := Slate.key_name(String(keys.get("QUIT", "Esc")))
+	# The inventory itself is one of the big screens; everything else is a question to answer.
+	if title == "Inventory":
+		_cockpit.set_tabs("inventory")
+		_cockpit.set_back("Back to map", quit)
+	else:
+		_cockpit.set_title(title, Slate.bbcode(msg.get("hint", []), Slate.MUTED).strip_edges())
+		_cockpit.set_back("Cancel", quit)
+
 	var prompt := String(msg.get("prompt", ""))
-	var typing := prompt == "filter"
-	var filter := String(msg.get("prompt_text", "")) if typing else String(msg.get("filter", ""))
-	_search.add_theme_stylebox_override("panel", _search_box(typing))
+	_update_search()
+	_amount.visible = prompt == "count"
+	_amount.text = "AMOUNT  %s▏" % String(msg.get("prompt_text", ""))
+
+	var confirm_label := String(msg.get("confirm_label", ""))
+	_confirm.set_label(confirm_label if confirm_label != "" else ("Confirm" if _multi else "Select"))
+	_confirm.set_key(Slate.key_name(String(keys.get("CONFIRM", ""))))
+	_confirm.set_enabled(bool(msg.get("available", true)))
+	(_buttons["CATEGORY_SELECTION"] as ActionButton).set_on(bool(msg.get("category_mode", false)))
+
+	_update_detail(msg.get("detail", {}), keys)
+	_cockpit.set_footer(Slate.bbcode(msg.get("footer", []), Slate.MUTED).strip_edges())
+	_update_hints(keys, prompt == "filter" or prompt == "count")
+	_update_load()
+	_apply_cursor(false)
+
+
+func _update_search() -> void:
+	if not is_instance_valid(_search):
+		return
+	var keys: Dictionary = _msg.get("keys", {})
+	var typing := String(_msg.get("prompt", "")) == "filter"
+	var filter := String(_msg.get("prompt_text", "")) if typing else String(_msg.get("filter", ""))
+	_search.add_theme_stylebox_override("panel", _search_box(typing or filter != ""))
 	if typing or filter != "":
 		_search_text.text = filter + ("▏" if typing else "")
 		_search_text.add_theme_color_override("font_color", Slate.TEXT)
 	else:
-		_search_text.text = "Search"
+		_search_text.text = "search"
 		_search_text.add_theme_color_override("font_color", Slate.FAINT)
 	_search.visible = keys.has("INVENTORY_FILTER")
 	_search_key.visible = not typing and String(keys.get("INVENTORY_FILTER", "")) != ""
 	(_search_key.get_child(0) as Label).text = Slate.key_name(String(keys.get("INVENTORY_FILTER", "")))
-	_count_chip.visible = prompt == "count"
-	_count_label.text = "Amount  %s▏" % String(msg.get("prompt_text", ""))
-
-	_category_button.visible = keys.has("CATEGORY_SELECTION")
-	_category_button.set_key(Slate.key_name(String(keys.get("CATEGORY_SELECTION", ""))))
-	_category_button.set_on(bool(msg.get("category_mode", false)))
-	_unload_button.visible = keys.has("unload_all")
-	_unload_button.set_key(Slate.key_name(String(keys.get("unload_all", ""))))
-
-	var confirm_label := String(msg.get("confirm_label", ""))
-	_confirm.set_text(confirm_label if confirm_label != "" else ("Confirm" if _multi else "Select"))
-	_confirm.set_key(Slate.key_name(String(keys.get("CONFIRM", ""))))
-	_confirm.set_enabled(bool(msg.get("available", true)))
-
-	_update_detail(msg.get("detail", {}), keys)
-	_footer.text = Slate.bbcode(msg.get("footer", []), Slate.MUTED).strip_edges()
-	_update_hints(keys, typing or prompt == "count")
-	_apply_cursor(false)
 
 
 func _update_detail(detail: Dictionary, keys: Dictionary) -> void:
 	var has_item := not detail.is_empty()
-	_glyph_tile.visible = has_item
+	_slot.visible = has_item
 	_name.visible = has_item
 	_category.visible = has_item
+	_facts.visible = has_item
 	_info_scroll.visible = has_item
 	_denial.visible = has_item and detail.has("denial")
 	_no_item.visible = not has_item
 	if not has_item:
 		_no_item.text = "Nothing to show here." if bool(_msg.get("empty", false)) else "Select an item to see its details."
-	for act in _item_buttons:
-		var b: PillButton = _item_buttons[act]
-		b.visible = has_item and keys.has(act)
-		b.set_key(Slate.key_name(String(keys.get(act, ""))))
+	for a in ITEM_ACTIONS:
+		var b: ActionButton = _buttons[a[0]]
+		b.visible = has_item and keys.has(a[0])
+		b.set_key(Slate.key_name(String(keys.get(a[0], ""))))
+	for a in LIST_ACTIONS:
+		var b: ActionButton = _buttons[a[0]]
+		b.visible = keys.has(a[0])
+		b.set_key(Slate.key_name(String(keys.get(a[0], ""))))
 	if not has_item:
 		return
-	_glyph.text = String(detail.get("sym", "?"))
-	_glyph.add_theme_color_override("font_color", Slate.curses(String(detail.get("sym_color", "c_white"))))
+	_slot.set_item(String(detail.get("type", "")), String(detail.get("sym", "?")), Slate.curses(String(detail.get("sym_color", "c_white"))))
+	_slot.star = bool(detail.get("fav", false))
 	_name.text = Slate.bbcode(detail.get("name", []), Slate.TEXT)
 	_category.text = String(detail.get("category", "")).to_upper()
+	for c in _facts.get_children():
+		_facts.remove_child(c)
+		c.queue_free()
+	for fact in [["Weight", String(detail.get("weight", ""))], ["Volume", String(detail.get("volume", ""))]]:
+		if String(fact[1]) != "":
+			_facts.add_child(_fact(String(fact[0]), String(fact[1])))
 	_denial_text.text = Slate.bbcode(detail.get("denial", []), Slate.DANGER).strip_edges()
 	var info := Slate.bbcode(detail.get("info", []), Slate.SOFT)
 	# The game separates sections with "--" lines; show them as spacing instead.
@@ -499,82 +363,293 @@ func _update_detail(detail: Dictionary, keys: Dictionary) -> void:
 	if info != _info.text:
 		_info.text = info
 		_info_scroll.scroll_vertical = 0
-	var fav := bool(detail.get("fav", false))
-	(_item_buttons["TOGGLE_FAVORITE"] as PillButton).set_text("Unfavorite" if fav else "Favorite")
+	(_buttons["TOGGLE_FAVORITE"] as ActionButton).set_label("Unfavorite" if bool(detail.get("fav", false)) else "Favorite")
+
+
+## A small labeled value, e.g. `WEIGHT 1.10 kg`.
+func _fact(title: String, value: String) -> Control:
+	var box := PanelContainer.new()
+	var sb := Slate.box(Slate.RAISED, 0, Slate.BORDER, 0)
+	sb.content_margin_left = 8
+	sb.content_margin_right = 8
+	sb.content_margin_top = 3
+	sb.content_margin_bottom = 3
+	box.add_theme_stylebox_override("panel", sb)
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", -2)
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(col)
+	col.add_child(Slate.label(title.to_upper(), 9, Slate.FAINT, Slate.mono()))
+	col.add_child(Slate.label(value, 12, Slate.TEXT, Slate.mono()))
+	return box
 
 
 func _update_hints(keys: Dictionary, typing: bool) -> void:
-	for c in _hints.get_children():
-		c.queue_free()
 	if typing:
-		_hints.add_child(_hint_item("Enter", "Done"))
-		_hints.add_child(_hint_item("Esc", "Cancel"))
+		_cockpit.set_hints([["Enter", "done"], ["Esc", "cancel"]])
 		return
-	_hints.add_child(_hint_item("↑↓", "Move"))
+	var hints := [["↑↓", "move"]]
 	if _multi:
-		_hints.add_child(_hint_item(Slate.key_name(String(keys.get("RIGHT", "→"))), "Mark"))
-		_hints.add_child(_hint_item("0-9", "Amount"))
+		hints.append([Slate.key_name(String(keys.get("RIGHT", "→"))), "mark"])
+		hints.append(["0-9", "amount"])
 	elif _visible_panes() > 1:
-		_hints.add_child(_hint_item("←→", "Switch list"))
-	_hints.add_child(_hint_item(Slate.key_name(String(keys.get("CONFIRM", "Enter"))), _confirm.get_text()))
-	_hints.add_child(_hint_item(Slate.key_name(String(keys.get("QUIT", "Esc"))), "Close"))
+		hints.append(["←→", "switch list"])
+	hints.append([Slate.key_name(String(keys.get("CONFIRM", "Enter"))), _confirm.get_label().to_lower()])
+	if keys.has("INVENTORY_FILTER"):
+		hints.append([Slate.key_name(String(keys.get("INVENTORY_FILTER", "/"))), "search"])
+	if _keyed:
+		hints.append(["a-z", "pick by letter"])
+	hints.append([Slate.key_name(String(keys.get("QUIT", "Esc"))), "back"])
+	_cockpit.set_hints(hints)
 
 
-func _hint_item(key: String, text: String) -> HBoxContainer:
-	var h := HBoxContainer.new()
-	h.add_theme_constant_override("separation", 6)
-	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	h.add_child(Slate.key_chip(key, 10))
-	h.add_child(Slate.label(text, 12, Slate.MUTED))
-	return h
+## Weight and volume carried, as bars against the limit: under the map strip, or in a module of
+## their own when the window has no room for the strip.
+func _update_load() -> void:
+	if _cockpit == null or _msg.is_empty():
+		return
+	var stats: Array = _msg.get("stats", [])
+	var kind := "hand" if stats.is_empty() else "load"
+	if kind != _foot_kind:
+		_foot_kind = kind
+		if kind == "load":
+			_load_foot = VBoxContainer.new()
+			_load_foot.add_theme_constant_override("separation", 6)
+			_load_foot.alignment = BoxContainer.ALIGNMENT_CENTER
+			_cockpit.set_foot("Load", _load_foot)
+		else:
+			_load_foot = null
+			_cockpit.show_in_hand()
+	_load_module.visible = kind == "load" and not _cockpit.has_foot()
+	if kind != "load":
+		return
+	for box in [_load_foot, _load_inline]:
+		for c in box.get_children():
+			box.remove_child(c)
+			c.queue_free()
+		for s in stats:
+			box.add_child(_stat(String(s.get("label", "")), s.get("current", []), s.get("limit", [])))
 
 
-# --- Panes and rows ------------------------------------------------------------------------------
+func _stat(label: String, current: Array, limit: Array) -> Control:
+	var parts := label.trim_suffix(":").split("(")
+	var name := parts[0].strip_edges()
+	var unit := parts[1].trim_suffix(")").strip_edges() if parts.size() > 1 else ""
+	var now := Slate.plain(current).strip_edges()
+	var most := Slate.plain(limit).strip_edges()
+	var ratio := 0.0
+	if most.is_valid_float() and float(most) > 0.0 and now.is_valid_float():
+		ratio = float(now) / float(most)
+	var color := Slate.CYAN
+	if ratio > 1.0:
+		color = Slate.DANGER
+	elif ratio > 0.85:
+		color = Slate.WARN
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.tooltip_text = "%s carried: %s of %s %s" % [name, now, most, unit]
+	row.mouse_filter = Control.MOUSE_FILTER_PASS
+	var title := Slate.label(name.to_upper(), 11, Slate.MUTED, Slate.mono())
+	title.custom_minimum_size.x = 62
+	row.add_child(title)
+	var meter := Meter.new()
+	meter.ratio = ratio
+	meter.color = color
+	meter.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	meter.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(meter)
+	var value := Slate.rich(11)
+	value.autowrap_mode = TextServer.AUTOWRAP_OFF
+	value.add_theme_font_override("normal_font", Slate.mono())
+	value.text = "%s[color=#%s] / %s %s[/color]" % [Slate.bbcode(current, Slate.TEXT), Slate.MUTED.to_html(false), most, unit]
+	row.add_child(value)
+	return row
+
+
+# --- Panes ---------------------------------------------------------------------------------------
 
 func _visible_panes() -> int:
 	return _columns.filter(func(c): return bool(c.get("visible", false))).size()
 
 
+static func _has_cells(rows: Array) -> bool:
+	return rows.any(func(r): return not r.has("cat") and not r.get("cells", []).is_empty())
+
+
 func _build_panes() -> void:
-	for c in _pane_row.get_children():
+	for c in _panes.get_children():
+		_panes.remove_child(c)
 		c.queue_free()
-	_rows.clear()
-	_panes.clear()
+	_cells.clear()
+	_pane_modules.clear()
 	_multi = false
+	_keyed = false
+	_search = null
 	var first := true
 	for p in _columns.size():
 		var column: Dictionary = _columns[p]
 		if not bool(column.get("visible", false)):
-			_panes.append(null)
+			_pane_modules.append(null)
 			continue
-		_multi = _multi or bool(column.get("multi", false))
-		if not first:
-			_pane_row.add_child(_rule(true))
-		first = false
-		var pane := Pane.new()
-		pane.setup(column)
-		pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		# The chosen items only repeat names from the other lists; they need less room.
-		pane.size_flags_stretch_ratio = 0.7 if String(column.get("role", "")) == "selection" else 1.0
-		_pane_row.add_child(pane)
-		_panes.append(pane)
+		var role := String(column.get("role", ""))
+		var rows: Array = column.get("rows", [])
 		var multi := bool(column.get("multi", false))
-		var keyed: bool = column.get("rows", []).any(func(r): return String(r.get("key", "")) != "")
-		var widths := _cell_widths(column.get("rows", []))
-		for row_data in column.get("rows", []):
-			var index := int(row_data.get("i", -1))
-			if row_data.has("cat"):
-				pane.add_category(String(row_data["cat"]), row_data.get("cells", []), widths)
-				continue
-			var row := InvRow.new()
-			row.setup(row_data, multi, keyed, widths)
-			var code := p * STRIDE + index
-			row.clicked.connect(_on_row_clicked.bind(Vector2i(p, index), code))
-			row.activated.connect(func(): Bridge.pick(view_id, code, "CONFIRM"))
-			row.marked.connect(func(): Bridge.pick(view_id, code, "RIGHT"))
-			pane.add_row(row)
-			_rows[Vector2i(p, index)] = row
-		pane.finish()
+		_multi = _multi or multi
+		_keyed = _keyed or rows.any(func(r): return String(r.get("key", "")) != "")
+		var can_grid := role in ["carried", "nearby"] and not _has_cells(rows)
+		var as_grid := can_grid and grid_view
+		var module := Hud.Module.new(String(PANE_TITLES.get(role, role.capitalize())))
+		module.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		# Grids want the room; what you chose only repeats names from the other lists.
+		module.size_flags_stretch_ratio = 1.5 if as_grid else 0.8 if role == "selection" else 1.0
+		var items := rows.filter(func(r): return not r.has("cat")).size()
+		module.set_note("%d worn" % items if role == "worn" else "1 item" if items == 1 else "%d items" % items)
+		if first:
+			first = false
+			if can_grid:
+				module.head.add_child(_view_switch())
+			_build_search(module.head)
+		var scroll := ScrollContainer.new()
+		scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+		scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		var list := VBoxContainer.new()
+		list.add_theme_constant_override("separation", 3)
+		list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		list.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		scroll.add_child(list)
+		module.set_body(scroll, 12, 10)
+		if as_grid:
+			_fill_grid(list, p, rows, multi)
+		else:
+			_fill_rows(list, p, rows, multi)
+		if items == 0:
+			var empty := Slate.label("Nothing here.", 13, Slate.FAINT)
+			empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			empty.custom_minimum_size.y = 80
+			empty.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			list.add_child(empty)
+		_panes.add_child(module)
+		_pane_modules.append(module)
+	if _panes.get_child_count() == 0:
+		var module := Hud.Module.new("Items")
+		module.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var empty := Slate.label("Nothing to show here.", 14, Slate.FAINT)
+		empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		empty.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		empty.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		module.set_body(empty)
+		_panes.add_child(module)
+
+
+## Slots or rows, for plain item lists: two small buttons with the current one lit.
+func _view_switch() -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 0)
+	row.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	for choice in [[true, "Slots", "Show items as slots"], [false, "Rows", "Show items as rows with their names and weight"]]:
+		var on: bool = choice[0] == grid_view
+		var b := Button.new()
+		b.text = String(choice[1]).to_upper()
+		b.tooltip_text = String(choice[2])
+		b.focus_mode = Control.FOCUS_NONE
+		b.mouse_default_cursor_shape = Control.CURSOR_ARROW if on else Control.CURSOR_POINTING_HAND
+		b.add_theme_font_override("font", Slate.mono())
+		b.add_theme_font_size_override("font_size", Slate.fs(10))
+		var sb := Slate.box(Slate.CYAN if on else Color(0, 0, 0, 0), 0, Color(Slate.CYAN, 0.9 if on else 0.4), 1)
+		sb.content_margin_left = 7
+		sb.content_margin_right = 7
+		sb.content_margin_top = 1
+		sb.content_margin_bottom = 1
+		var hot := sb.duplicate() as StyleBoxFlat
+		if not on:
+			hot.bg_color = Color(Slate.CYAN, 0.15)
+		for state in ["normal", "hover", "pressed"]:
+			b.add_theme_stylebox_override(state, sb if state == "normal" else hot)
+		for state in ["font_color", "font_hover_color", "font_pressed_color"]:
+			b.add_theme_color_override(state, Slate.ACCENT_TEXT if on else Slate.SOFT)
+		var want: bool = choice[0]
+		b.pressed.connect(func():
+			if grid_view != want:
+				grid_view = want
+				_save_settings()
+				set_entries(_columns))
+		row.add_child(b)
+	return row
+
+
+func _category_head(list: VBoxContainer, name: String, cells: Array, widths: Array) -> void:
+	var row := HBoxContainer.new()
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var title := Slate.label(name.to_upper(), 12, Slate.CYAN, Slate.spaced(Slate.heading(), 2))
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.clip_text = true
+	row.add_child(title)
+	var titles := HBoxContainer.new()
+	titles.add_theme_constant_override("separation", CELL_GAP)
+	titles.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(titles)
+	for i in cells.size():
+		var c := Slate.label(String(cells[i]).strip_edges().to_upper(), 9, Slate.MUTED, Slate.mono())
+		c.custom_minimum_size.x = widths[i] if i < widths.size() else MIN_CELL_WIDTH
+		c.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		c.clip_text = true
+		c.tooltip_text = String(cells[i]).strip_edges()
+		c.mouse_filter = Control.MOUSE_FILTER_PASS
+		titles.add_child(c)
+	var box := MarginContainer.new()
+	box.add_theme_constant_override("margin_right", 10)
+	box.add_theme_constant_override("margin_top", 0 if list.get_child_count() == 0 else 10)
+	box.add_theme_constant_override("margin_bottom", 3)
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(row)
+	list.add_child(box)
+
+
+func _fill_grid(list: VBoxContainer, p: int, rows: Array, multi: bool) -> void:
+	var flow: HFlowContainer = null
+	for row_data in rows:
+		if row_data.has("cat"):
+			_category_head(list, String(row_data["cat"]), [], [])
+			flow = null
+			continue
+		if flow == null:
+			flow = HFlowContainer.new()
+			flow.add_theme_constant_override("h_separation", SLOT_GAP)
+			flow.add_theme_constant_override("v_separation", SLOT_GAP)
+			flow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			list.add_child(flow)
+		var index := int(row_data.get("i", -1))
+		var slot := GridSlot.new(SLOT)
+		slot.setup(row_data, multi)
+		_connect_cell(slot, Vector2i(p, index), multi)
+		flow.add_child(slot)
+
+
+func _fill_rows(list: VBoxContainer, p: int, rows: Array, multi: bool) -> void:
+	var keyed: bool = rows.any(func(r): return String(r.get("key", "")) != "")
+	var widths := _cell_widths(rows)
+	for row_data in rows:
+		if row_data.has("cat"):
+			_category_head(list, String(row_data["cat"]), row_data.get("cells", []), widths)
+			continue
+		var index := int(row_data.get("i", -1))
+		var row := InvRow.new()
+		row.setup(row_data, multi, keyed, widths)
+		_connect_cell(row, Vector2i(p, index), multi)
+		list.add_child(row)
+
+
+## A click selects; a second click, a double click or a right click does what Enter does here:
+## in lists where items are marked it marks, everywhere else it chooses the item.
+func _connect_cell(cell, at: Vector2i, multi: bool) -> void:
+	var code := at.x * STRIDE + at.y
+	var act := "RIGHT" if multi else "CONFIRM"
+	cell.clicked.connect(func():
+		if at != _cursor:
+			Bridge.pick(view_id, code, ""))
+	cell.activated.connect(func(): Bridge.pick(view_id, code, act))
+	_cells[at] = cell
 
 
 ## Width of each extra column in a list: as wide as its widest value or title, like the old list
@@ -588,8 +663,8 @@ static func _cell_widths(rows: Array) -> Array:
 		for i in cells.size():
 			var w := 0.0
 			if r.has("cat"):
-				w = Slate.bold().get_string_size(String(cells[i]).strip_edges().to_upper(),
-						HORIZONTAL_ALIGNMENT_LEFT, -1, 9).x
+				w = Slate.mono().get_string_size(String(cells[i]).strip_edges().to_upper(),
+						HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(9)).x
 			else:
 				w = InvRow.cell_text_width(Slate.plain(cells[i]).strip_edges())
 			if i >= widths.size():
@@ -598,157 +673,102 @@ static func _cell_widths(rows: Array) -> Array:
 	return widths
 
 
-func _on_row_clicked(at: Vector2i, code: int) -> void:
-	# Select only: an empty action lets the game apply the pick without pressing anything.
-	if at != _cursor:
-		Bridge.pick(view_id, code, "")
-
-
 func _apply_cursor(force_scroll: bool) -> void:
 	var active := int(_msg.get("active", 0))
 	var cursors: Array = _msg.get("cursors", [])
 	var cursor := Vector2i(active, int(cursors[active]) if active < cursors.size() else -1)
 	var moved := cursor != _cursor
 	_cursor = cursor
-	for at in _rows:
-		var row: InvRow = _rows[at]
+	for at in _cells:
 		var p: int = at.x
 		var on: bool = p < cursors.size() and at.y == int(cursors[p])
-		row.set_selected(on, p == active)
-	for p in _panes.size():
-		if _panes[p] != null:
-			(_panes[p] as Pane).set_active(p == active)
-	if (moved or force_scroll) and _rows.has(_cursor):
-		_scroll_to(_rows[_cursor])
+		_cells[at].set_selected(on, p == active)
+	for p in _pane_modules.size():
+		if _pane_modules[p] != null:
+			var module: Hud.Module = _pane_modules[p]
+			var role := String(_columns[p].get("role", ""))
+			module.set_title(String(PANE_TITLES.get(role, role.capitalize())), Slate.ACCENT if p == active else Slate.CYAN)
+	if (moved or force_scroll) and _cells.has(_cursor):
+		_scroll_to(_cells[_cursor])
 
 
-func _scroll_to(row: Control) -> void:
-	# Rows lay out on the next frame; wait so the scroll target is right.
+func _scroll_to(cell: Control) -> void:
+	# Cells lay out on the next frame; wait so the scroll target is right.
 	await get_tree().process_frame
-	if not is_instance_valid(row):
+	if not is_instance_valid(cell):
 		return
-	var scroll := row.get_parent().get_parent().get_parent() as ScrollContainer
-	if scroll != null:
-		scroll.ensure_control_visible(row)
-		# Keep rows wider than their pane cut at the right, so the name stays in view.
-		scroll.scroll_horizontal = 0
+	var node := cell.get_parent()
+	while node != null and not node is ScrollContainer:
+		node = node.get_parent()
+	if node != null:
+		(node as ScrollContainer).ensure_control_visible(cell)
+		(node as ScrollContainer).scroll_horizontal = 0
 
 
-## One list (carried, nearby, worn or chosen): a header with its name and count, then its rows.
-class Pane extends VBoxContainer:
-	var _title: Label
-	var _count: Label
-	var _underline: ColorRect
-	var _scroll: ScrollContainer
-	var _list: VBoxContainer
-	var _items := 0
+## An item in a grid: its sprite on a steel plate with its letter, count and marks. Hover shows
+## its name, weight and volume, and why it can't be chosen when it can't.
+class GridSlot extends ItemSlot:
+	signal clicked
+	signal activated
 
-	func setup(column: Dictionary) -> void:
-		add_theme_constant_override("separation", 0)
-		mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var role := String(column.get("role", ""))
-		var head := HBoxContainer.new()
-		head.add_theme_constant_override("separation", 8)
-		head.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var icon := Slate.icon_rect(PANE_ICONS.get(role, "box"), 15, Slate.MUTED)
-		head.add_child(icon)
-		_title = Slate.label(PANE_NAMES.get(role, role.capitalize()), 13, Slate.MUTED, Slate.bold())
-		head.add_child(_title)
-		_count = Slate.label("", 12, Slate.FAINT, Slate.mono())
-		_count.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		_count.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		head.add_child(_count)
-		var head_box := MarginContainer.new()
-		for side in ["left", "right"]:
-			head_box.add_theme_constant_override("margin_" + side, 18)
-		head_box.add_theme_constant_override("margin_top", 14)
-		head_box.add_theme_constant_override("margin_bottom", 10)
-		head_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		head_box.add_child(head)
-		add_child(head_box)
-		_underline = ColorRect.new()
-		_underline.custom_minimum_size.y = 2
-		_underline.color = Color(0, 0, 0, 0)
-		_underline.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		add_child(_underline)
+	var _enabled := true
+	var _cursor := false
 
-		_scroll = ScrollContainer.new()
-		# Rows never widen the pane; in a very narrow one their right edge is cut off instead.
-		_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
-		_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		add_child(_scroll)
-		var pad := MarginContainer.new()
-		pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		for side in ["left", "right"]:
-			pad.add_theme_constant_override("margin_" + side, 10)
-		pad.add_theme_constant_override("margin_top", 6)
-		pad.add_theme_constant_override("margin_bottom", 10)
-		pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_scroll.add_child(pad)
-		_list = VBoxContainer.new()
-		_list.add_theme_constant_override("separation", 2)
-		_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		_list.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		pad.add_child(_list)
+	func _init(side := 64.0) -> void:
+		super(side)
 
-	func add_category(name: String, cells: Array, widths: Array) -> void:
-		var row := HBoxContainer.new()
-		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var title := Slate.label(name.to_upper(), 11, Slate.FAINT, Slate.bold())
-		title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		title.clip_text = true
-		row.add_child(title)
-		var titles := HBoxContainer.new()
-		titles.add_theme_constant_override("separation", CELL_GAP)
-		titles.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(titles)
-		for i in cells.size():
-			var cell = cells[i]
-			var c := Slate.label(String(cell).strip_edges().to_upper(), 9, Slate.FAINT, Slate.bold())
-			c.custom_minimum_size.x = widths[i] if i < widths.size() else MIN_CELL_WIDTH
-			c.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-			c.clip_text = true
-			c.tooltip_text = String(cell).strip_edges()
-			c.mouse_filter = Control.MOUSE_FILTER_PASS
-			titles.add_child(c)
-		var box := MarginContainer.new()
-		box.add_theme_constant_override("margin_left", 10)
-		box.add_theme_constant_override("margin_right", 12)
-		box.add_theme_constant_override("margin_top", 0 if _list.get_child_count() == 0 else 12)
-		box.add_theme_constant_override("margin_bottom", 4)
-		box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		box.add_child(row)
-		_list.add_child(box)
+	func setup(row: Dictionary, multi: bool) -> void:
+		mouse_filter = Control.MOUSE_FILTER_STOP
+		_enabled = bool(row.get("enabled", true))
+		set_item(String(row.get("type", "")), String(row.get("sym", "?")), Slate.curses(String(row.get("sym_color", "c_white"))))
+		tag = String(row.get("key", ""))
+		count = String(row.get("count", ""))
+		dimmed = not _enabled or row.has("denial")
+		star = bool(row.get("fav", false))
+		if multi and int(row.get("chosen", 0)) > 0:
+			mark = "ok" if int(row.get("chosen", 0)) >= int(row.get("avail", 1)) else str(int(row.get("chosen", 0)))
+		if _enabled:
+			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		var lines := PackedStringArray([Slate.plain(row.get("text", [])).replace(char(0xa0), " ").strip_edges()])
+		lines.append("%s  ·  %s" % [String(row.get("weight", "")), String(row.get("volume", ""))])
+		var denial := Slate.plain(row.get("denial", [])).strip_edges()
+		if denial != "":
+			lines.append(denial)
+		tooltip_text = "\n".join(lines)
 
-	func add_row(row: Control) -> void:
-		_items += 1
-		_list.add_child(row)
+	func set_selected(on: bool, active: bool) -> void:
+		_cursor = on and active
+		if selected != _cursor or soft != (on and not active):
+			selected = _cursor
+			soft = on and not active
+			refresh()
 
-	func finish() -> void:
-		_count.text = str(_items) if _items > 0 else ""
-		if _items == 0:
-			var empty := Slate.label("Nothing here.", 13, Slate.FAINT)
-			empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-			empty.custom_minimum_size.y = 80
-			empty.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			_list.add_child(empty)
-
-	func set_active(on: bool) -> void:
-		_title.add_theme_color_override("font_color", Slate.TEXT if on else Slate.MUTED)
-		_underline.color = Color(Slate.ACCENT, 0.9) if on else Slate.BORDER
+	func _gui_input(event: InputEvent) -> void:
+		if event is InputEventMouseButton and event.pressed:
+			if event.button_index == MOUSE_BUTTON_LEFT:
+				accept_event()
+				if not _enabled:
+					return
+				if event.double_click or _cursor:
+					activated.emit()
+				else:
+					clicked.emit()
+			elif event.button_index == MOUSE_BUTTON_RIGHT:
+				accept_event()
+				if _enabled:
+					activated.emit()
 
 
-## One item: key, glyph, name, extra columns and weight. Click selects it, a second click or a
-## double click confirms it, and in lists where items are marked the box on the left marks it.
+## An item as a row: mark box, slot, letter, name, the list's extra columns or the weight.
 class InvRow extends PanelContainer:
 	signal clicked
 	signal activated
-	signal marked
 
 	var _enabled := true
 	var _selected := false
 	var _active := false
 	var _hover := false
+	var _slot: ItemSlot
 
 	func setup(row: Dictionary, multi: bool, keyed: bool, widths: Array) -> void:
 		_enabled = bool(row.get("enabled", true))
@@ -777,28 +797,23 @@ class InvRow extends PanelContainer:
 		if multi:
 			line.add_child(_mark_box(row))
 
+		_slot = ItemSlot.new(32)
+		_slot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_slot.set_item(String(row.get("type", "")), String(row.get("sym", "?")), Slate.curses(String(row.get("sym_color", "c_white"))))
+		line.add_child(_slot)
+
 		if keyed:
 			var key := String(row.get("key", ""))
-			var slot := CenterContainer.new()
-			slot.custom_minimum_size.x = 22
-			slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var holder := CenterContainer.new()
+			holder.custom_minimum_size.x = 22
+			holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			var chip := Slate.key_chip(key, 11)
 			if key != "":
 				(chip.get_child(0) as Label).add_theme_color_override("font_color",
-						Slate.curses(String(row.get("key_color", "")), Slate.MUTED))
-			slot.add_child(chip)
-			line.add_child(slot)
-
-		var tile := PanelContainer.new()
-		tile.add_theme_stylebox_override("panel", Slate.box(Color(1, 1, 1, 0.05), 7, Slate.BORDER, 0))
-		tile.custom_minimum_size = Vector2(26, 26)
-		tile.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		tile.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var glyph := Slate.label(String(row.get("sym", "")), 15, Slate.curses(String(row.get("sym_color", ""))), Slate.mono_bold())
-		glyph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		tile.add_child(glyph)
-		line.add_child(tile)
+						Slate.curses(String(row.get("key_color", "")), Slate.CYAN))
+			holder.add_child(chip)
+			line.add_child(holder)
 
 		# Not sized to its text: long names are cut at the pane's edge rather than widening it.
 		var name := Slate.rich(14, false)
@@ -832,7 +847,7 @@ class InvRow extends PanelContainer:
 					HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
 			line.add_child(reason)
 		elif cells.is_empty():
-			var weight := Slate.label(String(row.get("weight", "")), 12, Slate.FAINT, Slate.mono())
+			var weight := Slate.label(String(row.get("weight", "")), 12, Slate.MUTED, Slate.mono())
 			weight.tooltip_text = String(row.get("volume", ""))
 			weight.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 			weight.custom_minimum_size.x = 64
@@ -875,15 +890,15 @@ class InvRow extends PanelContainer:
 		var avail := int(row.get("avail", 1))
 		var box := PanelContainer.new()
 		var on := chosen > 0
-		box.add_theme_stylebox_override("panel", Slate.box(Slate.ACCENT if on else Color(0, 0, 0, 0), 6,
-				Slate.ACCENT if on else Slate.BORDER_STRONG, 0 if on else 2))
-		box.custom_minimum_size = Vector2(22, 22)
+		box.add_theme_stylebox_override("panel", Slate.box(Slate.ACCENT if on else Color(0, 0, 0, 0), 0,
+				Slate.ACCENT if on else Slate.BORDER_STRONG, 0 if on else 1))
+		box.custom_minimum_size = Vector2(20, 20)
 		box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		box.mouse_filter = Control.MOUSE_FILTER_STOP
 		box.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 		box.tooltip_text = "Mark or unmark"
 		if on and chosen < avail:
-			var count := Slate.label(str(chosen), 11, Slate.ACCENT_TEXT, Slate.mono_bold())
+			var count := Slate.label(str(chosen), 11, Slate.ACCENT_TEXT, Slate.mono())
 			count.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			box.add_child(count)
 		elif on:
@@ -891,7 +906,7 @@ class InvRow extends PanelContainer:
 		box.gui_input.connect(func(e: InputEvent):
 			if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
 				box.accept_event()
-				marked.emit())
+				activated.emit())
 		return box
 
 	## The name, with the game's condition marks (`||`, `|\\`, `|.`, ...) in the mono font so
@@ -905,7 +920,7 @@ class InvRow extends PanelContainer:
 		return Slate.bbcode(runs, Slate.TEXT)
 
 	static func cell_text_width(text: String) -> float:
-		return Slate.mono().get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+		return Slate.mono().get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(12)).x
 
 	## Runs without the padding curses lists use for alignment.
 	func _trimmed(spans) -> Array:
@@ -920,114 +935,55 @@ class InvRow extends PanelContainer:
 		if on != _selected or active != _active:
 			_selected = on
 			_active = active
+			_slot.selected = on and active
+			_slot.refresh()
 			_restyle()
 
 	func _restyle() -> void:
 		var bg := Color(0, 0, 0, 0)
 		if _selected and _active:
-			bg = Color(1, 1, 1, 0.09)
+			bg = Color(Slate.ACCENT, 0.10)
 		elif _selected or (_hover and _enabled):
-			bg = Color(1, 1, 1, 0.045)
-		var sb := Slate.box(bg, 10, Slate.BORDER, 0)
-		if _selected and _active:
-			# Amber edge on the left marks the item the keys act on.
+			bg = Color(Slate.CYAN, 0.08)
+		var sb := Slate.box(bg, 0, Slate.BORDER, 0)
+		if _selected:
+			# A yellow edge marks the item the keys act on; cyan, a list's resting cursor.
 			sb.border_width_left = 3
-			sb.border_color = Slate.ACCENT
+			sb.border_color = Slate.ACCENT if _active else Color(Slate.CYAN, 0.6)
 		sb.content_margin_left = 8
-		sb.content_margin_right = 12
-		sb.content_margin_top = 4
-		sb.content_margin_bottom = 4
-		add_theme_stylebox_override("panel", sb)
-
-	func _gui_input(event: InputEvent) -> void:
-		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-			accept_event()
-			if not _enabled:
-				return
-			if event.double_click or (_selected and _active):
-				activated.emit()
-			else:
-				clicked.emit()
-
-
-## Rounded button with an icon, a label and the key that does the same thing.
-class PillButton extends PanelContainer:
-	signal pressed
-
-	var _primary := false
-	var _enabled := true
-	var _on := false
-	var _hover := false
-	var _icon: TextureRect
-	var _label: Label
-	var _key: PanelContainer
-
-	func _init(icon_name: String, text: String, primary: bool) -> void:
-		_primary = primary
-		mouse_filter = Control.MOUSE_FILTER_STOP
-		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 8)
-		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		add_child(row)
-		var fg := Slate.ACCENT_TEXT if primary else Slate.TEXT
-		_icon = Slate.icon_rect(icon_name, 16, fg)
-		row.add_child(_icon)
-		_label = Slate.label(text, 13, fg, Slate.bold())
-		row.add_child(_label)
-		var gap := Control.new()
-		gap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(gap)
-		_key = Slate.key_chip("", 10)
-		if primary:
-			_key.add_theme_stylebox_override("panel", Slate.pill_box(Color(0, 0, 0, 0.16), 6, 1))
-			(_key.get_child(0) as Label).add_theme_color_override("font_color", Slate.ACCENT_TEXT)
-		row.add_child(_key)
-		mouse_entered.connect(func():
-			_hover = true
-			_restyle())
-		mouse_exited.connect(func():
-			_hover = false
-			_restyle())
-		_restyle()
-
-	func set_text(text: String) -> void:
-		_label.text = text
-
-	func get_text() -> String:
-		return _label.text
-
-	func set_key(key: String) -> void:
-		(_key.get_child(0) as Label).text = key
-		_key.visible = key != ""
-
-	func set_enabled(on: bool) -> void:
-		_enabled = on
-		modulate.a = 1.0 if on else 0.45
-		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if on else Control.CURSOR_ARROW
-
-	## Shows a toggle as switched on (amber outline).
-	func set_on(on: bool) -> void:
-		_on = on
-		_restyle()
-
-	func _restyle() -> void:
-		var bg: Color
-		if _primary:
-			bg = Slate.ACCENT.lightened(0.12) if _hover and _enabled else Slate.ACCENT
-		else:
-			bg = Color(1, 1, 1, 0.11 if _hover and _enabled else 0.06)
-		var sb := Slate.box(bg, 10, Slate.ACCENT if _on else Slate.BORDER, 1 if _on else 0)
-		sb.content_margin_left = 12
 		sb.content_margin_right = 10
-		sb.content_margin_top = 8
-		sb.content_margin_bottom = 8
+		sb.content_margin_top = 3
+		sb.content_margin_bottom = 3
 		add_theme_stylebox_override("panel", sb)
 
 	func _gui_input(event: InputEvent) -> void:
-		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-			accept_event()
-			if _enabled:
-				pressed.emit()
+		if event is InputEventMouseButton and event.pressed:
+			if event.button_index == MOUSE_BUTTON_LEFT:
+				accept_event()
+				if not _enabled:
+					return
+				if event.double_click or (_selected and _active):
+					activated.emit()
+				else:
+					clicked.emit()
+			elif event.button_index == MOUSE_BUTTON_RIGHT:
+				accept_event()
+				if _enabled:
+					activated.emit()
+
+
+## A bar of small cells, filled up to `ratio`.
+class Meter extends Control:
+	var ratio := 0.0
+	var color := Slate.CYAN
+
+	func _init() -> void:
+		custom_minimum_size = Vector2(60, 8)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var cells := maxi(int(size.x / 10.0), 4)
+		var width := (size.x - (cells - 1) * 2.0) / cells
+		var lit := ceili(clampf(ratio, 0.0, 1.0) * cells)
+		for i in cells:
+			draw_rect(Rect2(i * (width + 2.0), 0, width, size.y), color if i < lit else Slate.TRACK)

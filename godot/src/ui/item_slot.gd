@@ -20,6 +20,12 @@ var filled := false
 ## Shown at reduced strength, e.g. a pinned item you carry none of.
 var dimmed := false
 var hot := false
+## Cyan frame: the cursor of a list that the keys are not on right now.
+var soft := false
+## Marked for the pending action (drop, pick up): "ok" draws a tick, a number shows how many.
+var mark := ""
+## A favorite: a small star at the bottom left.
+var star := false
 var _art: Control
 
 
@@ -58,6 +64,9 @@ func clear() -> void:
 	count = ""
 	filled = false
 	selected = false
+	soft = false
+	mark = ""
+	star = false
 	dimmed = false
 	refresh()
 
@@ -92,8 +101,8 @@ func _draw() -> void:
 	# A soft shadow under the plate lifts it off the module.
 	draw_rect(Rect2(rect.position + Vector2(0, 2), rect.size), Color(0, 0, 0, 0.35))
 	draw_texture_rect(plate(), rect, false, Color(1.12, 1.12, 1.12) if hot else Color.WHITE)
-	var border := Slate.ACCENT if selected else (Slate.PLATE_BORDER.lightened(0.25) if hot else Slate.PLATE_BORDER)
-	var width := 2.0 if selected else 1.0
+	var border := Slate.ACCENT if selected else Slate.CYAN if soft else (Slate.PLATE_BORDER.lightened(0.25) if hot else Slate.PLATE_BORDER)
+	var width := 2.0 if selected or soft else 1.0
 	draw_rect(rect.grow(-width / 2), border, false, width)
 
 
@@ -127,6 +136,23 @@ func _draw_art() -> void:
 		else:
 			_art.draw_rect(box, Color(Slate.CARD, 0.82 if filled else 0.0))
 			_art.draw_string(mono, Vector2(4, 11.5), tag, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Slate.SOFT if filled else Slate.FAINT)
+	if mark != "":
+		var fs := 11
+		var w := maxf(mono.get_string_size(mark, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x + 8, 16) if mark != "ok" else 16.0
+		var box := Rect2(size.x - w, 0, w, 16)
+		_art.draw_rect(box, Slate.ACCENT)
+		if mark == "ok":
+			var at := box.position + Vector2(3.5, 8)
+			_art.draw_polyline(PackedVector2Array([at, at + Vector2(3, 3.5), at + Vector2(9, -4)]), Slate.ACCENT_TEXT, 2.0)
+		else:
+			_art.draw_string(mono, Vector2(box.position.x + 4, 12), mark, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Slate.ACCENT_TEXT)
+	if star:
+		var center := Vector2(9, size.y - 9)
+		var points := PackedVector2Array()
+		for i in 10:
+			var radius := 6.0 if i % 2 == 0 else 2.6
+			points.append(center + Vector2(0, -radius).rotated(i * PI / 5))
+		_art.draw_colored_polygon(points, Slate.ACCENT)
 	if count != "":
 		var fs := 12
 		var w := mono.get_string_size(count, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x

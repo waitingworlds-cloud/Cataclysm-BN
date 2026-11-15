@@ -1169,6 +1169,13 @@ auto inventory_column::write_native( JsonOut &jsout ) const -> void
         }
         jsout.member( "sym", it.symbol() );
         jsout.member( "sym_color", string_from_color( it.color() ) );
+        // For the item's sprite and the count on its slot.
+        jsout.member( "type", it.typeId().str() );
+        if( it.count_by_charges() && it.charges > 1 ) {
+            jsout.member( "count", std::to_string( it.charges ) );
+        } else if( entry.get_stack_size() > 1 ) {
+            jsout.member( "count", string_format( "x%d", static_cast<int>( entry.get_stack_size() ) ) );
+        }
         jsout.member( "enabled", entry.is_selectable() );
         jsout.member( "fav", it.is_favorite );
         if( multiselect ) {
@@ -2269,6 +2276,10 @@ auto inventory_selector::publish_native( native_inventory &state ) -> void
             jsout.member( "category", it.get_category().name() );
             jsout.member( "sym", it.symbol() );
             jsout.member( "sym_color", string_from_color( it.color() ) );
+            jsout.member( "type", it.typeId().str() );
+            jsout.member( "weight", string_format( "%.2f %s", convert_weight( it.weight() ), weight_units() ) );
+            jsout.member( "volume", string_format( "%s %s", format_volume( it.volume() ),
+                                                   volume_units_abbr() ) );
             jsout.member( "fav", it.is_favorite );
             if( const auto denial = preset.get_denial( selected ); !denial.empty() ) {
                 jsout.member( "denial" );
