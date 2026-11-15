@@ -1039,6 +1039,11 @@ std::optional<construction_id> construction_menu( const bool blueprint )
                 jsout.start_object();
                 jsout.member( "text" );
                 cata::godot_bridge::write_spans( jsout, group->name(), row_colors[i] );
+                // The row color says whether it can be built; spell that out at the row's end.
+                const auto ready = row_colors[i] == c_white || row_colors[i] == c_light_blue;
+                jsout.member( "status", ready ? _( "Ready" ) : row_colors[i] == c_red ? _( "Low skill" ) :
+                              _( "Missing" ) );
+                jsout.member( "tone", ready ? "ready" : "missing" );
                 if( is_favorite( group ) ) {
                     jsout.member( "icon", "star" );
                     jsout.member( "icon_color", "c_yellow" );
