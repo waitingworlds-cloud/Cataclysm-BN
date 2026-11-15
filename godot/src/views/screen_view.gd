@@ -1109,8 +1109,9 @@ func _apply_aside(msg: Dictionary) -> void:
 	if bool(aside.get("mono", false)) and _mode == "docked":
 		# A line with two things set far apart (a creature's name and its mood) is drawn closer
 		# together when it is too long for the panel, before anything gets smaller.
-		var per_char := Slate.mono().get_string_size("0000000000", HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(120)).x / 100.0
-		body_spans = Slate.narrow_gaps(body_spans, int((_dock_rect().size.x - 44) / per_char) - 6)
+		# (Three characters are kept back for a health bar, whose blocks are wider than letters.)
+		var per_char := Slate.mono().get_string_size("0000000000", HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(12)).x / 10.0
+		body_spans = Slate.narrow_gaps(body_spans, int((_dock_rect().size.x - 46) / per_char) - 3)
 	var body := Slate.tidy_body(Slate.bbcode(body_spans, Slate.SOFT))
 	var empty := String(aside.get("empty", ""))
 	var sections: Array = aside.get("sections", [])
@@ -1126,12 +1127,17 @@ func _apply_aside(msg: Dictionary) -> void:
 		if _mode == "docked":
 			# Columns the game lined up stay lined up in a narrow panel: the text gets a little
 			# smaller instead of wrapping (down to a size that still reads well).
-			var widest := 0.0
+			# Measured at the sizes the font can really take (whole pixels), widest line first.
+			var longest := ""
 			for text_line in Slate.plain(body_spans).split("\n"):
-				widest = maxf(widest, Slate.mono().get_string_size(text_line.rstrip(" "), HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(120)).x / 10.0)
-			var room := _dock_rect().size.x - 44
-			if widest > 0 and widest > room:
-				points = clampf(floorf(12.0 * room / widest * 2) / 2, 10.0, 12.0)
+				if text_line.rstrip(" ").length() > longest.length():
+					longest = text_line.rstrip(" ")
+			var room := _dock_rect().size.x - 46
+			points = 10.0
+			for step in [12.0, 11.0, 10.5]:
+				if Slate.mono().get_string_size(longest, HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(step)).x <= room:
+					points = step
+					break
 		_aside_body.add_theme_font_size_override("normal_font_size", Slate.fs(points))
 	else:
 		_aside_body.remove_theme_font_override("normal_font")
