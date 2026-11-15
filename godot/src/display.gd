@@ -32,6 +32,10 @@ func _ready() -> void:
 		window.position = screen.position
 		window.size = screen.size
 		window.mode = Window.MODE_MAXIMIZED
+	elif screen.size.x < window.size.x or screen.size.y < window.size.y:
+		# On a small screen (a 1366 by 768 laptop) the window fits the screen, so nothing is cut off.
+		window.position = screen.position
+		window.size = Vector2i(mini(window.size.x, screen.size.x), mini(window.size.y, screen.size.y))
 	# Moving the window to another screen can change the automatic scale.
 	window.size_changed.connect(_apply)
 	_apply()
