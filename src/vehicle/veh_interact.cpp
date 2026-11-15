@@ -3064,7 +3064,16 @@ void veh_interact::display_stats() const {
     // This lambda handles printing parts in the "Most damaged" and "Needs repair" cases
     // for the veh_interact ui
     const auto print_part = [&](const std::string& str, int slot, vehicle_part* pt) {
-        note_stat(string_format("%s %s", str, pt->name()));
+#if defined(TILES)
+        if (native) {
+            // The condition as a word in place of the game's damage marks.
+            const auto level = pt->is_broken() ? 4 : pt->damage_level(4);
+            const auto* tone = level >= 3 ? "red" : (level == 2 ? "yellow" : "light_gray");
+            stat_lines.push_back(string_format(
+                "%s %s <color_%s>(%s)</color>", str, pt->name(false), tone,
+                to_lower_case(condition_name(*pt))));
+        }
+#endif
         mvwprintz(w_stats, point(x[slot], y[slot]), c_light_gray, str);
         int iw = utf8_width(str) + 1;
         return fold_and_print(
