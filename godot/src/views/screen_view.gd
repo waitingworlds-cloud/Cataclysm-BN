@@ -1002,7 +1002,9 @@ func _apply_aside(msg: Dictionary) -> void:
 	var sym := String(aside.get("sym", ""))
 	var icon := String(aside.get("icon", ""))
 	var type := String(aside.get("type", ""))
-	_aside_strip_title.text = String(aside.get("heading", "Selected")).to_upper()
+	# "Selected" only when the module shows a picked thing (it has a name or a picture).
+	var fallback := "Selected" if aside.has("title") or aside.has("type") else "Details"
+	_aside_strip_title.text = String(aside.get("heading", fallback)).to_upper()
 	_aside_slot.visible = has_title and (sym != "" or type != "")
 	_aside_slot.set_item(type, sym, Slate.curses(String(aside.get("sym_color", "c_white"))))
 	_aside_icon.visible = has_title and not _aside_slot.visible and icon != ""
@@ -1212,7 +1214,6 @@ func _apply_buttons(buttons: Array) -> void:
 			if _narrow:
 				b.set_fitting()
 			continue
-		b.set_compressible()
 		if grid == null:
 			grid = GridContainer.new()
 			grid.columns = 1 if _narrow else (3 if _mode == "docked" and _dock_rect().size.x >= 640 else 2)
@@ -1220,7 +1221,20 @@ func _apply_buttons(buttons: Array) -> void:
 			grid.add_theme_constant_override("v_separation", 6)
 			_buttons.add_child(grid)
 		grid.add_child(b)
+		b.set_compressible()
+	if grid != null:
+		grid.sort_children.connect(_fit_grid.bind(grid))
 	_buttons.visible = not buttons.is_empty()
+
+
+## A grid of buttons takes fewer columns when a label would be cut short in it.
+func _fit_grid(grid: GridContainer) -> void:
+	if grid.columns <= 1:
+		return
+	for b in grid.get_children():
+		if b is SlateButton and b.is_cut():
+			grid.columns -= 1
+			return
 
 
 func _apply_hints(hints: Array) -> void:
@@ -1817,6 +1831,8 @@ class Board extends Control:
 
 	const PAD := 10.0
 	const GAP := 2.0
+	## How much larger than asked for a board gets when there is room for it.
+	const GROW := 1.6
 	## Line drawing characters as the arms they join (up 1, right 2, down 4, left 8), drawn as
 	## strokes so walls meet across squares.
 	const LINES := {"─": 10, "│": 5, "┌": 6, "┐": 12, "└": 3, "┘": 9, "├": 7, "┤": 13, "┬": 14,
@@ -1869,14 +1885,15 @@ class Board extends Control:
 		mouse_filter = Control.MOUSE_FILTER_STOP
 		queue_redraw()
 
-	## Cell size and font size for the room there is: as asked for, or smaller to fit.
+	## Cell size and font size for the room there is: as asked for, larger (up to GROW) when the
+	## room is big, or smaller to fit.
 	func _layout() -> void:
 		var glyph := _font.get_string_size("M", HORIZONTAL_ALIGNMENT_LEFT, -1, 100).x / 100.0
 		var want := Vector2(_want, _want) if _square else Vector2(ceilf(_want * glyph), ceilf(_want * 1.3))
 		var room := size - Vector2(PAD, PAD) * 2
 		var scale := 1.0
 		if _columns > 0 and not _rows.is_empty():
-			scale = minf(1.0, minf(room.x / (want.x * _columns), room.y / (want.y * _rows.size())))
+			scale = minf(GROW, minf(room.x / (want.x * _columns), room.y / (want.y * _rows.size())))
 		_cell = (want * scale).floor().max(Vector2(3, 3))
 		_font_size = maxi(6, int((_want * 0.55 if _square else float(_want)) * scale))
 		_origin = ((size - _cell * Vector2(_columns, _rows.size())) / 2).floor()

@@ -315,6 +315,7 @@ int sokoban_game::start_game()
             jsout.end_array();
             jsout.member( "aside" );
             jsout.start_object();
+            jsout.member( "heading", _( "How to play" ) );
             jsout.member( "width", 380 );
             jsout.member( "body" );
             gs::write_span( jsout, { .text = _( "You are <color_white>@</color>.  Push every crate <color_white>$</color> onto a highlighted goal square.  Click a square to step toward it." ) } );

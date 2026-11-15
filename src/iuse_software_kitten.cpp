@@ -406,6 +406,7 @@ robot_finds_kitten::robot_finds_kitten()
             jsout.end_array();
             jsout.member( "aside" );
             jsout.start_object();
+            jsout.member( "heading", _( "Game" ) );
             jsout.member( "width", 340 );
             jsout.member( "body" );
             auto message = std::string();

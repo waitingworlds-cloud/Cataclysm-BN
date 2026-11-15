@@ -302,6 +302,7 @@ int minesweeper_game::start_game()
                 jsout.end_array();
                 jsout.member( "aside" );
                 jsout.start_object();
+                jsout.member( "heading", _( "How to play" ) );
                 jsout.member( "width", 340 );
                 jsout.member( "body" );
                 gs::write_span( jsout, { .text = _( "Click a square to dig it up, or right click to flag it." ) } );

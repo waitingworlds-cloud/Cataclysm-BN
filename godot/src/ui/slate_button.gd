@@ -70,6 +70,7 @@ func set_fitting(least := 11) -> void:
 	_least = least
 	set_compressible()
 	_label.custom_minimum_size.y = _label.get_minimum_size().y
+	_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	if not _label.resized.is_connected(_fit):
 		_label.resized.connect(_fit)
 	_fit()
@@ -85,6 +86,14 @@ func _fit() -> void:
 		size -= 1
 	if _label.get_theme_font_size("font_size") != Slate.fs(size):
 		_label.add_theme_font_size_override("font_size", Slate.fs(size))
+
+
+## Whether the label is wider than the room it has (it would end in "...").
+func is_cut() -> bool:
+	if _label.size.x <= 0:
+		return false
+	var font := _label.get_theme_font("font")
+	return font.get_string_size(_label.text.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(_size)).x > _label.size.x + 0.5
 
 
 func get_text() -> String:

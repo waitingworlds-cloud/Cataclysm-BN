@@ -4290,7 +4290,17 @@ std::optional<tripoint_bub_ms> input_context::get_coordinates( const catacurses:
         p = view_offset + selected;
     } else {
         const point_rel_ms selected( screen_pos.x / fw, screen_pos.y / fh );
-        p = view_offset + selected - dim.window_size_cell / 2;
+        auto half_cells = dim.window_size_cell / 2;
+        if( capture_win == g->w_overmap && use_tiles && use_tiles_overmap ) {
+            // The overmap draws a last, partly shown column and row (see draw_om), and counts
+            // them when it centers the view, so a click has to count them as well.
+            const auto cells = point( divide_round_up( OVERMAP_WINDOW_TERM_WIDTH * fontwidth,
+                                      overmap_tilecontext->get_tile_width() ),
+                                      divide_round_up( OVERMAP_WINDOW_TERM_HEIGHT * fontheight,
+                                              overmap_tilecontext->get_tile_height() ) );
+            half_cells = cells / 2;
+        }
+        p = view_offset + selected - half_cells;
     }
 
     return tripoint_bub_ms( p, g->get_levz() );
