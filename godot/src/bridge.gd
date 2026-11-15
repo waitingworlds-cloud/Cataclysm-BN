@@ -268,6 +268,8 @@ func send_mouse_move(pos: Vector2) -> void:
 
 func send_mouse(kind: String, pos: Vector2, button := 1, dy := 0) -> void:
 	_pending_mouse = {}
+	if _debug:
+		print("mouse ", kind, " ", pos, " button ", button)
 	send({"t": "mouse", "e": kind, "x": int(pos.x), "y": int(pos.y), "b": button, "dy": dy})
 
 

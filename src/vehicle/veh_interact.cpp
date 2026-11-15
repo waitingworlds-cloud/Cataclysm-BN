@@ -99,6 +99,118 @@ namespace {
 constexpr auto godot_panel_width = 720;
 /// Terminal columns the vehicle view leaves free at the right for the Godot front end.
 constexpr auto godot_disp_margin = 2;
+
+/// The parts on one square of a vehicle, for the Godot side panel.
+struct parts_here_options {
+    vehicle& veh;
+    /// Any part on the square.
+    int part = -1;
+    /// Place in the square's list of the part an action is about, or -1.
+    int highlight = -1;
+    /// Adds what each part does below its name.
+    bool describe = true;
+    /// Place in the list to bring into view (the keys that page through the descriptions).
+    int scroll_to = 0;
+};
+
+/// A word for how damaged a part is, for players who do not know the `|\` marks.
+auto condition_name(const vehicle_part& vp) -> std::string {
+    if (vp.is_broken()) { return _("Broken"); }
+    switch (vp.damage_level(4)) {
+        case 0:
+            return _("Intact");
+        case 1:
+            return _("Scuffed");
+        case 2:
+            return _("Damaged");
+        case 3:
+            return _("Badly damaged");
+        case 4:
+            return _("Nearly broken");
+        default:
+            return _("Reinforced");
+    }
+}
+
+/// Writes the parts on a square as one row each: picture, name, kind, condition, contents and
+/// what the part does.
+auto write_parts_here(JsonOut& jsout, const parts_here_options& opts) -> void {
+    auto& veh = opts.veh;
+    if (opts.part < 0 || opts.part >= veh.part_count()) { return; }
+    const auto here = veh.parts_at_relative(veh.part(opts.part).mount, true);
+    if (here.empty()) { return; }
+    const auto place = vpart_position(veh, here.front());
+    jsout.start_object();
+    jsout.member("title", _("Parts here"));
+    jsout.member("tag", place.is_inside() ? _("Interior") : _("Exterior"));
+    if (const auto label = place.get_label()) {
+        jsout.member("label", string_format(_("Label: %s"), *label));
+    }
+    jsout.member("scroll_to", opts.scroll_to);
+    jsout.member("parts");
+    jsout.start_array();
+    auto row = 0;
+    for (const auto index : here) {
+        const auto& vp = veh.part(index);
+        const auto& info = vp.info();
+        jsout.start_object();
+        jsout.member("type", "vp_" + info.get_id().str());
+        jsout.member(
+            "sym",
+            utf32_to_utf8(static_cast<uint32_t>(vp.is_broken() ? info.sym_broken : info.sym)));
+        jsout.member("sym_color",
+                     string_from_color(vp.is_broken() ? info.color_broken : info.color));
+        jsout.member("name", vp.name(false));
+        if (veh.part_flag(index, "ARMOR")) {
+            jsout.member("kind", _("Armor"));
+        } else if (info.location == "structure") {
+            jsout.member("kind", _("Structure"));
+        }
+        jsout.member("state", condition_name(vp));
+        // 0 intact to 4 nearly broken, 5 broken, below 0 reinforced.
+        jsout.member("level", vp.is_broken() ? 5 : vp.damage_level(4));
+        jsout.member("health", vp.is_broken() ? 0.0 : std::clamp(vp.health_percent(), 0.0, 1.0));
+        auto notes = std::vector<std::string>{};
+        if (vp.is_fuel_store() && !vp.ammo_current().is_null()) {
+            if (vp.ammo_current() == itype_battery) {
+                notes.push_back(
+                    string_format(_("%s/%s charge"), vp.ammo_remaining(), vp.ammo_capacity()));
+            } else {
+                const auto stack = units::legacy_volume_factor / vp.ammo_current()->stack_size;
+                notes.push_back(string_format(
+                    _("%.1fL %s"), round_up(units::to_liter(vp.ammo_remaining() * stack), 1),
+                    item::nname(vp.ammo_current())));
+            }
+        }
+        if (veh.part_flag(index, "CARGO")) {
+            notes.push_back(string_format(
+                _("Holds %s/%s %s"), format_volume(veh.stored_volume(index)),
+                format_volume(veh.max_volume(index)), volume_units_abbr()));
+        }
+        if (!notes.empty()) { jsout.member("note", join(notes, "  ·  ")); }
+        jsout.member("selected", row == opts.highlight);
+        if (opts.describe) {
+            auto text = std::string{};
+            info.format_description(text, c_light_gray, 2000);
+            // Without the "Description" heading and the "> " mark: the row is the heading.
+            if (const auto mark = text.find("\n> "); mark != std::string::npos) {
+                text = text.substr(mark + 3);
+            }
+            if (vp.has_flag(vehicle_part::carrying_flag)) {
+                text += _("Carrying a vehicle on a rack.\n");
+            }
+            if (vp.has_flag(vehicle_part::carried_flag)) {
+                text += string_format(_("Part of a %s carried on a rack.\n"), vp.carried_name());
+            }
+            jsout.member("desc");
+            cata::godot_bridge::write_spans(jsout, text, c_light_gray);
+        }
+        jsout.end_object();
+        ++row;
+    }
+    jsout.end_array();
+    jsout.end_object();
+}
 #endif
 
 /// Where the second and third columns of the vehicle stats start.
@@ -276,6 +388,7 @@ veh_interact::veh_interact(vehicle& veh, tripoint_mnt_veh p)
     main_context.register_action("FILTER");
     main_context.register_action("ZOOM_IN");
     main_context.register_action("ZOOM_OUT");
+    main_context.register_action("SELECT");
     main_context.register_action("ANY_INPUT");
 
     count_durability();
@@ -474,8 +587,7 @@ void veh_interact::publish_native() {
         // Where the vehicle is drawn, in pixels: the front end centers this in its viewport.
         if (const auto window = cata::godot_bridge::window_size(); window.x > 0 && TERMX > 0) {
             jsout.member(
-                "view",
-                std::array{0, 0, (TERMX - godot_disp_margin) * window.x / TERMX, window.y});
+                "view", std::array{0, 0, (TERMX - godot_disp_margin) * window.x / TERMX, window.y});
         }
         jsout.member("subtitle");
         gs::write_span(
@@ -502,10 +614,19 @@ void veh_interact::publish_native() {
             section(_("Parts you can install"), w_list, {});
             section(_("Details"), w_details, {});
             section(_("Requirements"), w_msg, {});
-            section(_("Parts here"), w_parts, {});
+            write_parts_here(
+                jsout,
+                {.veh = *veh, .part = cpart, .highlight = highlight_part, .describe = false});
         } else {
-            section(_("Parts here"), w_parts, {});
-            section(msg ? _("Note") : _("Selected part"), w_msg, {});
+            // What the game answered (why something can't be done) first, where it is seen.
+            if (msg) { section(_("Note"), w_msg, {}); }
+            write_parts_here(
+                jsout,
+                {.veh = *veh,
+                 .part = cpart,
+                 .highlight = highlight_part,
+                 .describe = !msg,
+                 .scroll_to = start_at});
             section(_("Overview"), w_list, {});
         }
         // The stats come in three columns across the screen's width: one after another here.
@@ -700,6 +821,12 @@ void veh_interact::do_main_loop() {
             if (tile_preview) { tile_preview->zoom_in(); }
         } else if (action == "ZOOM_OUT") {
             if (tile_preview) { tile_preview->zoom_out(); }
+        } else if (action == "SELECT") {
+            // A click on the picture of the vehicle moves the cursor to that square.
+            if (native && tile_preview) {
+                const auto to = tile_preview->offset_at_pixel(cata::godot_bridge::mouse_position());
+                if (to && *to != point_rel_veh::zero()) { move_cursor(tripoint_rel_veh(*to, 0)); }
+            }
 #endif
         }
         if (sel_cmd != ' ') { finish = true; }
@@ -2535,7 +2662,11 @@ void veh_interact::display_veh() {
  */
 void veh_interact::display_veh_tiles() {
     // Initialize tile preview if needed
-    if (!tile_preview) { tile_preview = std::make_unique<vehicle_preview_window>(); }
+    if (!tile_preview) {
+        tile_preview = std::make_unique<vehicle_preview_window>();
+        // The Godot front end gives the vehicle a big viewport: start one step closer.
+        if (native) { tile_preview->zoom_in(); }
+    }
 
     // Prepare the preview window with current display window bounds
     tile_preview->prepare(w_disp);

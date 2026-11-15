@@ -500,7 +500,10 @@ func _build_aside() -> Control:
 	var stack := VBoxContainer.new()
 	stack.add_theme_constant_override("separation", 16)
 	stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_aside_scroll.add_child(stack)
+	# Room at the right for the scroll bar, so it never lies over the text.
+	var stack_pad := _margin(stack, 0, 0, 14, 0)
+	stack_pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_aside_scroll.add_child(stack_pad)
 	stack.add_child(_aside_body)
 	_aside_sections = VBoxContainer.new()
 	_aside_sections.add_theme_constant_override("separation", 16)
@@ -618,9 +621,12 @@ func apply(msg: Dictionary) -> void:
 	if mode != _mode or (mode == "docked" and dock != _dock_kind):
 		_dock_kind = dock if mode == "docked" else ""
 		_assemble(mode)
-	_narrow = _mode == "docked" and _dock_rect().size.x < 440
 	var title := String(msg.get("title", ""))
 	var quit := String(msg.get("quit", "QUIT"))
+	# The frame gives the column its width first: how the buttons are laid out depends on it.
+	if _mode == "docked" and _cockpit != null:
+		_apply_wide_frame(msg, title, quit)
+	_narrow = _mode == "docked" and _dock_rect().size.x < 440
 	if _mode == "framed":
 		# One of the big screens (`nav` names the action that opens it) lights its tab up top.
 		var nav := String(msg.get("nav", ""))
@@ -634,9 +640,8 @@ func apply(msg: Dictionary) -> void:
 		_cockpit.set_back_visible(quit != "")
 	else:
 		_title.text = title
-		_close.visible = quit != ""
-	if _mode == "docked" and _cockpit != null:
-		_apply_wide_frame(msg, title, quit)
+		# In the frame the way back is on its top bar.
+		_close.visible = quit != "" and _cockpit == null
 	var subtitle: Array = msg.get("subtitle", [])
 	_subtitle.text = Slate.bbcode(subtitle, Slate.MUTED).strip_edges()
 	_apply_stats(msg.get("stats", []))
@@ -1101,8 +1106,8 @@ func _on_frame(texture: ImageTexture) -> void:
 		_preview_atlas.atlas = texture
 
 
-## Titled blocks of text below the body (a vehicle's parts, its description, its stats), each
-## optionally in a fixed-width font to keep columns the game lined up.
+## Titled blocks below the body (a vehicle's parts, its overview, its stats): text, optionally in
+## a fixed-width font to keep columns the game lined up, or `parts` as one row each.
 func _apply_sections(sections: Array) -> void:
 	var have := _aside_sections.get_child_count()
 	for i in range(sections.size(), have):
@@ -1115,17 +1120,28 @@ func _apply_sections(sections: Array) -> void:
 		else:
 			box = VBoxContainer.new()
 			box.add_theme_constant_override("separation", 6)
+			var head_row := HBoxContainer.new()
+			head_row.add_theme_constant_override("separation", 10)
+			box.add_child(head_row)
 			var head := Slate.label("", 12, Slate.CYAN, Slate.spaced(Slate.heading(), 2))
-			box.add_child(head)
+			head.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			head_row.add_child(head)
+			head_row.add_child(Slate.label("", 10, Slate.MUTED, Slate.spaced(Slate.mono(), 1)))
 			var text := Slate.rich(13)
 			text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			text.add_theme_color_override("default_color", Slate.SOFT)
 			text.add_theme_constant_override("line_separation", 3)
 			box.add_child(text)
+			var rows := VBoxContainer.new()
+			rows.add_theme_constant_override("separation", 0)
+			box.add_child(rows)
 			_aside_sections.add_child(box)
-		var head := box.get_child(0) as Label
+		var head_row := box.get_child(0) as HBoxContainer
+		var head := head_row.get_child(0) as Label
 		head.text = String(spec.get("title", "")).to_upper()
-		head.visible = head.text != ""
+		var tag := head_row.get_child(1) as Label
+		tag.text = String(spec.get("tag", "")).to_upper()
+		head_row.visible = head.text != ""
 		var label := box.get_child(1) as RichTextLabel
 		if bool(spec.get("mono", false)):
 			label.add_theme_font_override("normal_font", Slate.mono())
@@ -1134,9 +1150,38 @@ func _apply_sections(sections: Array) -> void:
 			label.remove_theme_font_override("normal_font")
 			label.add_theme_font_size_override("normal_font_size", Slate.fs(13))
 		var text := Slate.tidy_body(Slate.bbcode(spec.get("body", []), Slate.SOFT))
+		if spec.has("label"):
+			text = "[color=#%s]%s[/color]" % [Slate.DANGER.to_html(false), Slate.escape(String(spec["label"]))]
 		if label.text != text:
 			label.text = text
-		box.visible = text != ""
+		label.visible = text != ""
+		var parts: Array = spec.get("parts", [])
+		var rows := box.get_child(2) as VBoxContainer
+		rows.visible = not parts.is_empty()
+		var stamp := hash(parts)
+		if rows.get_meta("stamp", 0) != stamp:
+			rows.set_meta("stamp", stamp)
+			for c in rows.get_children():
+				rows.remove_child(c)
+				c.queue_free()
+			for part in parts:
+				rows.add_child(PartRow.new(part))
+		# The keys that page through the parts bring the next one to the top.
+		var to := int(spec.get("scroll_to", 0))
+		if not parts.is_empty() and rows.get_meta("at", 0) != to:
+			rows.set_meta("at", to)
+			_show_part.call_deferred(rows, to)
+		box.visible = text != "" or not parts.is_empty()
+
+
+func _show_part(rows: VBoxContainer, index: int) -> void:
+	if not is_instance_valid(rows) or index >= rows.get_child_count():
+		return
+	await get_tree().process_frame
+	if not is_instance_valid(rows) or index >= rows.get_child_count():
+		return
+	var row := rows.get_child(index) as Control
+	_aside_scroll.scroll_vertical = int(row.global_position.y - _aside_scroll.get_child(0).global_position.y) if index > 0 else 0
 
 
 func _apply_buttons(buttons: Array) -> void:
@@ -1165,7 +1210,7 @@ func _apply_buttons(buttons: Array) -> void:
 		b.set_compressible()
 		if grid == null:
 			grid = GridContainer.new()
-			grid.columns = 1 if _narrow else 2
+			grid.columns = 1 if _narrow else (3 if _mode == "docked" and _dock_rect().size.x >= 640 else 2)
 			grid.add_theme_constant_override("h_separation", 6)
 			grid.add_theme_constant_override("v_separation", 6)
 			_buttons.add_child(grid)
@@ -1677,6 +1722,76 @@ class ListRow extends PanelContainer:
 				activated.emit()
 			else:
 				clicked.emit()
+
+
+## One part of a vehicle on the square being looked at: its picture on a plate, its name, what
+## kind of part it is, how damaged it is, what it holds and what it does.
+class PartRow extends PanelContainer:
+	func _init(part: Dictionary) -> void:
+		var selected := bool(part.get("selected", false))
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Slate.RAISED if selected else Color(0, 0, 0, 0)
+		sb.border_color = Slate.ACCENT if selected else Slate.BORDER
+		sb.border_width_left = 2 if selected else 0
+		sb.border_width_bottom = 0 if selected else 1
+		sb.content_margin_left = 8
+		sb.content_margin_right = 8
+		sb.content_margin_top = 7
+		sb.content_margin_bottom = 7
+		add_theme_stylebox_override("panel", sb)
+		mouse_filter = Control.MOUSE_FILTER_PASS
+		var line := HBoxContainer.new()
+		line.add_theme_constant_override("separation", 12)
+		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(line)
+		var slot := ItemSlot.new(40)
+		slot.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.set_item(String(part.get("type", "")), String(part.get("sym", "?")), Slate.curses(String(part.get("sym_color", "c_white"))))
+		slot.selected = selected
+		line.add_child(slot)
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 3)
+		col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		line.add_child(col)
+		var top := HBoxContainer.new()
+		top.add_theme_constant_override("separation", 10)
+		col.add_child(top)
+		var name := Slate.label(Slate.cap(String(part.get("name", ""))), 14, Slate.TEXT, Slate.semibold())
+		name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		name.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		top.add_child(name)
+		var kind := String(part.get("kind", ""))
+		if kind != "":
+			top.add_child(Slate.label(kind.to_upper(), 10, Slate.FAINT, Slate.spaced(Slate.mono(), 1)))
+		var health := float(part.get("health", 1.0))
+		var level := int(part.get("level", 0))
+		var color := Slate.CYAN if level < 0 else (Slate.GOOD if level <= 1 else (Slate.WARN if level == 2 else Slate.DANGER))
+		var state := HBoxContainer.new()
+		state.add_theme_constant_override("separation", 8)
+		col.add_child(state)
+		var bar := Hud.SegmentBar.new(5)
+		bar.custom_minimum_size = Vector2(44, 6)
+		bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		bar.set_level(health, color)
+		state.add_child(bar)
+		state.add_child(Slate.label(String(part.get("state", "")).to_upper(), 10, color, Slate.spaced(Slate.mono(), 1)))
+		var note := String(part.get("note", ""))
+		if note != "":
+			var extra := Slate.label(note, 11, Slate.SOFT, Slate.mono())
+			extra.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			extra.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			extra.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+			state.add_child(extra)
+		var desc := Slate.tidy_body(Slate.bbcode(part.get("desc", []), Slate.MUTED))
+		if desc != "":
+			var text := Slate.rich(12)
+			text.add_theme_color_override("default_color", Slate.MUTED)
+			text.add_theme_constant_override("line_separation", 2)
+			text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			text.text = desc
+			col.add_child(text)
 
 
 ## A board of character squares (the minigames) in the game's colors, as large as fits. Text
