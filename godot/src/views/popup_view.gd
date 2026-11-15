@@ -195,11 +195,12 @@ class AnswerButton extends Button:
 		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.set_anchors_preset(Control.PRESET_FULL_RECT)
 		add_child(row)
-		_label = Slate.label(text, 14, Slate.TEXT, Slate.bold())
+		_label = Slate.label(text, 13, Slate.TEXT, Slate.spaced(Slate.heading(), 2))
+		_label.uppercase = true
 		row.add_child(_label)
 		_chip = Slate.key_chip(key, 11)
 		row.add_child(_chip)
-		var w := Slate.bold().get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+		var w := Slate.spaced(Slate.heading(), 2).get_string_size(text.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(13)).x
 		w += 0.0 if key == "" else 14 + Slate.mono().get_string_size(key, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 8
 		custom_minimum_size.x = maxf(96, w + 36)
 		_restyle()
@@ -209,9 +210,9 @@ class AnswerButton extends Button:
 		_restyle()
 
 	func _restyle() -> void:
-		var bg := Slate.ACCENT if _primary else Color(1, 1, 1, 0.06)
-		var hot := Slate.ACCENT.lightened(0.12) if _primary else Color(1, 1, 1, 0.11)
-		var border := Color(0, 0, 0, 0) if _primary else Slate.BORDER_STRONG
+		var bg := Slate.ACCENT if _primary else Color(0, 0, 0, 0)
+		var hot := Slate.ACCENT.lightened(0.12) if _primary else Color(Slate.CYAN, 0.14)
+		var border := Color(0, 0, 0, 0) if _primary else Color(Slate.CYAN, 0.35)
 		add_theme_stylebox_override("normal", Slate.box(bg, 10, border, 1))
 		add_theme_stylebox_override("hover", Slate.box(hot, 10, border, 1))
 		add_theme_stylebox_override("pressed", Slate.box(hot.darkened(0.1), 10, border, 1))

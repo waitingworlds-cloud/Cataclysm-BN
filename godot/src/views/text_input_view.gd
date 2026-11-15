@@ -7,6 +7,7 @@ extends Control
 var view_id := 0
 
 var _title: Label
+var _head: Control
 var _description: RichTextLabel
 var _field: FieldView
 var _editor: EditorView
@@ -31,18 +32,26 @@ func _ready() -> void:
 	add_child(center)
 
 	_card = PanelContainer.new()
-	_card.add_theme_stylebox_override("panel", Slate.card_box(18, 22))
+	_card.add_theme_stylebox_override("panel", Slate.card_box(18, 0))
 	_card.custom_minimum_size.x = 500
 	_card.mouse_filter = Control.MOUSE_FILTER_STOP
 	center.add_child(_card)
 
+	var stack := VBoxContainer.new()
+	stack.add_theme_constant_override("separation", 0)
+	_card.add_child(stack)
+	_title = Slate.prompt_title()
+	_head = Slate.prompt_head(_title)
+	stack.add_child(_head)
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 12)
-	_card.add_child(col)
-
-	_title = Slate.label("", 18, Slate.TEXT, Slate.heavy())
-	_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	col.add_child(_title)
+	var pad := MarginContainer.new()
+	for side in ["left", "right"]:
+		pad.add_theme_constant_override("margin_" + side, 20)
+	pad.add_theme_constant_override("margin_top", 16)
+	pad.add_theme_constant_override("margin_bottom", 18)
+	pad.add_child(col)
+	stack.add_child(pad)
 	_description = Slate.rich(14)
 	_description.add_theme_color_override("default_color", Slate.MUTED)
 	col.add_child(_description)
@@ -74,9 +83,9 @@ func _button(text: String, key: String, primary: bool, action: Callable) -> Butt
 	var b := Button.new()
 	b.custom_minimum_size = Vector2(110, 40)
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	var bg := Slate.ACCENT if primary else Color(1, 1, 1, 0.06)
-	var hot := Slate.ACCENT.lightened(0.12) if primary else Color(1, 1, 1, 0.11)
-	var border := Color(0, 0, 0, 0) if primary else Slate.BORDER_STRONG
+	var bg := Slate.ACCENT if primary else Color(0, 0, 0, 0)
+	var hot := Slate.ACCENT.lightened(0.12) if primary else Color(Slate.CYAN, 0.14)
+	var border := Color(0, 0, 0, 0) if primary else Color(Slate.CYAN, 0.35)
 	b.add_theme_stylebox_override("normal", Slate.box(bg, 10, border, 1))
 	b.add_theme_stylebox_override("hover", Slate.box(hot, 10, border, 1))
 	b.add_theme_stylebox_override("pressed", Slate.box(hot.darkened(0.1), 10, border, 1))
@@ -86,7 +95,8 @@ func _button(text: String, key: String, primary: bool, action: Callable) -> Butt
 	row.set_anchors_preset(Control.PRESET_FULL_RECT)
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	b.add_child(row)
-	var name := Slate.label(text, 14, Slate.ACCENT_TEXT if primary else Slate.TEXT, Slate.bold())
+	var name := Slate.label(text, 13, Slate.ACCENT_TEXT if primary else Slate.TEXT, Slate.spaced(Slate.heading(), 2))
+	name.uppercase = true
 	name.name = "Text"
 	row.add_child(name)
 	var chip := Slate.key_chip(key, 10)
@@ -110,8 +120,9 @@ static func _relabel(b: Button, text: String, key: String) -> void:
 
 func apply(msg: Dictionary) -> void:
 	var title := Slate.plain(msg.get("title", [])).strip_edges()
-	_title.text = title
-	_title.visible = title != ""
+	# A heading, not a form label: no colon at its end.
+	_title.text = title.trim_suffix(":")
+	_head.visible = title != ""
 	var description: Array = msg.get("description", [])
 	_description.text = Slate.bbcode(description, Slate.MUTED).strip_edges()
 	_description.visible = Slate.plain(description).strip_edges() != ""

@@ -266,6 +266,49 @@ static func module_box(padding := 0) -> StyleBoxFlat:
 	return sb
 
 
+## The title of a prompt (a menu, a question, a text box): a module heading, in hazard yellow
+## because a prompt is where the keys act right now.
+static func prompt_title() -> Label:
+	var title := label("", 14, ACCENT, spaced(heavy(), 2))
+	title.uppercase = true
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	return title
+
+
+## The strip across the top of a prompt: a marker, the `title` and, at the right, whatever else
+## belongs there (`extras`: category arrows, a close button).
+static func prompt_head(title: Label, extras: Array = []) -> PanelContainer:
+	var strip := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = RAISED
+	sb.border_color = BORDER
+	sb.border_width_bottom = 1
+	# The card's cut corner shows through.
+	sb.corner_radius_top_left = 9
+	sb.corner_detail = 1
+	sb.content_margin_left = 16
+	sb.content_margin_right = 8
+	sb.content_margin_top = 7
+	sb.content_margin_bottom = 7
+	strip.add_theme_stylebox_override("panel", sb)
+	strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	strip.add_child(row)
+	var marker := ColorRect.new()
+	marker.color = ACCENT
+	marker.custom_minimum_size = Vector2(7, 7)
+	marker.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	marker.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(marker)
+	row.add_child(title)
+	for extra in extras:
+		row.add_child(extra)
+	return strip
+
+
 ## Lit steel plate behind an item sprite.
 static func plate_box(selected := false, hot := false) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()

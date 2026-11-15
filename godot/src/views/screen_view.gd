@@ -33,6 +33,9 @@ var view_id := 0
 var _narrow := false
 
 var _msg := {}
+## Which dock a docked screen is in: "right" (over the main screen's right column) or "side"
+## (the one column of a wide frame, for the overmap and vehicles).
+var _dock_kind := ""
 ## "" until the first message, then "framed" or "docked".
 var _mode := ""
 var _shell: Control
@@ -206,13 +209,27 @@ func _assemble_framed() -> void:
 
 
 func _assemble_docked() -> void:
-	_shell = Control.new()
-	_shell.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_shell.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(_shell)
 	_center = CenterContainer.new()
 	_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_shell.add_child(_center)
+	if _dock_kind == "side":
+		# A map of its own (the overmap, a vehicle) gets the frame with a wide viewport, and
+		# this screen is the column beside it.
+		_cockpit = Cockpit.new()
+		_cockpit.wide = true
+		_shell = _cockpit
+		add_child(_cockpit)
+		_cockpit.close_pressed.connect(_quit)
+		_cockpit.tab_pressed.connect(func(action: String):
+			_quit()
+			Bridge.run(action))
+		_cockpit.laid_out.connect(_layout)
+		_cockpit.body.add_child(_center)
+	else:
+		_shell = Control.new()
+		_shell.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_shell.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(_shell)
+		_shell.add_child(_center)
 	_card = PanelContainer.new()
 	_card.add_theme_stylebox_override("panel", Slate.module_box(0))
 	_card.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -233,6 +250,8 @@ func _assemble_docked() -> void:
 	_body.add_child(_aside)
 	_dock_footer = _build_dock_footer()
 	col.add_child(_dock_footer)
+	# In the frame the hints go on its strip along the bottom, like every other screen's.
+	_dock_footer.visible = _cockpit == null
 
 
 ## A docked panel's own title strip, like a module's, with a way to close it.
@@ -551,6 +570,8 @@ func _dock_rect() -> Rect2:
 	var viewport := get_viewport_rect().size
 	var most: Array = _msg.get("size", [1440, 920])
 	var dock := String(_msg.get("dock", ""))
+	if _cockpit != null:
+		return Rect2(Vector2.ZERO, _cockpit.body.size)
 	if dock == "right":
 		# Exactly the main screen's right column: its modules give way, the map stays clear.
 		var hud := get_tree().get_first_node_in_group("hud") as Hud
@@ -594,7 +615,8 @@ func apply(msg: Dictionary) -> void:
 	_msg = msg
 	var dock := String(msg.get("dock", ""))
 	var mode := "docked" if dock == "right" or dock == "side" else "framed"
-	if mode != _mode:
+	if mode != _mode or (mode == "docked" and dock != _dock_kind):
+		_dock_kind = dock if mode == "docked" else ""
 		_assemble(mode)
 	_narrow = _mode == "docked" and _dock_rect().size.x < 440
 	var title := String(msg.get("title", ""))
@@ -613,6 +635,8 @@ func apply(msg: Dictionary) -> void:
 	else:
 		_title.text = title
 		_close.visible = quit != ""
+	if _mode == "docked" and _cockpit != null:
+		_apply_wide_frame(msg, title, quit)
 	var subtitle: Array = msg.get("subtitle", [])
 	_subtitle.text = Slate.bbcode(subtitle, Slate.MUTED).strip_edges()
 	_apply_stats(msg.get("stats", []))
@@ -626,13 +650,34 @@ func apply(msg: Dictionary) -> void:
 	_apply_panes(msg.get("panes", []))
 	_apply_aside(msg)
 	var footer := Slate.bbcode(msg.get("footer", []), Slate.MUTED).strip_edges()
-	if _mode == "framed":
+	if _cockpit != null:
 		_cockpit.set_footer(footer)
 	else:
 		_footer.text = footer
 		_footer.visible = footer != ""
 	_apply_hints(msg.get("hints", []))
 	_apply_cursor()
+
+
+## The frame around a screen that is a map of its own: its tab or title up top, and the part of
+## the game's picture it draws (`view`, in game pixels) in the viewport.
+func _apply_wide_frame(msg: Dictionary, title: String, quit: String) -> void:
+	var nav := String(msg.get("nav", ""))
+	if nav != "":
+		_cockpit.set_tabs(nav)
+		_cockpit.set_back("Back to map", "Esc")
+	else:
+		_cockpit.set_title(String(msg.get("frame_title", title)))
+		_cockpit.set_back("Back", "Esc")
+	_cockpit.set_back_visible(quit != "")
+	_close.visible = false
+	var most: Array = msg.get("size", [400, 0])
+	var view: Array = msg.get("view", [])
+	var source := Rect2(Vector2.ZERO, get_viewport_rect().size)
+	if view.size() == 4:
+		source = Rect2(float(view[0]), float(view[1]), float(view[2]), float(view[3]))
+		source = Rect2(source.position * Display.frame_scale(), source.size * Display.frame_scale())
+	_cockpit.set_viewport_source(source, float(most[0]))
 
 
 func _apply_stats(stats: Array) -> void:
@@ -1129,7 +1174,7 @@ func _apply_buttons(buttons: Array) -> void:
 
 
 func _apply_hints(hints: Array) -> void:
-	if _mode == "framed":
+	if _cockpit != null:
 		var pairs := []
 		for h in hints:
 			pairs.append([Slate.key_name(String(h.get("key", ""))), String(h.get("text", "")).to_lower()])

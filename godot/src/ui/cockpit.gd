@@ -34,6 +34,15 @@ const TABS := [
 ## (the main menu's screens, character creation) there is no map strip and no one to name.
 static var in_game := false
 
+## A wide frame turns the layout around for screens that are a map of their own (the overmap,
+## a vehicle): the viewport takes most of the room and the screen gets one column at the right,
+## `side_width` wide. The viewport is live there: clicks in it go to the game.
+var wide := false
+var side_width := 400.0
+## The part of the game's picture that belongs in the viewport, in interface units. Empty: the
+## main screen's map.
+var source := Rect2()
+
 ## Where modules go: the area right of the map strip, between the top bar and the hints.
 var body: Control
 ## The small module under the map strip; hidden when there is no strip.
@@ -184,6 +193,15 @@ func _process(_delta: float) -> void:
 
 # --- What a screen sets --------------------------------------------------------------------------
 
+## For a wide frame: the part of the game's picture its viewport shows and how wide the column
+## beside it is.
+func set_viewport_source(rect: Rect2, side: float) -> void:
+	if rect != source or side != side_width:
+		source = rect
+		side_width = side
+		_layout()
+
+
 ## A plain title, for screens you can't tab away from (pickers and prompts), with the screen's
 ## own hint beside it.
 func set_title(title: String, hint_bbcode := "") -> void:
@@ -285,7 +303,12 @@ func _layout() -> void:
 	var hud := _hud()
 	strip = Rect2()
 	_laid_in_game = in_game
-	if hud != null and in_game and size.x >= STRIP_MIN_WINDOW:
+	# A wide frame only ever opens over a running game.
+	var playing := in_game or wide
+	if wide:
+		var side := minf(side_width, roundf(size.x * 0.45))
+		strip = Rect2(GUT, top, maxf(size.x - 3 * GUT - side, 80), column_height)
+	elif hud != null and in_game and size.x >= STRIP_MIN_WINDOW:
 		# The strip shows a cut of the main screen's map, so it can't be bigger than that.
 		var map := hud.map_rect()
 		var width := minf(clampf(roundf(size.x * 0.235), 320, 460), map.size.x)
@@ -293,15 +316,17 @@ func _layout() -> void:
 	var has_strip := strip.size.x > 0
 	_frame.viewport = strip if has_strip else Rect2(-40, -40, 8, 8)
 	_frame.queue_redraw()
-	_strip_click.visible = has_strip
+	_strip_click.visible = has_strip and not wide
 	_strip_click.position = strip.position
 	_strip_click.size = strip.size
 
 	var left_width := strip.size.x if has_strip else clampf(size.x * 0.25, 220, 340)
-	_identity.visible = in_game
+	if wide:
+		left_width = clampf(roundf(size.x * 0.235), 320, 460)
+	_identity.visible = playing
 	_identity.position = Vector2(GUT, GUT)
 	_identity.size = Vector2(left_width, TOP)
-	_bar.position = Vector2(GUT + left_width + GUT if in_game else GUT, GUT)
+	_bar.position = Vector2(GUT + left_width + GUT if playing else GUT, GUT)
 	_bar.size = Vector2(maxf(size.x - _bar.position.x - GUT, 80), TOP)
 	_fit_bar()
 	_bar.size = Vector2(maxf(size.x - _bar.position.x - GUT, 80), TOP)
@@ -312,7 +337,7 @@ func _layout() -> void:
 
 	var foot_top := strip.end.y + GUT
 	var foot_height := top + column_height - foot_top
-	foot.visible = has_strip and foot_height >= 56
+	foot.visible = has_strip and not wide and foot_height >= 56
 	foot.position = Vector2(GUT, foot_top)
 	foot.size = Vector2(strip.size.x, foot_height)
 

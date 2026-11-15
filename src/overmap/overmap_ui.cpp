@@ -1565,20 +1565,22 @@ constexpr auto godot_legend_columns = 48;
 /// True while the overmap is open to choose a spot, so the panel offers to choose it.
 auto choosing_point = false;
 
-/// Terminal columns the Godot panel covers, with its gaps.
-auto godot_panel_cells() -> int {
-    const auto window = cata::godot_bridge::window_size();
-    if (window.x <= 0 || TERMX <= 0) { return clamp(TERMX / 5, 28, 55); }
-    const auto pixels = std::min(godot_panel_width, window.x * 45 / 100) + 20;
-    return std::min(TERMX - 1, (pixels * TERMX + window.x - 1) / window.x);
-}
+/// Terminal columns kept free of the map for the Godot front end. Its frame shows the middle of
+/// the map in a viewport and covers the rest, so the map is drawn across the whole window.
+constexpr auto godot_panel_cells = 2;
 
 /// Writes the members every overmap side panel starts with.
 auto write_side_panel(JsonOut& jsout, const std::string& title, const std::string& icon) -> void {
     jsout.member("title", title);
     jsout.member("icon", icon);
+    jsout.member("nav", "map");
     jsout.member("dock", "side");
     jsout.member("size", std::array{godot_panel_width, 0});
+    // Where the map is drawn, in pixels: the front end centers this in its viewport.
+    const auto window = cata::godot_bridge::window_size();
+    if (window.x > 0 && TERMX > 0) {
+        jsout.member("view", std::array{0, 0, OVERMAP_WINDOW_TERM_WIDTH * window.x / TERMX, window.y});
+    }
 }
 
 struct legend_state {
@@ -1882,7 +1884,7 @@ static auto search(const ui_adaptor& om_ui, tripoint_abs_omt& curs, const tripoi
     catacurses::window w_search;
 
     ui_adaptor ui;
-    int search_width = OVERMAP_LEGEND_WIDTH - 1;
+    int search_width = std::max(OVERMAP_LEGEND_WIDTH - 1, 27);
 #if defined(TILES)
     // Shown in a panel over the overmap's own, with the cursor on the map.
     auto native =
@@ -2347,7 +2349,7 @@ static auto display(const tripoint_abs_omt& orig, const draw_data_t& data = draw
          */
         OVERMAP_LEGEND_WIDTH = clamp(TERMX / 5, 28, 55);
 #if defined(TILES)
-        if (native) { OVERMAP_LEGEND_WIDTH = godot_panel_cells(); }
+        if (native) { OVERMAP_LEGEND_WIDTH = godot_panel_cells; }
 #endif
         OVERMAP_WINDOW_HEIGHT = TERMY;
         OVERMAP_WINDOW_WIDTH = TERMX - OVERMAP_LEGEND_WIDTH;

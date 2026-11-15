@@ -135,7 +135,8 @@ func _place_frame() -> void:
 			continue
 		framed = true
 		if frame.strip.size.x > 0:
-			at = frame.strip.get_center() - hud.map_rect().get_center()
+			var from := frame.source if frame.source.size.x > 0 else hud.map_rect()
+			at = frame.strip.get_center() - from.get_center()
 			# Whole screen pixels keep the map's pixel art sharp.
 			var ui := maxf(Display.ui_scale(), 1.0)
 			at = (at * ui).round() / ui

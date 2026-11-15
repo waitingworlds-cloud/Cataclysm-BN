@@ -97,6 +97,8 @@ namespace {
 #if defined(TILES)
 /// Width of the Godot side panel, in pixels.
 constexpr auto godot_panel_width = 720;
+/// Terminal columns the vehicle view leaves free at the right for the Godot front end.
+constexpr auto godot_disp_margin = 2;
 #endif
 
 /// Where the second and third columns of the vehicle stats start.
@@ -335,12 +337,9 @@ void veh_interact::allocate_windows() {
     w_details = catacurses::newwin(details_h, details_w, point(details_x, details_y));
 #if defined(TILES)
     if (native) {
-        // The vehicle takes the screen left of Godot's side panel and runs a little under it, so
-        // no old map shows in between; the text goes in the panel.
-        const point window = cata::godot_bridge::window_size();
-        const int pixels = std::min(godot_panel_width, window.x * 45 / 100);
-        const int covered = window.x > 0 ? pixels * TERMX / window.x : pane_w * 2;
-        w_disp = catacurses::newwin(TERMY, std::max(TERMX - covered, 10), point_zero);
+        // The vehicle is drawn across the whole window: Godot's frame shows the middle of it in
+        // a viewport and covers the rest; the text goes in the panel beside it.
+        w_disp = catacurses::newwin(TERMY, std::max(TERMX - godot_disp_margin, 10), point_zero);
         w_border = cata::godot_bridge::capture_window(TERMY, TERMX);
         w_mode = cata::godot_bridge::capture_window(mode_h, grid_w);
         w_msg = cata::godot_bridge::capture_window(page_size, pane_w);
@@ -472,6 +471,12 @@ void veh_interact::publish_native() {
         jsout.member("icon", "car");
         jsout.member("dock", "side");
         jsout.member("size", std::array{godot_panel_width, 0});
+        // Where the vehicle is drawn, in pixels: the front end centers this in its viewport.
+        if (const auto window = cata::godot_bridge::window_size(); window.x > 0 && TERMX > 0) {
+            jsout.member(
+                "view",
+                std::array{0, 0, (TERMX - godot_disp_margin) * window.x / TERMX, window.y});
+        }
         jsout.member("subtitle");
         gs::write_span(
             jsout,

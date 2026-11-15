@@ -38,6 +38,7 @@ var _card: PanelContainer
 var _title: Label
 var _close: Button
 var _text: RichTextLabel
+var _text_wrap: Control
 var _tabs: HBoxContainer
 var _tab_label: Label
 var _search: PanelContainer
@@ -116,21 +117,12 @@ func _padded(child: Control, left := 20, top := 0, right := 20, bottom := 0) -> 
 
 func _build_header() -> Control:
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 8)
-
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 12)
-	col.add_child(row)
-	_title = Slate.label("", 18, Slate.TEXT, Slate.heavy())
-	_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	row.add_child(_title)
+	col.add_theme_constant_override("separation", 0)
+	_title = Slate.prompt_title()
 
 	_tabs = HBoxContainer.new()
 	_tabs.add_theme_constant_override("separation", 4)
 	_tabs.visible = false
-	row.add_child(_tabs)
 	_tabs.add_child(_icon_button("chevron-left", "Previous category", func(): Bridge.press(view_id, "LEFT")))
 	var tab := PanelContainer.new()
 	tab.add_theme_stylebox_override("panel", Slate.pill_box(Color(1, 1, 1, 0.07), 12, 5))
@@ -141,20 +133,27 @@ func _build_header() -> Control:
 	_tabs.add_child(_icon_button("chevron-right", "Next category", func(): Bridge.press(view_id, "RIGHT")))
 
 	_close = _icon_button("x", "Close (Esc)", func(): Bridge.press(view_id, "QUIT"))
-	row.add_child(_close)
+	col.add_child(Slate.prompt_head(_title, [_tabs, _close]))
 
 	_text = Slate.rich(14)
 	_text.add_theme_color_override("default_color", Slate.MUTED)
-	_text.visible = false
-	col.add_child(_text)
-	return _padded(col, 22, 18, 14, 12)
+	_text_wrap = _padded(_text, 20, 12, 20, 0)
+	_text_wrap.visible = false
+	col.add_child(_text_wrap)
+	var gap := Control.new()
+	gap.custom_minimum_size.y = 12
+	gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(gap)
+	return col
 
 
 func _icon_button(icon: String, tip: String, action: Callable) -> Button:
 	var b := Button.new()
 	b.icon = Slate.icon(icon, 18)
 	b.tooltip_text = tip
-	b.custom_minimum_size = Vector2(34, 34)
+	b.custom_minimum_size = Vector2(28, 28)
+	b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	b.focus_mode = Control.FOCUS_NONE
 	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	b.add_theme_color_override("icon_normal_color", Slate.MUTED)
 	b.add_theme_color_override("icon_hover_color", Slate.TEXT)
@@ -378,7 +377,7 @@ func apply(msg: Dictionary) -> void:
 	else:
 		_title.text = title if title != "" else "Choose an option"
 	_text.text = Slate.bbcode(text, Slate.MUTED).strip_edges()
-	_text.visible = plain_text != "" and not text_as_title
+	_text_wrap.visible = plain_text != "" and not text_as_title
 
 	_cancel = bool(msg.get("cancel", false))
 	_close.visible = _cancel
