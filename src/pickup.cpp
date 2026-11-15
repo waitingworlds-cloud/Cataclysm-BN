@@ -888,6 +888,7 @@ auto pick_up_from_items( const std::vector<item_stack::iterator> &here, const in
                         .note = note,
                         .sym = this_item.symbol(),
                         .sym_color = string_from_color( this_item.color() ),
+                        .type = this_item.typeId().str(),
                         .indent = entry.parent ? 1 : 0,
                         .mark = entry.pick,
                         .key = key,
@@ -907,6 +908,7 @@ auto pick_up_from_items( const std::vector<item_stack::iterator> &here, const in
                     item *loc = *stacked_here[true_it].front();
                     jsout.member( "title" );
                     gs::write_span( jsout, { .text = loc->display_name(), .color = loc->color_in_inventory() } );
+                    jsout.member( "type", loc->typeId().str() );
                     jsout.member( "sym", loc->symbol() );
                     jsout.member( "sym_color", string_from_color( loc->color() ) );
                     const auto info = loc->info( rot::temp::for_location( get_map(), *loc ) );

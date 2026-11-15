@@ -2198,6 +2198,7 @@ auto advanced_inventory::publish_native( cata::godot_bridge::native_view &view,
                     .icon_color = sitem_i.autopickup ? "c_magenta" : "c_yellow",
                     .sym = it.symbol(),
                     .sym_color = string_from_color( it.color() ),
+                    .type = it.typeId().str(),
                     .tip = sitem_i.autopickup ? _( "Picked up automatically" ) : "",
                 } );
             }
@@ -2214,6 +2215,7 @@ auto advanced_inventory::publish_native( cata::godot_bridge::native_view &view,
             jsout.member( "width", 380 );
             jsout.member( "title" );
             gs::write_span( jsout, { .text = it.display_name(), .color = it.color_in_inventory() } );
+            jsout.member( "type", it.typeId().str() );
             jsout.member( "sym", it.symbol() );
             jsout.member( "sym_color", string_from_color( it.color() ) );
             jsout.member( "subtitle", string_format( _( "Moves to: %s" ), dest_name ) );

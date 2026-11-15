@@ -1045,6 +1045,7 @@ void iexamine::vending( player &p, const tripoint_bub_ms &examp )
                     },
                     .sym = shown.symbol(),
                     .sym_color = string_from_color( shown.color() ),
+                    .type = shown.typeId().str(),
                 } );
             }
             jsout.end_array();
@@ -1057,6 +1058,7 @@ void iexamine::vending( player &p, const tripoint_bub_ms &examp )
             jsout.member( "title" );
             gs::write_span( jsout, { .text = cur_item.display_name(), .color = cur_item.color_in_inventory( p ) } );
             jsout.member( "subtitle", format_money( cur_price ) );
+            jsout.member( "type", cur_item.typeId().str() );
             jsout.member( "sym", cur_item.symbol() );
             jsout.member( "sym_color", string_from_color( cur_item.color() ) );
             jsout.member( "body" );

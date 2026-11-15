@@ -11939,6 +11939,7 @@ game::vmenu_ret game::list_items( const std::vector<map_item_stack> &item_list )
                         .cells = cells,
                         .sym = iter->example->symbol(),
                         .sym_color = string_from_color( iter->example->color() ),
+                        .type = iter->example->typeId().str(),
                     } );
                     ++iter;
                     ++index;
@@ -11963,6 +11964,7 @@ game::vmenu_ret game::list_items( const std::vector<map_item_stack> &item_list )
                     jsout.start_object();
                     jsout.member( "title" );
                     gs::write_span( jsout, { .text = example.display_name(), .color = example.color_in_inventory() } );
+                    jsout.member( "type", example.typeId().str() );
                     jsout.member( "sym", example.symbol() );
                     jsout.member( "sym_color", string_from_color( example.color() ) );
                     jsout.member( "subtitle", tiles_away( rl_dist( point_rel_ms::zero(), active_pos.xy() ),

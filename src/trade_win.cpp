@@ -800,6 +800,11 @@ auto trading_window::publish_native( cata::godot_bridge::native_view &view, npc 
             jsout.member( "rows" );
             jsout.start_array();
             auto last_category = std::optional<item_category_id> {};
+            // The amount column only takes room when something in the list comes in numbers.
+            const auto any_amount = std::ranges::any_of( filtered, [&]( const auto list_index ) {
+                const auto &ip = list[list_index];
+                return ip.charges > 1 || ip.count > 1;
+            } );
             for( const auto &[i, list_index] : filtered | std::views::enumerate ) {
                 const auto &ip = list[list_index];
                 const auto *it = ip.locs.front();
@@ -807,7 +812,7 @@ auto trading_window::publish_native( cata::godot_bridge::native_view &view, npc 
                     last_category = it->get_category().get_id();
                     gs::write_row( jsout, {
                         .text = { .text = it->get_category().name() },
-                        .cells = { { .text = _( "amt" ) }, { .text = _( "weight" ) }, { .text = _( "vol" ) }, { .text = free_exchange ? std::string() : _( "unit price" ) } },
+                        .cells = { { .text = any_amount ? _( "amt" ) : std::string() }, { .text = _( "weight" ) }, { .text = _( "vol" ) }, { .text = free_exchange ? std::string() : _( "unit price" ) } },
                         .heading = true,
                     } );
                 }
@@ -852,6 +857,7 @@ auto trading_window::publish_native( cata::godot_bridge::native_view &view, npc 
                     .i = static_cast<int>( i ),
                     .sym = it->symbol(),
                     .sym_color = string_from_color( it->color() ),
+                    .type = it->typeId().str(),
                     .mark = picked > 0,
                     .key = hotkey < item_hotkeys.size() ? std::string( 1, item_hotkeys[hotkey] ) : std::string(),
                     .confirm = toggle_act,
@@ -869,6 +875,7 @@ auto trading_window::publish_native( cata::godot_bridge::native_view &view, npc 
         if( focus_item != nullptr && !category_mode ) {
             jsout.member( "title" );
             gs::write_span( jsout, { .text = focus_item->display_name(), .color = focus_item->color_in_inventory() } );
+            jsout.member( "type", focus_item->typeId().str() );
             jsout.member( "sym", focus_item->symbol() );
             jsout.member( "sym_color", string_from_color( focus_item->color() ) );
             jsout.member( "body" );

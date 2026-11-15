@@ -123,6 +123,8 @@ struct row {
     std::string icon_color = {};
     std::string sym = {};
     std::string sym_color = {};
+    /// Item whose sprite is shown on a plate in place of the glyph (see `godot_hotbar::type_for`).
+    std::string type = {};
     int indent = 0;
     std::string tip = {};
     /// Information only: no hover or click, and not dimmed like a disabled row.
@@ -175,6 +177,9 @@ inline auto write_row( JsonOut &jsout, const row &r ) -> void
     if( !r.sym.empty() ) {
         jsout.member( "sym", r.sym );
         jsout.member( "sym_color", r.sym_color );
+    }
+    if( !r.type.empty() ) {
+        jsout.member( "type", r.type );
     }
     if( r.indent > 0 ) {
         jsout.member( "indent", r.indent );

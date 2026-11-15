@@ -1118,6 +1118,7 @@ void defense_game::caravan()
                 jsout.member( "title" );
                 gs::write_span( jsout, { .text = tmp.display_name(), .color = c_white } );
                 jsout.member( "subtitle", format_money( price_of( id, 1 ) ) );
+                jsout.member( "type", tmp.typeId().str() );
                 jsout.member( "sym", tmp.symbol() );
                 jsout.member( "sym_color", string_from_color( tmp.color() ) );
                 jsout.member( "body" );

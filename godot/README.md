@@ -105,13 +105,12 @@ game keeps its map view inside the viewport, so the survivor stays centered in w
 
 - **Top bar**: who you are, what you wield and how you move, with the safe mode chip; season, day
   and time; the creature compass as a strip (marks under each direction something is seen in);
-  weather, temperature, light, wind and moon; the place and coordinates. While driving a row below
-  it shows the vehicle's speed, cruise control, heading and fuel.
+  weather, temperature, light, wind and moon; the place and coordinates.
 - **Left column**: *Rig // Vitals* (a body figure and a bar per limb; click one for its health,
   injuries and outer armor; a striped alert with a use-item button for bleeding, bites and
   infections), *Needs // State* (thirst, hunger, rest, stamina, warmth and pain, then mood, focus,
-  speed, move cost, noise, attributes, weight, volume, bionic power, mana and armor) and the
-  *Event log*.
+  speed, move cost, noise, attributes, weight, volume, bionic power, mana and armor), *Vehicle* while you
+  drive (speed, cruise control, heading, fuel) and the *Event log*.
 - **Viewport**: the map in a bezel. Threats in view get red corner brackets, the nearest with a
   name tag, and the thing the *In reach* panel leads with gets yellow ones.
 - **Right column**: the *Area map* (the pixel minimap redrawn as a gray paper map with a ring for
@@ -167,6 +166,13 @@ A window narrower than 1360 units has no map strip, and outside a game (characte
 setup) there is no strip and no identity box. Screens that are a map of their own (the overmap, a
 vehicle) use the frame's `wide` layout: the viewport takes most of the room and is live (clicks go
 to the game), and the screen is one column at the right.
+In the vehicle screen a click on a square of the
+vehicle moves the cursor there and the mouse wheel zooms; its column lists the parts on that square
+as rows (picture, kind, a condition bar and word, what it holds, what it does).
+
+The title screen (`src/views/title_view.gd`) is built like the frame: the title art stands in the
+viewport, the sections are a module at the left with the choices of the open one beside it, and
+the tip of the day shares the strip along the bottom with the keys.
 
 ## The inventory
 
@@ -204,7 +210,7 @@ game's color tags carry over.
 | `search`               | `{act, text, typing, placeholder, label, icon, key, tip}`                 |
 | `toggles`              | Toolbar buttons that show a setting: `{act, text, icon, key, on, enabled, tip}` |
 | `panes`, `active_pane` | Lists side by side (see below), and the one holding the cursor            |
-| `aside`                | Details panel: `title` and `warn` (spans), `subtitle`, `icon` or `sym` and `sym_color`, `body` (spans), `mono`, `sections [{title, body, mono}]`, `empty`, `buttons`, `width`, `share`, `preview {rect, buttons}` (the character sprite, cropped from the game's frame at `rect` = x, y, w, h pixels) |
+| `aside`                | Details panel: `title` and `warn` (spans), `subtitle`, `icon` or `sym` and `sym_color`, `body` (spans), `mono`, `type` (the item whose sprite goes on the plate), `sections [{title, body, mono}]` or `[{title, tag, label, scroll_to, parts [{type, sym, sym_color, name, kind, state, level, health, note, selected, desc}]}]` (a vehicle's parts on one square, a row each with a condition bar), `empty`, `buttons`, `width`, `share`, `preview {rect, buttons}` (the character sprite, cropped from the game's frame at `rect` = x, y, w, h pixels) |
 | `buttons`              | `{act, text, icon, key, primary, enabled, tip, pick}`; with `pick` the button sends that pick with `act` |
 | `hints`, `footer`      | Key hints `{key, text}` and a line of spans at the bottom                  |
 | `quit`                 | Action of the close button (default `QUIT`; empty hides it)               |
@@ -215,8 +221,9 @@ game's color tags carry over.
 A pane holds `rows`, a `body` of spans, `entries` (a log) or a `grid` (a game board), with `title`, `icon`, `count`, `note`,
 `empty`, `cursor`, `stretch`, `confirm` (action for clicking the selected row again, default
 `CONFIRM`) and `mark_act` (action for a row's check box). A row has `text` and `cells` (spans),
-`i`, `pick`, `heading`, `enabled`, `passive`, `note`, `icon`, `sym`, `indent`, `tip`, `mark`,
-`key`, `confirm` and `mark_act`. A list about things you make also takes `slot {type, sym, color}`
+`i`, `pick`, `heading`, `enabled`, `passive`, `note`, `icon`, `sym`, `type` (an item: its sprite
+on a small plate in place of the glyph), `indent`, `tip`, `mark`, `key`, `confirm` and `mark_act`.
+A column whose cells are all empty takes no room. A list about things you make also takes `slot {type, sym, color}`
 (the result on a steel plate), `meta` (a second line), `parts [{type, sym, color, name, have}]`
 (what it needs, as small slots framed green or red, each with a tooltip), `parts_more`, and
 `status` with `tone` (`ready`, `missing` or `locked`: a colored bar at the row's left edge).

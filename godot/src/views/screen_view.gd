@@ -541,6 +541,9 @@ func _layout_framed(aside: Dictionary, wanted: float, alone: bool) -> void:
 	var width := room.x
 	if float(most[0]) > 0 and String(_msg.get("nav", "")) == "":
 		width = minf(room.x, maxf(float(most[0]) * 1.1, 1040.0))
+		# Nearly all of it is all of it: a thin strip of bare frame at each side helps nobody.
+		if width > room.x * 0.85:
+			width = room.x
 	_cols.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	_cols.position = Vector2(roundf((room.x - width) / 2), 0)
 	_cols.size = Vector2(width, room.y)
@@ -952,8 +955,10 @@ static func _cell_widths(rows: Array) -> Array:
 			else:
 				w = ListRow.text_width(Slate.plain(cells[i]).strip_edges())
 			if i >= widths.size():
-				widths.append(MIN_CELL_WIDTH)
-			widths[i] = clampf(ceilf(w) + 4, widths[i], MAX_CELL_WIDTH)
+				widths.append(0.0)
+			# A column with nothing in it (no amounts in a list of single things) takes no room.
+			if w > 0:
+				widths[i] = clampf(ceilf(w) + 4, maxf(widths[i], MIN_CELL_WIDTH), MAX_CELL_WIDTH)
 	return widths
 
 
@@ -1519,6 +1524,13 @@ class ListRow extends PanelContainer:
 				var mark := Slate.icon_rect(String(row["icon"]), 20, Slate.CYAN)
 				mark.set_anchors_preset(Control.PRESET_FULL_RECT)
 				slot.add_child(mark)
+		elif bool(opts.get("glyphs", false)) and String(row.get("type", "")) != "":
+			# An item: its sprite on a small plate, like everywhere else items are shown.
+			var plate := ItemSlot.new(30)
+			plate.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			plate.set_item(String(row["type"]), String(row.get("sym", "?")), Slate.curses(String(row.get("sym_color", "c_white"))))
+			line.add_child(plate)
 		elif bool(opts.get("glyphs", false)):
 			var tile := PanelContainer.new()
 			tile.add_theme_stylebox_override("panel", Slate.box(Color(1, 1, 1, 0.05), 7, Slate.BORDER, 0))

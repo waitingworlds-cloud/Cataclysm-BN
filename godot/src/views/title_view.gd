@@ -7,22 +7,24 @@ extends Control
 
 const SlateButton := preload("res://src/ui/slate_button.gd")
 
+const Hud := preload("res://src/ui/hud.gd")
+
 const LINE_HEIGHT := 22.0
-const NAV_WIDTH := 270
-const MAX_BODY_WIDTH := 1180
+const GUT := 8
+const TOP := 58
+const NAV_WIDTH := 400
 
 var view_id := 0
 
 var _msg := {}
+var _bezel: Bezel
 var _glow: TextureRect
 var _art: RichTextLabel
-var _version: Label
-var _body: MarginContainer
 var _nav: VBoxContainer
+var _nav_module: Hud.Module
 var _continue_slot: VBoxContainer
 var _tabs: VBoxContainer
-var _panel_icon: TextureRect
-var _panel_title: Label
+var _section_module: Hud.Module
 var _list_scroll: ScrollContainer
 var _list: VBoxContainer
 var _empty: Label
@@ -42,15 +44,32 @@ var _last_section := ""
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
+	# The same frame as in the game: gunmetal ground, a bar up top, a viewport (here it shows
+	# the title), modules below it and a strip of keys along the bottom.
 	var ground := ColorRect.new()
 	ground.color = Slate.GROUND
 	ground.set_anchors_preset(Control.PRESET_FULL_RECT)
 	ground.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(ground)
 
+	var outer := MarginContainer.new()
+	outer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	outer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for side in ["left", "right", "top", "bottom"]:
+		outer.add_theme_constant_override("margin_" + side, GUT)
+	add_child(outer)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", GUT)
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	outer.add_child(col)
+
+	col.add_child(_build_top())
+
+	_bezel = Bezel.new()
+	col.add_child(_bezel)
 	# A soft light behind the title art.
 	var gradient := Gradient.new()
-	gradient.colors = PackedColorArray([Color(0.30, 0.55, 0.95, 0.16), Color(0.30, 0.55, 0.95, 0.0)])
+	gradient.colors = PackedColorArray([Color(Slate.CYAN, 0.16), Color(Slate.CYAN, 0.0)])
 	var light := GradientTexture2D.new()
 	light.gradient = gradient
 	light.fill = GradientTexture2D.FILL_RADIAL
@@ -62,47 +81,25 @@ func _ready() -> void:
 	_glow.texture = light
 	_glow.stretch_mode = TextureRect.STRETCH_SCALE
 	_glow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_glow.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(_glow)
-
-	var outer := MarginContainer.new()
-	outer.set_anchors_preset(Control.PRESET_FULL_RECT)
-	outer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	for side in ["left", "right"]:
-		outer.add_theme_constant_override("margin_" + side, 32)
-	outer.add_theme_constant_override("margin_top", 26)
-	outer.add_theme_constant_override("margin_bottom", 18)
-	add_child(outer)
-
-	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 0)
-	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	outer.add_child(col)
-
+	_bezel.add_child(_glow)
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_bezel.add_child(center)
 	_art = Slate.rich(14, true)
 	_art.autowrap_mode = TextServer.AUTOWRAP_OFF
 	_art.add_theme_font_override("normal_font", Slate.mono())
 	_art.add_theme_constant_override("line_separation", -2)
-	_art.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	col.add_child(_art)
+	_art.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	center.add_child(_art)
 
-	_version = Slate.label("", 13, Slate.FAINT)
-	_version.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	col.add_child(_version)
-
-	var gap := Control.new()
-	gap.custom_minimum_size.y = 22
-	gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(gap)
-
-	_body = MarginContainer.new()
-	_body.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_body.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(_body)
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 18)
+	row.add_theme_constant_override("separation", GUT)
+	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_body.add_child(row)
+	col.add_child(row)
 	row.add_child(_build_nav())
 	row.add_child(_build_panel())
 
@@ -112,49 +109,74 @@ func _ready() -> void:
 
 # --- Building ------------------------------------------------------------------------------------
 
+func _panel() -> PanelContainer:
+	var p := PanelContainer.new()
+	p.add_theme_stylebox_override("panel", Slate.module_box(0))
+	p.mouse_filter = Control.MOUSE_FILTER_STOP
+	return p
+
+
+## The bar along the top: the game's name where the character's stands in play, and where you are.
+func _build_top() -> Control:
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", GUT)
+	top.custom_minimum_size.y = TOP
+	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var identity := _panel()
+	identity.custom_minimum_size.x = NAV_WIDTH
+	var id_row := HBoxContainer.new()
+	id_row.add_theme_constant_override("separation", 10)
+	id_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	identity.add_child(_margin(id_row, 14, 0, 12, 0))
+	var name := Slate.label("Bright Nights", 18, Slate.TEXT, Slate.spaced(Slate.heavy(), 1))
+	name.uppercase = true
+	name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	id_row.add_child(name)
+	top.add_child(identity)
+	var bar := _panel()
+	bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var bar_row := HBoxContainer.new()
+	bar_row.add_theme_constant_override("separation", 14)
+	bar_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.add_child(_margin(bar_row, 18, 0, 14, 0))
+	var title := Slate.label("Main menu", 17, Slate.CYAN, Slate.spaced(Slate.heavy(), 2))
+	title.uppercase = true
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bar_row.add_child(title)
+	top.add_child(bar)
+	return top
+
+
 func _build_nav() -> Control:
+	_nav_module = Hud.Module.new("Menu")
+	_nav_module.custom_minimum_size.x = NAV_WIDTH
 	_nav = VBoxContainer.new()
-	_nav.custom_minimum_size.x = NAV_WIDTH
-	_nav.add_theme_constant_override("separation", 12)
+	_nav.add_theme_constant_override("separation", 10)
 	_nav.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_continue_slot = VBoxContainer.new()
 	_continue_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_nav.add_child(_continue_slot)
 	_tabs = VBoxContainer.new()
-	_tabs.add_theme_constant_override("separation", 3)
+	_tabs.add_theme_constant_override("separation", 2)
 	_tabs.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_nav.add_child(_tabs)
-	return _nav
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_nav.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_nav)
+	_nav_module.set_body(scroll, 10, 10)
+	return _nav_module
 
 
 func _build_panel() -> Control:
-	var card := PanelContainer.new()
-	var style := Slate.card_box(18, 0)
-	style.bg_color = Color(Slate.CARD_SOLID, 0.94)
-	card.add_theme_stylebox_override("panel", style)
-	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	card.mouse_filter = Control.MOUSE_FILTER_STOP
-	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 0)
-	card.add_child(col)
-
-	var head := HBoxContainer.new()
-	head.add_theme_constant_override("separation", 12)
-	_panel_icon = Slate.icon_rect("play", 20, Slate.ACCENT)
-	head.add_child(_panel_icon)
-	_panel_title = Slate.label("", 19, Slate.TEXT, Slate.heavy())
-	head.add_child(_panel_title)
-	col.add_child(_margin(head, 24, 18, 24, 14))
-	var rule := ColorRect.new()
-	rule.color = Slate.BORDER
-	rule.custom_minimum_size.y = 1
-	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(rule)
+	_section_module = Hud.Module.new("", Slate.ACCENT)
+	_section_module.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
 	var stack := Control.new()
 	stack.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(stack)
+	_section_module.set_body(stack, 0, 0)
 
 	_list_scroll = ScrollContainer.new()
 	_list_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -163,7 +185,7 @@ func _build_panel() -> Control:
 	_list = VBoxContainer.new()
 	_list.add_theme_constant_override("separation", 4)
 	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_list_scroll.add_child(_margin(_list, 14, 12, 14, 12))
+	_list_scroll.add_child(_margin(_list, 12, 12, 14, 12))
 
 	_empty = Slate.label("", 14, Slate.MUTED)
 	_empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -179,7 +201,7 @@ func _build_panel() -> Control:
 	_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_text.add_theme_color_override("default_color", Slate.SOFT)
 	_text.add_theme_constant_override("line_separation", 4)
-	_text_scroll.add_child(_margin(_text, 26, 16, 26, 16))
+	_text_scroll.add_child(_margin(_text, 22, 16, 26, 16))
 
 	_action = CenterContainer.new()
 	_action.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -200,24 +222,30 @@ func _build_panel() -> Control:
 	_action_slot = HBoxContainer.new()
 	_action_slot.alignment = BoxContainer.ALIGNMENT_CENTER
 	box.add_child(_action_slot)
-	return card
+	return _section_module
 
 
+## The strip along the bottom: the tip of the day, and the keys.
 func _build_footer() -> Control:
+	var strip := _panel()
+	strip.custom_minimum_size.y = 38
 	var bar := HBoxContainer.new()
 	bar.add_theme_constant_override("separation", 18)
 	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var wrap := _margin(bar, 0, 16, 0, 0)
+	strip.add_child(_margin(bar, 14, 7, 14, 7))
 
 	var tip := HBoxContainer.new()
 	tip.add_theme_constant_override("separation", 10)
 	tip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var bulb := Slate.icon_rect("lightbulb", 18, Slate.ACCENT)
-	bulb.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	tip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var bulb := Slate.icon_rect("lightbulb", 16, Slate.ACCENT)
+	bulb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	tip.add_child(bulb)
 	var lines := VBoxContainer.new()
 	lines.add_theme_constant_override("separation", 2)
 	lines.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lines.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	lines.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	tip.add_child(lines)
 	_tip = Slate.rich(13)
 	_tip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -228,9 +256,9 @@ func _build_footer() -> Control:
 
 	_hints = HBoxContainer.new()
 	_hints.add_theme_constant_override("separation", 16)
-	_hints.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	_hints.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	bar.add_child(_hints)
-	return wrap
+	return strip
 
 
 func _margin(child: Control, left: int, top: int, right: int, bottom: int) -> MarginContainer:
@@ -249,18 +277,21 @@ func _layout() -> void:
 	if _art == null:
 		return
 	var view := size
-	# The art keeps its shape: the font shrinks until it fits the width and a fair share of the height.
+	# The viewport takes a good quarter of the window, and the art fills it without losing its
+	# shape: the font shrinks until it fits.
+	var room := Vector2(view.x - 2 * GUT - 80, clampf(roundf(view.y * 0.28), 120, 320))
+	_bezel.custom_minimum_size.y = room.y
 	var art: Array = _msg.get("art", [])
 	var cols := 1
 	for line in art:
 		cols = maxi(cols, Slate.plain(line).length())
 	var lines := maxi(1, art.size())
 	var font := Slate.mono()
-	var size_px := 20
+	var size_px := 22
 	while size_px > 7:
 		var w := font.get_string_size("M", HORIZONTAL_ALIGNMENT_LEFT, -1, size_px).x * cols
 		var h := (font.get_height(size_px) - 2) * lines
-		if w <= minf(view.x - 80, 980) and h <= view.y * 0.30:
+		if w <= minf(room.x, 1100) and h <= room.y - 44:
 			break
 		size_px -= 1
 	if art.size() <= 1:
@@ -269,11 +300,9 @@ func _layout() -> void:
 	else:
 		_art.add_theme_font_override("normal_font", font)
 	_art.add_theme_font_size_override("normal_font_size", size_px)
-	_glow.position = Vector2(view.x * 0.5 - 520, -110)
-	_glow.size = Vector2(1040, 520)
-	var side := maxf(0, (view.x - 64 - MAX_BODY_WIDTH) / 2)
-	_body.add_theme_constant_override("margin_left", int(side))
-	_body.add_theme_constant_override("margin_right", int(side))
+	# A narrow window keeps most of its width for the section's choices.
+	var nav_width := minf(NAV_WIDTH, roundf(view.x * 0.32))
+	_nav_module.custom_minimum_size.x = nav_width
 
 
 # --- Updates from the game -----------------------------------------------------------------------
@@ -286,7 +315,7 @@ func apply(msg: Dictionary) -> void:
 		for line in msg.get("art", []):
 			text.append(Slate.bbcode(line, Slate.TEXT))
 		_art.text = "\n".join(text)
-	_version.text = String(msg.get("version", ""))
+	_bezel.set_tag(String(msg.get("version", "")))
 	_apply_nav(msg)
 	_apply_section(msg.get("section", {}))
 	_tip.text = Slate.bbcode(msg.get("tip", []), Slate.SOFT)
@@ -382,8 +411,8 @@ func _tab(t: Dictionary) -> Control:
 
 
 func _apply_section(section: Dictionary) -> void:
-	_panel_title.text = String(section.get("title", ""))
-	_panel_icon.texture = Slate.icon(String(section.get("icon", "play")), 20)
+	var section_title := String(section.get("title", ""))
+	_section_module.set_title(section_title, Slate.ACCENT)
 	var rows: Array = section.get("rows", [])
 	var body := Slate.bbcode(section.get("body", []), Slate.SOFT)
 	var action: Dictionary = section.get("action", {})
@@ -393,7 +422,7 @@ func _apply_section(section: Dictionary) -> void:
 	_empty.visible = rows.is_empty() and body == "" and action.is_empty()
 	_empty.text = String(section.get("empty", ""))
 
-	var key := "%s|%s" % [_panel_title.text, body.length()]
+	var key := "%s|%s" % [section_title, body.length()]
 	if body != "":
 		if key != _last_section:
 			_text.text = Slate.tidy_body(body)
@@ -514,3 +543,40 @@ func _apply_hints(hints: Array) -> void:
 			item.add_child(Slate.key_chip(Slate.key_name(key), 10))
 		item.add_child(Slate.label(String(h.get("text", "")), 12, Slate.MUTED))
 		_hints.add_child(item)
+
+
+## The viewport's bezel, as around the map in play: here the title stands in it.
+class Bezel extends Control:
+	var _tag := ""
+
+	func _init() -> void:
+		clip_contents = true
+		mouse_filter = Control.MOUSE_FILTER_STOP
+
+	func set_tag(text: String) -> void:
+		if text != _tag:
+			_tag = text
+			queue_redraw()
+
+	func _draw() -> void:
+		var v := Rect2(Vector2.ZERO, size)
+		draw_rect(v, Color("#03090b"))
+		draw_rect(v.grow(-1), Color(Slate.CYAN, 0.75), false, 2.0)
+		draw_rect(v.grow(-2.5), Color(0, 0, 0, 0.55), false, 1.0)
+		var arm := 22.0
+		var inset := v.grow(-9)
+		for corner in [[inset.position, Vector2(1, 1)], [Vector2(inset.end.x, inset.position.y), Vector2(-1, 1)],
+				[Vector2(inset.position.x, inset.end.y), Vector2(1, -1)], [inset.end, Vector2(-1, -1)]]:
+			var at: Vector2 = corner[0]
+			var way: Vector2 = corner[1]
+			draw_polyline(PackedVector2Array([at + Vector2(arm * way.x, 0), at, at + Vector2(0, arm * way.y)]), Slate.CYAN, 2.0)
+		if _tag == "":
+			return
+		var font := Slate.mono()
+		var fs := Slate.fs(10)
+		var text := _tag.to_upper()
+		var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x + 14
+		var box := Rect2(Vector2(inset.end.x - arm - 8 - w, inset.end.y - 15), Vector2(w, 18))
+		draw_rect(box, Color(Slate.CARD, 0.9))
+		draw_rect(box.grow(-0.5), Color(Slate.CYAN, 0.6), false, 1.0)
+		draw_string(font, Vector2(box.position.x + 7, box.position.y + 13), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Slate.CYAN)

@@ -105,6 +105,10 @@ func _button(text: String, key: String, primary: bool, action: Callable) -> Butt
 		chip.add_theme_stylebox_override("panel", Slate.pill_box(Color(0, 0, 0, 0.16), 6, 1))
 		(chip.get_child(0) as Label).add_theme_color_override("font_color", Color(Slate.ACCENT_TEXT, 0.75))
 	row.add_child(chip)
+	# As wide as its label and key need, with air at both ends.
+	var fit := func(): b.custom_minimum_size.x = maxf(110, row.get_combined_minimum_size().x + 32)
+	row.minimum_size_changed.connect(fit)
+	fit.call()
 	b.pressed.connect(action)
 	return b
 
