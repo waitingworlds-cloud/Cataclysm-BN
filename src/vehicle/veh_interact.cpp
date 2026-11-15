@@ -703,6 +703,48 @@ void veh_interact::publish_native() {
             {.text = title ? remove_color_tags(*title)
                            : string_format(_("Owner: %s"), veh->get_owner_name())});
 
+        if (install_info) {
+            // The parts that fit here: groups as tabs, then a list with their pictures.
+            jsout.member("tabs");
+            jsout.start_array();
+            for (auto i = 0; i < static_cast<int>(install_info->tab_list.size()); i++) {
+                gs::write_tab(
+                    jsout,
+                    {.text = install_info->tab_list[i],
+                     .active = i == static_cast<int>(install_info->tab),
+                     .pick = gs::tab_pick + i});
+            }
+            jsout.end_array();
+            jsout.member("tab_keys");
+            jsout.start_object();
+            jsout.member("prev", cata::godot_bridge::key_label("PREV_TAB", category));
+            jsout.member("next", cata::godot_bridge::key_label("NEXT_TAB", category));
+            jsout.end_object();
+            jsout.member("panes");
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member("title", _("Parts you can install"));
+            jsout.member("icon", "plus");
+            jsout.member("cursor", install_info->pos);
+            jsout.member("confirm", "CONFIRM");
+            jsout.member("empty", _("Nothing in this group fits here."));
+            jsout.member("rows");
+            jsout.start_array();
+            std::ranges::for_each(install_info->tab_vparts, [&](const vpart_info* info) {
+                gs::write_row(
+                    jsout,
+                    {.text = {.text = info->name(),
+                              .color = can_potentially_install(*info) ? c_white : c_dark_gray},
+                     .sym = std::string(1, static_cast<char>(info->sym)),
+                     .sym_color = string_from_color(info->color),
+                     .type = "vp_" + info->get_id().str()});
+            });
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member("active_pane", 0);
+        }
+
         jsout.member("aside");
         jsout.start_object();
         jsout.member("sections");
@@ -718,13 +760,16 @@ void veh_interact::publish_native() {
                 jsout.end_object();
             };
         if (install_info) {
-            // The list being chosen from first, with what the chosen part needs.
-            section(_("Parts you can install"), w_list, {});
-            section(_("Details"), w_details, {});
-            section(_("Requirements"), w_msg, {});
+            // What the part chosen in the list is, and what installing it needs.
+            // With nothing to choose, the game lists what is on the square instead.
+            const auto choosing = !install_info->tab_vparts.empty();
+            if (choosing) {
+                section(_("Details"), w_details, {});
+                section(_("Requirements"), w_msg, {});
+            }
             write_parts_here(
                 jsout,
-                {.veh = *veh, .part = cpart, .highlight = highlight_part, .describe = false});
+                {.veh = *veh, .part = cpart, .highlight = highlight_part, .describe = !choosing});
         } else {
             // What the game answered (why something can't be done) first, where it is seen.
             if (msg) { section(_("Note"), w_msg, {}); }
@@ -1441,6 +1486,28 @@ void veh_interact::do_install() {
 
         const std::string action = main_context.handle_input();
         msg.reset();
+#if defined(TILES)
+        // A click on a group or on a part in the front end's list.
+        if (const auto pick = native ? cata::godot_bridge::take_pick(this) : std::nullopt) {
+            namespace gs = cata::godot_screen;
+            if (*pick >= gs::tab_pick) {
+                if (*pick - gs::tab_pick < static_cast<int>(tab_list.size())) {
+                    tab = *pick - gs::tab_pick;
+                    tab_vparts.clear();
+                    pos = 0;
+                    copy_if(can_mount.begin(), can_mount.end(), back_inserter(tab_vparts),
+                            tab_filters[tab]);
+                }
+                continue;
+            }
+            const auto row = *pick % gs::row_stride;
+            // A click on another part only moves to it; a click on the chosen one installs it.
+            if (row < static_cast<int>(tab_vparts.size()) && row != pos) {
+                pos = row;
+                continue;
+            }
+        }
+#endif
         if (action == "FILTER") {
             string_input_popup()
                 .title(_("Search for part"))
@@ -3207,8 +3274,16 @@ void veh_interact::display_details(const vpart_info* part) {
 
     werase(w_details);
 
-    wborder(w_details, LINE_XOXO, LINE_XOXO, LINE_OXOX, LINE_OXOX, LINE_OXXO, LINE_OOXX, LINE_XXOO,
-            LINE_XOOX);
+    // The Godot front end frames the details itself.
+#if defined(TILES)
+    const auto boxed = !native;
+#else
+    const auto boxed = true;
+#endif
+    if (boxed) {
+        wborder(w_details, LINE_XOXO, LINE_XOXO, LINE_OXOX, LINE_OXOX, LINE_OXXO, LINE_OOXX,
+                LINE_XXOO, LINE_XOOX);
+    }
 
     if (part == nullptr) {
         wnoutrefresh(w_details);
