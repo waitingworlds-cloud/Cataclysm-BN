@@ -1105,7 +1105,13 @@ func _apply_aside(msg: Dictionary) -> void:
 	var warn: Array = aside.get("warn", [])
 	_aside_warn.visible = not warn.is_empty()
 	_aside_warn_text.text = Slate.bbcode(warn, Slate.DANGER).strip_edges()
-	var body := Slate.tidy_body(Slate.bbcode(aside.get("body", []), Slate.SOFT))
+	var body_spans = aside.get("body", [])
+	if bool(aside.get("mono", false)) and _mode == "docked":
+		# A line with two things set far apart (a creature's name and its mood) is drawn closer
+		# together when it is too long for the panel, before anything gets smaller.
+		var per_char := Slate.mono().get_string_size("0000000000", HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(120)).x / 100.0
+		body_spans = Slate.narrow_gaps(body_spans, int((_dock_rect().size.x - 44) / per_char) - 6)
+	var body := Slate.tidy_body(Slate.bbcode(body_spans, Slate.SOFT))
 	var empty := String(aside.get("empty", ""))
 	var sections: Array = aside.get("sections", [])
 	_apply_sections(sections)
@@ -1121,7 +1127,7 @@ func _apply_aside(msg: Dictionary) -> void:
 			# Columns the game lined up stay lined up in a narrow panel: the text gets a little
 			# smaller instead of wrapping (down to a size that still reads well).
 			var widest := 0.0
-			for text_line in Slate.plain(aside.get("body", [])).split("\n"):
+			for text_line in Slate.plain(body_spans).split("\n"):
 				widest = maxf(widest, Slate.mono().get_string_size(text_line.rstrip(" "), HORIZONTAL_ALIGNMENT_LEFT, -1, Slate.fs(120)).x / 10.0)
 			var room := _dock_rect().size.x - 44
 			if widest > 0 and widest > room:
@@ -1250,9 +1256,10 @@ func _apply_sections(sections: Array) -> void:
 		label.visible = text != ""
 		var parts: Array = spec.get("parts", [])
 		var groups: Array = spec.get("groups", [])
+		var aim: Dictionary = spec.get("aim", {})
 		var rows := box.get_child(2) as VBoxContainer
-		rows.visible = not parts.is_empty() or not groups.is_empty()
-		var stamp := hash([parts, groups])
+		rows.visible = not parts.is_empty() or not groups.is_empty() or not aim.is_empty()
+		var stamp := hash([parts, groups, aim])
 		if rows.get_meta("stamp", 0) != stamp:
 			rows.set_meta("stamp", stamp)
 			for c in rows.get_children():
@@ -1266,12 +1273,16 @@ func _apply_sections(sections: Array) -> void:
 					var row := GroupRow.new(line)
 					row.chosen.connect(func(key: String): Bridge.send({"t": "text", "s": key}))
 					rows.add_child(row)
+			if not aim.is_empty():
+				var panel := AimPanel.new(aim)
+				panel.chosen.connect(func(action: String): Bridge.press(view_id, action))
+				rows.add_child(panel)
 		# The keys that page through the parts bring the next one to the top.
 		var to := int(spec.get("scroll_to", 0))
 		if not parts.is_empty() and rows.get_meta("at", 0) != to:
 			rows.set_meta("at", to)
 			_show_part.call_deferred(rows, to)
-		box.visible = text != "" or not parts.is_empty() or not groups.is_empty()
+		box.visible = text != "" or not parts.is_empty() or not groups.is_empty() or not aim.is_empty()
 
 
 func _show_part(rows: VBoxContainer, index: int) -> void:
@@ -1310,6 +1321,10 @@ func _apply_buttons(buttons: Array) -> void:
 		if grid == null:
 			grid = GridContainer.new()
 			grid.columns = 1 if _narrow else (3 if _mode == "docked" and _dock_rect().size.x >= 640 else 2)
+			# Many buttons in a narrow panel (aiming) go two abreast when their labels fit,
+			# so the panel keeps room for what it has to say.
+			if _narrow and buttons.size() >= 8:
+				grid.columns = 2
 			grid.add_theme_constant_override("h_separation", 6)
 			grid.add_theme_constant_override("v_separation", 6)
 			_buttons.add_child(grid)
@@ -2032,6 +2047,150 @@ class GroupRow extends PanelContainer:
 		if _key != "" and event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 			accept_event()
 			chosen.emit(_key)
+
+
+## How good a shot or a throw would be: how steady the aim is, then each way to fire as a row
+## that fires that way when clicked.
+class AimPanel extends VBoxContainer:
+	signal chosen(action: String)
+
+	func _init(aim: Dictionary) -> void:
+		add_theme_constant_override("separation", 6)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if aim.has("steadiness"):
+			var level := clampf(float(aim["steadiness"]), 0.0, 1.0)
+			var line := HBoxContainer.new()
+			line.add_theme_constant_override("separation", 10)
+			add_child(line)
+			line.add_child(Slate.label(String(aim.get("steadiness_label", "Steadiness")).to_upper(), 11, Slate.MUTED, Slate.spaced(Slate.mono(), 1)))
+			var bar := Hud.SegmentBar.new(20)
+			bar.custom_minimum_size = Vector2(80, 7)
+			bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			bar.set_level(level, Slate.CYAN)
+			line.add_child(bar)
+			var value := Slate.label("%d%%" % roundi(level * 100), 11, Slate.TEXT, Slate.mono())
+			value.custom_minimum_size.x = 40
+			value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			line.add_child(value)
+		var rows: Array = aim.get("rows", [])
+		if not rows.is_empty():
+			# What the colors of the bars stand for, once.
+			var legend := HBoxContainer.new()
+			legend.add_theme_constant_override("separation", 14)
+			add_child(legend)
+			for chance in rows[0].get("chances", []):
+				var item := HBoxContainer.new()
+				item.add_theme_constant_override("separation", 5)
+				var dot := ColorRect.new()
+				dot.custom_minimum_size = Vector2(8, 8)
+				dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+				dot.color = Slate.hit_color(String(chance.get("color", "")))
+				dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				item.add_child(dot)
+				item.add_child(Slate.label(String(chance.get("label", "")).to_upper(), 10, Slate.MUTED, Slate.spaced(Slate.mono(), 1)))
+				legend.add_child(item)
+		var list := VBoxContainer.new()
+		list.add_theme_constant_override("separation", 0)
+		add_child(list)
+		for row in rows:
+			var line := AimRow.new(row, String(aim.get("moves_label", "moves")))
+			line.chosen.connect(func(action: String): chosen.emit(action))
+			list.add_child(line)
+		var note := String(aim.get("note", ""))
+		if note != "":
+			add_child(Slate.label(note, 12, Slate.SOFT))
+
+
+## One way to fire: its key and name, the moves it takes, and a bar of the chances to hit with
+## their sum beside it (each chance is in the tooltip). A click fires that way.
+class AimRow extends PanelContainer:
+	signal chosen(action: String)
+
+	var _action := ""
+	var _box: StyleBoxFlat
+
+	func _init(row: Dictionary, unit: String) -> void:
+		_action = String(row.get("action", ""))
+		_box = StyleBoxFlat.new()
+		_box.bg_color = Color(0, 0, 0, 0)
+		_box.border_color = Slate.BORDER
+		_box.border_width_top = 1
+		_box.content_margin_left = 6
+		_box.content_margin_right = 0
+		_box.content_margin_top = 4
+		_box.content_margin_bottom = 5
+		add_theme_stylebox_override("panel", _box)
+		mouse_filter = Control.MOUSE_FILTER_STOP
+		if _action != "":
+			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+			mouse_entered.connect(func(): _lit(true))
+			mouse_exited.connect(func(): _lit(false))
+		var cell := VBoxContainer.new()
+		cell.add_theme_constant_override("separation", 4)
+		cell.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(cell)
+		var line := HBoxContainer.new()
+		line.add_theme_constant_override("separation", 8)
+		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cell.add_child(line)
+		line.add_child(Slate.key_chip(Slate.key_name(String(row.get("key", ""))), 10))
+		var name := Slate.label(String(row.get("label", "")), 13, Slate.TEXT)
+		name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		name.clip_text = true
+		line.add_child(name)
+		line.add_child(Slate.label("%d %s" % [int(row.get("moves", 0)), unit], 11, Slate.INFO, Slate.mono()))
+		var segments := []
+		var words := PackedStringArray()
+		var total := 0
+		for chance in row.get("chances", []):
+			var percent := int(chance.get("percent", 0))
+			total += percent
+			segments.append([percent / 100.0, Slate.hit_color(String(chance.get("color", "")))])
+			words.append("%s %d%%" % [String(chance.get("label", "")), percent])
+		var under := HBoxContainer.new()
+		under.add_theme_constant_override("separation", 10)
+		under.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cell.add_child(under)
+		var bar := ChanceBar.new(segments)
+		bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		under.add_child(bar)
+		var sum := Slate.label("%d%%" % total, 11, Slate.TEXT, Slate.mono())
+		sum.custom_minimum_size.x = 40
+		sum.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		under.add_child(sum)
+		tooltip_text = ", ".join(words)
+
+	func _lit(on: bool) -> void:
+		_box.bg_color = Slate.RAISED if on else Color(0, 0, 0, 0)
+		_box.border_color = Slate.ACCENT if on else Slate.BORDER
+
+	func _gui_input(event: InputEvent) -> void:
+		if _action != "" and event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			accept_event()
+			chosen.emit(_action)
+
+
+## A bar of chances side by side, each a share of the whole width in its own color.
+class ChanceBar extends Control:
+	var _segments := []
+
+	func _init(segments: Array) -> void:
+		_segments = segments
+		custom_minimum_size = Vector2(80, 8)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		draw_rect(Rect2(Vector2.ZERO, size), Slate.TRACK)
+		var x := 0.0
+		for segment in _segments:
+			var w := clampf(float(segment[0]), 0.0, 1.0) * size.x
+			if w <= 0.0:
+				continue
+			w = minf(w, size.x - x)
+			draw_rect(Rect2(x, 0, maxf(w - 1.0, 1.0), size.y), segment[1])
+			x += w
 
 
 ## A board of character squares (the minigames) in the game's colors, as large as fits. Text

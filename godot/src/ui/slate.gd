@@ -416,6 +416,77 @@ static func plain(spans) -> String:
 	return out
 
 
+## Text the game laid out in columns, with the widest gap of each line that is longer than
+## `max_chars` made narrower, so that the line fits without the whole text getting smaller.
+static func narrow_gaps(spans, max_chars: int) -> Array:
+	if typeof(spans) != TYPE_ARRAY:
+		return []
+	if max_chars <= 0:
+		return spans
+	var lines := [[]]
+	for run in spans:
+		var parts := String(run[0]).split("\n")
+		for i in parts.size():
+			if i > 0:
+				lines.append([])
+			if parts[i] != "":
+				var piece: Array = run.duplicate()
+				piece[0] = parts[i]
+				lines[-1].append(piece)
+	var out := []
+	for n in lines.size():
+		var line: Array = lines[n]
+		var text := ""
+		for piece in line:
+			text += String(piece[0])
+		var extra := text.rstrip(" ").length() - max_chars
+		if extra > 0:
+			# The longest run of blanks in the line gives up what the line is too long by.
+			var best_at := -1
+			var best_len := 0
+			var at := -1
+			for i in text.length():
+				if text[i] != " ":
+					at = -1
+					continue
+				if at < 0:
+					at = i
+				if i - at + 1 > best_len:
+					best_len = i - at + 1
+					best_at = at
+			var cut := mini(extra, best_len - 2)
+			if cut > 0:
+				var pos := 0
+				for piece in line:
+					var s := String(piece[0])
+					var a := clampi(best_at - pos, 0, s.length())
+					var b := clampi(best_at + cut - pos, 0, s.length())
+					pos += s.length()
+					if b > a:
+						piece[0] = s.substr(0, a) + s.substr(b)
+		for piece in line:
+			if String(piece[0]) != "":
+				out.append(piece)
+		if n < lines.size() - 1:
+			if not line.is_empty() and not out.is_empty():
+				out[-1][0] = String(out[-1][0]) + "\n"
+			else:
+				out.append(["\n", "c_light_gray"])
+	return out
+
+
+## The game's color for a kind of hit (great, normal, graze), in the interface's colors.
+static func hit_color(name: String) -> Color:
+	match name:
+		"c_green":
+			return GOOD
+		"c_light_gray", "c_white":
+			return CYAN
+		"c_magenta":
+			return WARN
+	return curses(name, CYAN)
+
+
 ## Color of the first run, as a Slate color.
 static func lead_color(spans, fallback := TEXT) -> Color:
 	if typeof(spans) == TYPE_ARRAY and spans.size() > 0 and spans[0].size() > 1:

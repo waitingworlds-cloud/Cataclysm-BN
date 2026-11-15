@@ -800,7 +800,8 @@ auto write_window_spans( JsonOut &jsout, const catacurses::window &w,
     const auto skip = columns.skip_divider && std::ranges::all_of( win->line, is_divider ) ? 1 : 0;
     // Lines without their trailing blanks, then without trailing empty lines.
     auto rows = std::vector<std::vector<const cata_cursesport::cursecell *>>();
-    for( const auto &line : win->line ) {
+    const auto shown = columns.rows < 0 ? win->line.size() : static_cast<size_t>( columns.rows );
+    for( const auto &line : win->line | std::views::take( shown ) ) {
         const auto left = std::clamp( columns.left + skip, 0, static_cast<int>( line.chars.size() ) );
         const auto width = columns.width < 0 ? static_cast<int>( line.chars.size() ) - left :
                            std::min( columns.width - skip, static_cast<int>( line.chars.size() ) - left );

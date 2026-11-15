@@ -408,6 +408,27 @@ auto clamp_range_to_reality_bubble( const tripoint_bub_ms &src, const int range 
 
 } // namespace
 
+/// What the aiming panel says about accuracy, for a front end that draws its own bars.
+struct aim_readout {
+    struct chance {
+        std::string label = {};
+        /// Curses color name without its `c_`, as in the confidence ratings.
+        std::string color = {};
+        int percent = 0;
+    };
+    struct line {
+        /// Action that fires this way (its key is shown before the label).
+        std::string action = {};
+        std::string label = {};
+        int moves = 0;
+        std::vector<chance> chances = {};
+    };
+    std::optional<double> steadiness = std::nullopt;
+    std::vector<line> lines = {};
+    /// Extra line under the bars, such as the delay of the chosen aim.
+    std::string note = {};
+};
+
 class target_ui
 {
     public:
@@ -666,6 +687,10 @@ class target_ui
         void panel_target_info( int &text_y, bool fill_with_blank_if_no_target );
         void panel_fire_mode_aim( int &text_y );
         void panel_turret_list( int &text_y );
+
+        /// The accuracy part of the panel as numbers, and the line of `w_target` it starts on.
+        aim_readout aim_info = {};
+        int aim_from = -1;
 
         // On-selected-as-target checks that act as if they are on-hit checks.
         // `harmful` is `false` if using a non-damaging spell
@@ -2107,7 +2132,7 @@ static int print_ranged_chance( const catacurses::window &w, int line_number,
                                 const std::function<dispersion_sources( const ranged::aim_type & )> &dispersion_fun,
                                 const std::function<int( const ranged::aim_type & )> &cost_fun,
                                 const std::vector<confidence_rating> &confidence_config,
-                                double range, double target_size )
+                                double range, double target_size, aim_readout *readout = nullptr )
 {
     int window_width = getmaxx( w ) - 2; // Window width minus borders.
     std::string display_type = get_option<std::string>( "ACCURACY_DISPLAY" );
@@ -2194,6 +2219,20 @@ static int print_ranged_chance( const catacurses::window &w, int line_number,
 
         double confidence = confidence_estimate( range, target_size, current_dispersion );
 
+        if( readout != nullptr ) {
+            auto line = aim_readout::line{ .action = type.action.empty() ? "FIRE" : type.action,
+                                           .label = string_format( "%s %s", label, aim_l ),
+                                           .moves = moves_to_fire };
+            auto counted = 0;
+            for( const auto &cr : confidence_config ) {
+                const auto chance = std::min<int>( 100, 100.0 * cr.aim_level * confidence ) - counted;
+                counted += chance;
+                line.chances.push_back( { .label = pgettext( "aim_confidence", cr.label.c_str() ),
+                                          .color = cr.color, .percent = chance } );
+            }
+            readout->lines.push_back( std::move( line ) );
+        }
+
         if( display_type == "numbers" ) {
             if( panel_type == "compact" || panel_type == "labels-narrow" ) {
                 int last_chance = 0;
@@ -2275,7 +2314,7 @@ double ranged::calculate_aim_cap( const Character &p, const tripoint_bub_ms &tar
 static int print_aim( const Character &p, const catacurses::window &w, int line_number,
                       input_context &ctxt, item &weapon,
                       const double target_size, const tripoint_bub_ms &pos, double predicted_recoil,
-                      item *load_loc )
+                      item *load_loc, aim_readout *readout = nullptr )
 {
     // This is absolute accuracy for the player.
     // TODO: push the calculations duplicated from Creature::deal_projectile_attack() and
@@ -2316,13 +2355,17 @@ static int print_aim( const Character &p, const catacurses::window &w, int line_
     };
     const double range = rl_dist( p.bub_pos(), pos );
     line_number = print_steadiness( w, line_number, steadiness );
+    if( readout != nullptr ) {
+        readout->steadiness = steadiness;
+    }
     return print_ranged_chance( w, line_number, ctxt, weapon, ranged::get_aim_types( p, weapon ),
-                                dispersion_fun, cost_fun, confidence_config, range, target_size );
+                                dispersion_fun, cost_fun, confidence_config, range, target_size, readout );
 }
 
 static int draw_throw_aim( const player &p, const catacurses::window &w, int line_number,
                            input_context &ctxt,
-                           const item &weapon, const tripoint_bub_ms &target_pos, bool is_blind_throw )
+                           const item &weapon, const tripoint_bub_ms &target_pos, bool is_blind_throw,
+                           aim_readout *readout = nullptr )
 {
     Creature *target = g->critter_at( target_pos, true );
     if( target != nullptr && !p.sees( *target ) ) {
@@ -2355,7 +2398,7 @@ static int draw_throw_aim( const player &p, const catacurses::window &w, int lin
         return ranged::throw_cost( p, weapon );
     };
     return print_ranged_chance( w, line_number, ctxt, weapon, get_default_aim_type(),
-                                dispersion_fun, cost_fun, confidence_config, range, target_size );
+                                dispersion_fun, cost_fun, confidence_config, range, target_size, readout );
 }
 
 std::vector<ranged::aim_type> ranged::get_aim_types( const Character &who, const item &gun )
@@ -4146,14 +4189,19 @@ void target_ui::draw_ui_window()
     }
 #endif
 
+    // The Godot panel is short on height next to its buttons: no blank lines between the parts.
+    auto dense = compact;
+#if defined(TILES)
+    dense = dense || native;
+#endif
     panel_cursor_info( text_y );
-    text_y += compact ? 0 : 1;
+    text_y += dense ? 0 : 1;
 
     if( mode == TargetMode::Fire || mode == TargetMode::TurretManual || ( mode == TargetMode::Shape &&
             relevant->is_gun() ) ) {
         panel_gun_info( text_y );
         panel_recoil( text_y );
-        text_y += compact ? 0 : 1;
+        text_y += dense ? 0 : 1;
     } else if( mode == TargetMode::Spell ) {
         panel_spell_info( text_y );
         text_y += compact ? 0 : 1;
@@ -4163,15 +4211,19 @@ void target_ui::draw_ui_window()
     panel_target_info( text_y, fill_with_blank_if_no_target );
     text_y += compact ? 0 : 1;
 
+    aim_info = {};
+    aim_from = -1;
     if( mode == TargetMode::Turrets ) {
         panel_turret_list( text_y );
     } else if( status == Status::Good ) {
         // TODO: these are old, consider refactoring
         if( mode == TargetMode::Fire ) {
+            aim_from = text_y;
             panel_fire_mode_aim( text_y );
         } else if( mode == TargetMode::Throw || mode == TargetMode::ThrowBlind ) {
             bool blind = ( mode == TargetMode::ThrowBlind );
-            draw_throw_aim( *you, w_target, text_y, ctxt, *relevant, dst, blind );
+            aim_from = text_y;
+            draw_throw_aim( *you, w_target, text_y, ctxt, *relevant, dst, blind, &aim_info );
         }
     }
 
@@ -4228,15 +4280,53 @@ void target_ui::publish_native()
         jsout.start_object();
         jsout.member( "mono", true );
         jsout.member( "body" );
-        cata::godot_bridge::write_window_spans( jsout, w_target, { .left = 1, .width = getmaxx( w_target ) - 2 } );
+        // The accuracy lines are sent as numbers below; the text above them goes as it is.
+        const auto has_aim = aim_from >= 0 && !aim_info.lines.empty();
+        cata::godot_bridge::write_window_spans( jsout, w_target, { .left = 1, .width = getmaxx( w_target ) - 2, .rows = has_aim ? aim_from : -1 } );
+        if( has_aim ) {
+            jsout.member( "sections" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Accuracy" ) );
+            jsout.member( "aim" );
+            jsout.start_object();
+            if( aim_info.steadiness ) {
+                jsout.member( "steadiness", std::clamp( *aim_info.steadiness, 0.0, 1.0 ) );
+                jsout.member( "steadiness_label", _( "Steadiness" ) );
+            }
+            if( !aim_info.note.empty() ) {
+                jsout.member( "note", aim_info.note );
+            }
+            jsout.member( "moves_label", _( "moves" ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &line : aim_info.lines ) {
+                jsout.start_object();
+                jsout.member( "action", line.action );
+                jsout.member( "key", cata::godot_bridge::key_label( line.action, category ) );
+                jsout.member( "label", line.label );
+                jsout.member( "moves", line.moves );
+                jsout.member( "chances" );
+                jsout.start_array();
+                for( const auto &chance : line.chances ) {
+                    jsout.start_object();
+                    jsout.member( "label", chance.label );
+                    jsout.member( "color", "c_" + chance.color );
+                    jsout.member( "percent", chance.percent );
+                    jsout.end_object();
+                }
+                jsout.end_array();
+                jsout.end_object();
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_object();
+            jsout.end_array();
+        }
         jsout.member( "buttons" );
         jsout.start_array();
         if( mode == TargetMode::Fire ) {
-            for( const auto &aim : aim_types | std::views::filter( &ranged::aim_type::has_threshold ) ) {
-                gs::write_button( jsout, { .act = aim.action, .text = aim.name, .icon = "crosshair", .category = category,
-                                           .enabled = ready, .tip = aim.help
-                                         } );
-            }
+            // Each way to aim and fire is a row of the accuracy list above, clicked there.
             gs::write_button( jsout, { .act = "AIM", .text = _( "Steady aim" ), .icon = "target", .category = category,
                                        .enabled = ready
                                      } );
@@ -4263,7 +4353,7 @@ void target_ui::publish_native()
                               shifting_view ? _( "Shift view" ) : _( "Move cursor" ) );
         if( is_mouse_enabled() ) {
             gs::write_fixed_hint( jsout, _( "Click" ), _( "Target" ) );
-            gs::write_fixed_hint( jsout, _( "Right-click" ), _( "Fire" ) );
+            gs::write_fixed_hint( jsout, _( "Right-click" ), fire_text() );
         }
         gs::write_hint( jsout, "TOGGLE_SNAP_TO_TARGET", category,
                         snap_to_target ? _( "Snap: on" ) : _( "Snap: off" ) );
@@ -4632,11 +4722,12 @@ void target_ui::panel_fire_mode_aim( int &text_y )
 
     item *load_loc = activity->reload_loc ? &*activity->reload_loc : nullptr;
     text_y = print_aim( *you, w_target, text_y, ctxt, *relevant->gun_current_mode(),
-                        target_size, dst, predicted_recoil, load_loc );
+                        target_size, dst, predicted_recoil, load_loc, &aim_info );
 
     if( aim_mode->has_threshold ) {
         mvwprintw( w_target, point( 1, text_y++ ), _( "%s Delay: %i" ), aim_mode->name,
                    predicted_delay );
+        aim_info.note = string_format( _( "%s Delay: %i" ), aim_mode->name, predicted_delay );
     }
 
     you->recoil = saved_pc_recoil;

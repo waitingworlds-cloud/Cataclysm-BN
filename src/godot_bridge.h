@@ -178,6 +178,8 @@ struct window_columns {
     int width = -1;
     /// Leaves out the first column when it only holds a drawn divider line.
     bool skip_divider = false;
+    /// Only the first so many lines; a negative count means all of them.
+    int rows = -1;
 };
 
 /// Writes the text drawn in `w` as an array of `[text, color]` runs, one line per row, without
