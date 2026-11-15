@@ -148,33 +148,56 @@ Item sprites come from the game's tileset: Godot asks for the ids it needs (`spr
 draws them into a strip and sends it back, and `src/sprites.gd` caches them. Until a sprite
 arrives, or when the tileset has none, a slot shows the item's map symbol.
 
+## The frame around full screens
+
+Every full screen sits in the same frame as the main screen (`src/ui/cockpit.gd`, class
+`Cockpit`), so opening one never feels like leaving the game:
+
+- **Top left**: who you are, with chips for injuries, needs and the nearest threat, and the clock.
+- **Top bar**: tabs to the big screens (Inventory, Crafting, Construction, Character, Map, Log),
+  each with its key, or the screen's name for pickers and prompts. Clicking a tab closes the
+  screen and opens the other one as its key would.
+- **Map strip**: the map in a bezel down the left, with you in the middle. It is the main screen's
+  picture, moved (`main.gd` `_place_frame`), not a second map; a click on it goes back to the map.
+  Under it a small module shows what you hold, or the screen's own summary (the inventory's load).
+- **Body**: the screen's modules.
+- **Bottom strip**: the screen's key hints.
+
+A window narrower than 1360 units has no map strip, and outside a game (character creation, world
+setup) there is no strip and no identity box. Screens that are a map of their own (the overmap, a
+vehicle) use the frame's `wide` layout: the viewport takes most of the room and is live (clicks go
+to the game), and the screen is one column at the right.
+
 ## The inventory
 
 The inventory and every item list built on it (drop, pick up, wield, wear, use and the other "choose
-an item" prompts) show as one large card:
+an item" prompts) fill the frame (`src/views/inventory_view.gd`):
 
-- Weight and volume carried as bars against your limits, and a search box (`/`).
-- One pane per list the game shows: carried, nearby, worn and, while marking items to drop or pick
-  up, the ones you chose. Items are grouped by category, with their key, symbol, name and weight, or
-  the list's own columns (damage, encumbrance, ...) where it has them.
-- The selected item's full description on the right, with buttons for its actions.
+- One module per list the game shows, in the game's order so the arrow keys match: carried, nearby,
+  worn and, while marking items to drop or pick up, the ones you chose. Carried and nearby items
+  show as slots on steel plates grouped by category, or as rows (the `Slots / Rows` switch, or
+  always when the list has its own columns such as damage or encumbrance).
+- A search box (`/`), and weight and volume carried as bars under the map strip.
+- *Selected item* on the right: its plate, weight and volume, full description and its actions.
 
-Click an item to select it, and click it again (or double click) to confirm. In lists where you mark
-items, the box on the left marks one. Choosing an item in the inventory opens its actions as a card
-beside its description. The keys work as before: arrows, `Tab` to jump by category, number keys for
-amounts, and each action's own key.
+Click an item to select it, and click it again (or double click, or right-click) to confirm. In
+lists where you mark items, the same click marks one. Resting the mouse on a slot names the item
+with its weight and volume. Choosing an item in the inventory opens its actions as a screen of its
+own (`src/views/item_actions_view.gd`), where it can also be pinned to the hotbar. The keys work as
+before: arrows, `Tab` to jump by category, number keys for amounts, and each action's own key.
 
 ## Screens
 
 Most big screens are drawn by one data-driven view, `screen` (`src/views/screen_view.gd`). The game
 describes the screen as JSON each time it redraws, using the helpers in `src/godot_screen.h`, and
-Godot lays it out: a header, tabs, a search box with toggles, one or more lists, a details panel
-with buttons, and key hints. Text fields marked "spans" are arrays of `[text, curses color]`, so the
+Godot lays it out in the frame: tabs, a search box with toggles, one or more lists as modules, a
+details module with buttons, and key hints on the frame's bottom strip. Text fields marked "spans" are arrays of `[text, curses color]`, so the
 game's color tags carry over.
 
 | Field                  | Meaning                                                                   |
 | ---------------------- | ------------------------------------------------------------------------- |
 | `title`, `icon`        | Header text and Lucide icon                                                |
+| `nav`                  | For one of the big screens: the action that opens it (`craft`, `construct`, `player_data`, `messages`, `map`), which lights its tab in the top bar |
 | `subtitle`             | Spans under the title                                                     |
 | `stats`                | Header chips `{icon, label, value (spans), tip}`                          |
 | `tabs`, `subtabs`      | `{text, active, pick, enabled, icon, count, tip}`; `tab_keys {prev, next}` labels the keys that switch tabs |
@@ -186,13 +209,17 @@ game's color tags carry over.
 | `hints`, `footer`      | Key hints `{key, text}` and a line of spans at the bottom                  |
 | `quit`                 | Action of the close button (default `QUIT`; empty hides it)               |
 | `size`                 | Largest size `[w, h]` in pixels                                           |
-| `dock`                 | `right`: over the HUD sidebar, leaving the map clickable (look around); `side`: the same at full height, for screens shown without the HUD |
+| `dock`                 | `right`: the screen takes the place of the main screen's right column, exactly, so the map stays clear and clickable (look around, nearby items, aiming); `side`: the screen is the column of a wide frame around a map of its own (the overmap, a vehicle) |
+| `view`                 | With `dock: side`: where the game draws that map, `[x, y, w, h]` in game pixels. The game draws it across the whole window and the frame shows the middle of it in its viewport |
 
 A pane holds `rows`, a `body` of spans, `entries` (a log) or a `grid` (a game board), with `title`, `icon`, `count`, `note`,
 `empty`, `cursor`, `stretch`, `confirm` (action for clicking the selected row again, default
 `CONFIRM`) and `mark_act` (action for a row's check box). A row has `text` and `cells` (spans),
 `i`, `pick`, `heading`, `enabled`, `passive`, `note`, `icon`, `sym`, `indent`, `tip`, `mark`,
-`key`, `confirm` and `mark_act`.
+`key`, `confirm` and `mark_act`. A list about things you make also takes `slot {type, sym, color}`
+(the result on a steel plate), `meta` (a second line), `parts [{type, sym, color, name, have}]`
+(what it needs, as small slots framed green or red, each with a tooltip), `parts_more`, and
+`status` with `tone` (`ready`, `missing` or `locked`: a colored bar at the row's left edge).
 
 A `grid` is rows of `[text, color]` runs, one character per square, written from a window with
 `write_window_grid`. It is drawn as large as fits up to `cell` pixels. `square` boards draw a tile
