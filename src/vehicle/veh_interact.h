@@ -37,6 +37,7 @@ class vehicle;
 struct vehicle_part;
 #if defined(TILES)
 struct vehicle_preview_window;
+class JsonOut;
 namespace cata::godot_bridge {
 class native_view;
 } // namespace cata::godot_bridge
@@ -102,6 +103,10 @@ private:
     std::unique_ptr<cata::godot_bridge::native_view> native;
     void open_native(const ui_adaptor& current_ui);
     void publish_native();
+    /// The lines `display_stats` printed last, tags and all, for the panel under the picture.
+    mutable std::vector<std::string> stat_lines;
+    /// The overview (engines, tanks, batteries, seats...) as groups of rows.
+    void write_overview(JsonOut& jsout) const;
 #endif
 
     bool ui_hidden = false;

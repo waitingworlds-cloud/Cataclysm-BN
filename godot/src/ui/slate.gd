@@ -446,6 +446,61 @@ static func rich(size := 14, fit := true) -> RichTextLabel:
 	return r
 
 
+## A line of cells the game printed (rows of `[text, color]` runs, see `write_window_grid`) as
+## `[left, right]` BBCode: what stands at the left, and what was printed against the right edge
+## (after the widest gap). The right part keeps its blanks, so columns printed in a fixed width
+## font still line up under each other; without a wide gap all of it is the right part.
+static func split_line(rows: Array, fallback: Color) -> Array:
+	var cells := []
+	if not rows.is_empty():
+		for run in rows[0]:
+			var name := String(run[1]) if run.size() > 1 else ""
+			for ch in String(run[0]):
+				cells.append([ch, name])
+	var first := -1
+	var last := -1
+	for i in cells.size():
+		if cells[i][0] != " ":
+			first = i if first < 0 else first
+			last = i
+	if first < 0:
+		return ["", ""]
+	var gap_at := -1
+	var gap := 0
+	var blank_from := -1
+	for i in range(first, last + 1):
+		if cells[i][0] != " ":
+			blank_from = -1
+			continue
+		blank_from = i if blank_from < 0 else blank_from
+		if i - blank_from + 1 > gap:
+			gap = i - blank_from + 1
+			gap_at = blank_from
+	if gap < 12:
+		return ["", _cells_bbcode(cells, first, cells.size(), fallback, true)]
+	return [_cells_bbcode(cells, first, gap_at, fallback, false),
+			_cells_bbcode(cells, gap_at + gap, cells.size(), fallback, true)]
+
+
+static func _cells_bbcode(cells: Array, from: int, to: int, fallback: Color, keep_blanks: bool) -> String:
+	var out := ""
+	var i := from
+	while i < to:
+		var name := String(cells[i][1])
+		var text := ""
+		while i < to and String(cells[i][1]) == name:
+			text += String(cells[i][0])
+			i += 1
+		if keep_blanks:
+			text = text.replace(" ", "\u00a0")
+		else:
+			while text.contains("  "):
+				text = text.replace("  ", " ")
+		var color := curses(name, fallback) if name != "" else fallback
+		out += "[color=#%s]%s[/color]" % [color.to_html(false), text.replace("[", "[lb]")]
+	return out
+
+
 ## Small rounded key hint, e.g. the `i` on the Bag button.
 static func key_chip(key: String, size := 11) -> PanelContainer:
 	var chip := PanelContainer.new()

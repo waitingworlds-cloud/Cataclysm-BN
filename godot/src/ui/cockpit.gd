@@ -38,6 +38,8 @@ static var in_game := false
 ## a vehicle): the viewport takes most of the room and the screen gets one column at the right,
 ## `side_width` wide. The viewport is live there: clicks in it go to the game.
 var wide := false
+## In a wide frame: the height of the module under the viewport (0: no module there).
+var wide_foot := 0.0
 var side_width := 400.0
 ## The part of the game's picture that belongs in the viewport, in interface units. Empty: the
 ## main screen's map.
@@ -202,6 +204,14 @@ func set_viewport_source(rect: Rect2, side: float) -> void:
 		_layout()
 
 
+## In a wide frame: makes room under the viewport for the `foot` module, `height` tall (0 takes
+## the module away).
+func set_wide_foot(height: float) -> void:
+	if height != wide_foot:
+		wide_foot = height
+		_layout()
+
+
 ## A plain title, for screens you can't tab away from (pickers and prompts), with the screen's
 ## own hint beside it.
 func set_title(title: String, hint_bbcode := "") -> void:
@@ -307,7 +317,8 @@ func _layout() -> void:
 	var playing := in_game or wide
 	if wide:
 		var side := minf(side_width, roundf(size.x * 0.45))
-		strip = Rect2(GUT, top, maxf(size.x - 3 * GUT - side, 80), column_height)
+		var under := wide_foot + GUT if wide_foot > 0 else 0.0
+		strip = Rect2(GUT, top, maxf(size.x - 3 * GUT - side, 80), maxf(column_height - under, 80))
 	elif hud != null and in_game and size.x >= STRIP_MIN_WINDOW:
 		# The strip shows a cut of the main screen's map, so it can't be bigger than that.
 		var map := hud.map_rect()
@@ -337,7 +348,7 @@ func _layout() -> void:
 
 	var foot_top := strip.end.y + GUT
 	var foot_height := top + column_height - foot_top
-	foot.visible = has_strip and not wide and foot_height >= 56
+	foot.visible = has_strip and foot_height >= 56 and (not wide or wide_foot > 0)
 	foot.position = Vector2(GUT, foot_top)
 	foot.size = Vector2(strip.size.x, foot_height)
 

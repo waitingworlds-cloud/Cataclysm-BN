@@ -65,6 +65,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <regex>
 #include <set>
 #include <string>
 #include <utility>
@@ -134,6 +135,55 @@ auto condition_name(const vehicle_part& vp) -> std::string {
 
 /// Writes the parts on a square as one row each: picture, name, kind, condition, contents and
 /// what the part does.
+/// One line of the vehicle's stats ("Mass:  1200 kg", color tags and padding included) as a
+/// label and a value.
+auto write_stat_line(JsonOut& jsout, const std::string& line) -> void {
+    static const auto blanks = std::regex(R"(\s+)");
+    static const auto after_tag = std::regex(R"((<color_[a-z_]+>) )");
+    const auto colon = line.find(':');
+    const auto has_label = colon != std::string::npos && line.find('<') > colon;
+    const auto value = std::regex_replace(
+        std::regex_replace(has_label ? line.substr(colon + 1) : line, blanks, " "), after_tag,
+        "$1");
+    jsout.start_object();
+    jsout.member("label", has_label ? line.substr(0, colon) : std::string());
+    jsout.member("value");
+    cata::godot_screen::write_span(jsout, {.text = trim(value)});
+    jsout.end_object();
+}
+
+/// Every fuel the vehicle carries as a gauge: its name, color and how full it is, with the
+/// game's own readout beside it (percent, use per hour, time until empty or full).
+auto write_fuel_gauges(JsonOut& jsout, vehicle& veh) -> void {
+    const auto fuels = veh.get_printable_fuel_types();
+    // The game prints at most twelve gauges at a time.
+    const auto shown = std::min(static_cast<int>(fuels.size()), 12);
+    const auto readout_width = 100;
+    const auto readout = cata::godot_bridge::capture_window(std::max(shown, 1), readout_width);
+    veh.print_fuel_indicators(readout, point_zero, 0, true, true, false, true);
+    // The readout starts after the game's own five letter gauge.
+    const auto gauge_width = 6;
+    jsout.member("gauges");
+    jsout.start_array();
+    for (auto i = 0; i < static_cast<int>(fuels.size()); i++) {
+        const auto& fuel = fuels[i];
+        const auto capacity = veh.fuel_capacity(fuel);
+        jsout.start_object();
+        jsout.member("name", item::nname(fuel));
+        jsout.member("color", string_from_color(fuel->color));
+        jsout.member("level",
+                     capacity > 0 ? static_cast<double>(veh.fuel_left(fuel)) / capacity : 0.0);
+        if (i < shown) {
+            jsout.member("detail");
+            cata::godot_bridge::write_window_grid(
+                jsout, readout,
+                {.at = point(gauge_width, i), .size = point(readout_width - gauge_width, 1)});
+        }
+        jsout.end_object();
+    }
+    jsout.end_array();
+}
+
 auto write_parts_here(JsonOut& jsout, const parts_here_options& opts) -> void {
     auto& veh = opts.veh;
     if (opts.part < 0 || opts.part >= veh.part_count()) { return; }
@@ -576,6 +626,64 @@ void veh_interact::open_native(const ui_adaptor& current_ui) {
     native->attach(current_ui);
 }
 
+void veh_interact::write_overview(JsonOut& jsout) const {
+    // The game's own header and detail texts, printed a line at a time and sent as they are.
+    const auto line_width = 64;
+    const auto line = cata::godot_bridge::capture_window(1, line_width);
+    const auto write_line = [&](const std::string& name) {
+        jsout.member(name);
+        cata::godot_bridge::write_window_grid(jsout, line, {});
+    };
+    const auto choosing = overview_enable && overview_action;
+    jsout.start_object();
+    jsout.member("title", _("Overview"));
+    jsout.member("groups");
+    jsout.start_array();
+    auto last = std::string();
+    for (auto idx = 0; idx < static_cast<int>(overview_opts.size()); idx++) {
+        const auto& opt = overview_opts[idx];
+        const auto& pt = *opt.part;
+        if (opt.key != last) {
+            if (!last.empty()) {
+                jsout.end_array();
+                jsout.end_object();
+            }
+            last = opt.key;
+            jsout.start_object();
+            werase(line);
+            overview_headers.at(opt.key)(line, 0);
+            write_line("head");
+            jsout.member("rows");
+            jsout.start_array();
+        }
+        jsout.start_object();
+        if (opt.hotkey) { jsout.member("key", std::string(1, opt.hotkey)); }
+        jsout.member("name");
+        cata::godot_screen::write_span(jsout, {.text = pt.name(false), .color = c_white});
+        jsout.member("state", condition_name(pt));
+        jsout.member("level", pt.is_broken() ? 5 : pt.damage_level(4));
+        jsout.member("health", pt.is_broken() ? 0.0 : std::clamp(pt.health_percent(), 0.0, 1.0));
+        jsout.member("type", "vp_" + pt.info().get_id().str());
+        // While a part is being chosen the ones that can't be are dimmed.
+        jsout.member("dim", choosing && !opt.hotkey);
+        jsout.member(
+            "selected",
+            overview_pos < 0 && overview_enable && !overview_action
+                ? overview_enable(pt)
+                : overview_pos == idx);
+        werase(line);
+        opt.details(pt, line, 0);
+        write_line("detail");
+        jsout.end_object();
+    }
+    if (!last.empty()) {
+        jsout.end_array();
+        jsout.end_object();
+    }
+    jsout.end_array();
+    jsout.end_object();
+}
+
 void veh_interact::publish_native() {
     namespace gs = cata::godot_screen;
     const auto category = std::string("VEH_INTERACT");
@@ -627,13 +735,8 @@ void veh_interact::publish_native() {
                  .highlight = highlight_part,
                  .describe = !msg,
                  .scroll_to = start_at});
-            section(_("Overview"), w_list, {});
+            write_overview(jsout);
         }
-        // The stats come in three columns across the screen's width: one after another here.
-        const stats_columns columns = get_stats_columns();
-        section(_("Vehicle"), w_stats, {.left = 1, .width = columns.second - 1});
-        section("", w_stats, {.left = columns.second, .width = columns.third - columns.second});
-        section("", w_stats, {.left = columns.third});
         jsout.end_array();
 
         jsout.member("buttons");
@@ -710,6 +813,19 @@ void veh_interact::publish_native() {
                  .primary = true});
         }
         jsout.end_array();
+        jsout.end_object();
+
+        // The vehicle's numbers and fuel go in a panel under its picture.
+        jsout.member("foot");
+        jsout.start_object();
+        jsout.member("title", _("Vehicle"));
+        jsout.member("stats");
+        jsout.start_array();
+        std::ranges::for_each(stat_lines, [&](const std::string& line) {
+            write_stat_line(jsout, line);
+        });
+        jsout.end_array();
+        write_fuel_gauges(jsout, *veh);
         jsout.end_object();
 
         jsout.member("hints");
@@ -2728,6 +2844,15 @@ static auto wheel_state_description(const vehicle& veh) -> std::string {
  */
 void veh_interact::display_stats() const {
     werase(w_stats);
+    // The same lines go to the Godot front end, which lays them out itself.
+    const auto note_stat = [&]([[maybe_unused]] const std::string& line) {
+#if defined(TILES)
+        if (native) { stat_lines.push_back(line); }
+#endif
+    };
+#if defined(TILES)
+    stat_lines.clear();
+#endif
 
     // see exec()
     const int extraw = ((TERMX - FULL_SCREEN_WIDTH) / 4) * 2;
@@ -2778,6 +2903,10 @@ void veh_interact::display_stats() const {
     // these lambdas simplifies printing stat for vehicle line-by-line
     const auto print_stat_color = [&](auto color, auto... args) {
         fold_and_print(w_stats, point(x[i], y[i]), w[i], color, args...);
+        note_stat(
+            color == c_light_gray
+                ? string_format(args...)
+                : colorize(string_format(args...), color));
         i++;
     };
     const auto print_stat = [&](auto... args) { print_stat_color(c_light_gray, args...); };
@@ -2857,12 +2986,18 @@ void veh_interact::display_stats() const {
     mvwprintz(w_stats, point(x[i], y[i]), c_light_gray, _("Status:"));
     x[i] += utf8_width(_("Status:")) + 1;
     print_stat_color(total_durability_color, total_durability_text);
+#if defined(TILES)
+    if (native && !stat_lines.empty()) {
+        stat_lines.back() = string_format("%s %s", _("Status:"), stat_lines.back());
+    }
+#endif
 
     print_stat(wheel_state_description(*veh));
 
     // This lambda handles printing parts in the "Most damaged" and "Needs repair" cases
     // for the veh_interact ui
     const auto print_part = [&](const std::string& str, int slot, vehicle_part* pt) {
+        note_stat(string_format("%s %s", str, pt->name()));
         mvwprintz(w_stats, point(x[slot], y[slot]), c_light_gray, str);
         int iw = utf8_width(str) + 1;
         return fold_and_print(

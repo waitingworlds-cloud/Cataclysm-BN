@@ -71,6 +71,9 @@ var _aside_pad: MarginContainer
 var _aside_slot: ItemSlot
 var _aside_icon: TextureRect
 var _aside_title: RichTextLabel
+var _foot_stamp := 0
+## Columns a grid of buttons ended up with, by what it holds (see `_fit_grid`).
+var _grid_fit := {}
 var _aside_subtitle: Label
 var _aside_warn: PanelContainer
 var _aside_rule: ColorRect
@@ -629,6 +632,7 @@ func apply(msg: Dictionary) -> void:
 	# The frame gives the column its width first: how the buttons are laid out depends on it.
 	if _mode == "docked" and _cockpit != null:
 		_apply_wide_frame(msg, title, quit)
+		_apply_foot(msg.get("foot", {}))
 	_narrow = _mode == "docked" and _dock_rect().size.x < 440
 	if _mode == "framed":
 		# One of the big screens (`nav` names the action that opens it) lights its tab up top.
@@ -686,6 +690,88 @@ func _apply_wide_frame(msg: Dictionary, title: String, quit: String) -> void:
 		source = Rect2(float(view[0]), float(view[1]), float(view[2]), float(view[3]))
 		source = Rect2(source.position * Display.frame_scale(), source.size * Display.frame_scale())
 	_cockpit.set_viewport_source(source, float(most[0]))
+
+
+## The module under a wide frame's viewport: the screen's numbers (`stats`: label and value) in
+## columns, read down each one, and its `gauges` (name, bar, readout) at the right. The vehicle
+## screen puts the vehicle's stats and fuel there.
+func _apply_foot(foot: Dictionary) -> void:
+	var stats: Array = foot.get("stats", [])
+	var gauges: Array = foot.get("gauges", [])
+	if stats.is_empty() and gauges.is_empty():
+		_cockpit.set_wide_foot(0)
+		return
+	var stamp := hash([foot, _cockpit.strip.size.x])
+	if stamp == _foot_stamp:
+		return
+	_foot_stamp = stamp
+	const LINE := 22.0
+	var gauge_width := 0.0 if gauges.is_empty() else 380.0
+	var room := maxf(_cockpit.strip.size.x - 24 - gauge_width, 200)
+	var columns := clampi(int(room / 300.0), 1, 3)
+	var lines := maxi(ceili(stats.size() / float(columns)), mini(gauges.size(), 6))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 28)
+	for c in columns:
+		var grid := GridContainer.new()
+		grid.columns = 2
+		grid.add_theme_constant_override("h_separation", 10)
+		grid.add_theme_constant_override("v_separation", 0)
+		grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		for i in range(c * lines, mini((c + 1) * lines, stats.size())):
+			var stat: Dictionary = stats[i]
+			var label := Slate.label(String(stat.get("label", "")).to_upper(), 11, Slate.MUTED, Slate.mono())
+			label.custom_minimum_size.y = LINE
+			label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			grid.add_child(label)
+			var value := Slate.rich(13)
+			value.autowrap_mode = TextServer.AUTOWRAP_OFF
+			value.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			value.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			value.clip_contents = true
+			value.text = Slate.bbcode(stat.get("value", []), Slate.TEXT)
+			grid.add_child(value)
+		row.add_child(grid)
+	if not gauges.is_empty():
+		var scroll := ScrollContainer.new()
+		scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		scroll.custom_minimum_size.x = gauge_width
+		var grid := GridContainer.new()
+		grid.columns = 3
+		grid.add_theme_constant_override("h_separation", 10)
+		grid.add_theme_constant_override("v_separation", 0)
+		grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		scroll.add_child(grid)
+		for g in gauges:
+			var color := Slate.curses(String(g.get("color", "c_white")), Slate.WARN)
+			var name := Slate.label(Slate.cap(String(g.get("name", ""))), 13, Slate.TEXT)
+			name.custom_minimum_size.y = LINE
+			name.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			grid.add_child(name)
+			var bar := Hud.SegmentBar.new(10)
+			bar.custom_minimum_size = Vector2(90, 7)
+			bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			bar.set_level(float(g.get("level", 0.0)), color)
+			grid.add_child(bar)
+			var readout := Slate.label(_gauge_readout(g.get("detail", [])), 11, Slate.SOFT, Slate.mono())
+			readout.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			readout.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+			readout.mouse_filter = Control.MOUSE_FILTER_PASS
+			readout.tooltip_text = readout.text
+			grid.add_child(readout)
+		row.add_child(scroll)
+	_cockpit.set_foot(String(foot.get("title", "")), row)
+	_cockpit.set_wide_foot(Hud.HEAD_HEIGHT + 20 + lines * LINE)
+
+
+## The game's own words beside a gauge ("45%, 250 mL/hour, 2 hours until empty"), from the row of
+## cells it printed them in.
+func _gauge_readout(rows: Array) -> String:
+	var text := ""
+	if not rows.is_empty():
+		for run in rows[0]:
+			text += String(run[0])
+	return text.strip_edges()
 
 
 func _apply_stats(stats: Array) -> void:
@@ -1163,9 +1249,10 @@ func _apply_sections(sections: Array) -> void:
 			label.text = text
 		label.visible = text != ""
 		var parts: Array = spec.get("parts", [])
+		var groups: Array = spec.get("groups", [])
 		var rows := box.get_child(2) as VBoxContainer
-		rows.visible = not parts.is_empty()
-		var stamp := hash(parts)
+		rows.visible = not parts.is_empty() or not groups.is_empty()
+		var stamp := hash([parts, groups])
 		if rows.get_meta("stamp", 0) != stamp:
 			rows.set_meta("stamp", stamp)
 			for c in rows.get_children():
@@ -1173,12 +1260,18 @@ func _apply_sections(sections: Array) -> void:
 				c.queue_free()
 			for part in parts:
 				rows.add_child(PartRow.new(part))
+			for group in groups:
+				rows.add_child(GroupHead.new(group.get("head", [])))
+				for line in group.get("rows", []):
+					var row := GroupRow.new(line)
+					row.chosen.connect(func(key: String): Bridge.send({"t": "text", "s": key}))
+					rows.add_child(row)
 		# The keys that page through the parts bring the next one to the top.
 		var to := int(spec.get("scroll_to", 0))
 		if not parts.is_empty() and rows.get_meta("at", 0) != to:
 			rows.set_meta("at", to)
 			_show_part.call_deferred(rows, to)
-		box.visible = text != "" or not parts.is_empty()
+		box.visible = text != "" or not parts.is_empty() or not groups.is_empty()
 
 
 func _show_part(rows: VBoxContainer, index: int) -> void:
@@ -1222,19 +1315,30 @@ func _apply_buttons(buttons: Array) -> void:
 			_buttons.add_child(grid)
 		grid.add_child(b)
 		b.set_compressible()
-	if grid != null:
-		grid.sort_children.connect(_fit_grid.bind(grid))
 	_buttons.visible = not buttons.is_empty()
+	if grid != null:
+		# What fitted last time for these buttons at this width is used straight away.
+		var key := hash([buttons.map(func(spec): return String(spec.get("text", ""))), grid.columns,
+				int(_buttons.size.x / 40)])
+		grid.columns = int(_grid_fit.get(key, grid.columns))
+		_fit_grid(grid, key)
 
 
-## A grid of buttons takes fewer columns when a label would be cut short in it.
-func _fit_grid(grid: GridContainer) -> void:
-	if grid.columns <= 1:
-		return
-	for b in grid.get_children():
-		if b is SlateButton and b.is_cut():
-			grid.columns -= 1
+## A grid of buttons takes fewer columns when a label would be cut short in it. Checked once
+## the layout has settled, and remembered under `key`.
+func _fit_grid(grid: GridContainer, key: int) -> void:
+	while is_inside_tree() and is_instance_valid(grid) and grid.columns > 1:
+		await get_tree().process_frame
+		await get_tree().process_frame
+		if not is_instance_valid(grid):
 			return
+		var cut := false
+		for b in grid.get_children():
+			cut = cut or (b is SlateButton and b.is_cut())
+		if not cut:
+			return
+		grid.columns -= 1
+		_grid_fit[key] = grid.columns
 
 
 func _apply_hints(hints: Array) -> void:
@@ -1818,6 +1922,116 @@ class PartRow extends PanelContainer:
 			text.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			text.text = desc
 			col.add_child(text)
+
+
+## Heading of a group of rows in a side panel section (the vehicle overview's "Engines", with
+## its totals), and the names of the columns its rows end in.
+class GroupHead extends MarginContainer:
+	func _init(head: Array) -> void:
+		add_theme_constant_override("margin_top", 10)
+		add_theme_constant_override("margin_bottom", 2)
+		add_theme_constant_override("margin_left", 8)
+		add_theme_constant_override("margin_right", 8)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var line := HBoxContainer.new()
+		line.add_theme_constant_override("separation", 12)
+		add_child(line)
+		var parts: Array = Slate.split_line(head, Slate.SOFT)
+		# A heading printed alone is all "right part": it goes at the left all the same.
+		var left := String(parts[0]) if String(parts[0]) != "" else String(parts[1])
+		var name := Slate.rich(13)
+		name.autowrap_mode = TextServer.AUTOWRAP_OFF
+		name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		name.clip_contents = true
+		name.add_theme_font_override("normal_font", Slate.semibold())
+		name.text = left
+		line.add_child(name)
+		if String(parts[0]) != "":
+			var columns := Slate.rich(11)
+			columns.autowrap_mode = TextServer.AUTOWRAP_OFF
+			columns.add_theme_font_override("normal_font", Slate.mono())
+			columns.text = Slate.split_line(head, Slate.MUTED)[1]
+			line.add_child(columns)
+
+
+## A row of such a group: the key that picks it (while something is being picked), its picture
+## and name, and what the game prints for it at the right. A row with a key can be clicked.
+class GroupRow extends PanelContainer:
+	signal chosen(key: String)
+
+	var _key := ""
+
+	func _init(row: Dictionary) -> void:
+		_key = String(row.get("key", ""))
+		var selected := bool(row.get("selected", false))
+		var dim := bool(row.get("dim", false))
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Slate.RAISED if selected else Color(0, 0, 0, 0)
+		sb.border_color = Slate.ACCENT if selected else Slate.BORDER
+		sb.border_width_left = 2 if selected else 0
+		sb.border_width_bottom = 0 if selected else 1
+		sb.content_margin_left = 8
+		sb.content_margin_right = 8
+		sb.content_margin_top = 4
+		sb.content_margin_bottom = 4
+		add_theme_stylebox_override("panel", sb)
+		mouse_filter = Control.MOUSE_FILTER_STOP if _key != "" else Control.MOUSE_FILTER_PASS
+		if _key != "":
+			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		var line := HBoxContainer.new()
+		line.add_theme_constant_override("separation", 10)
+		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(line)
+		var slot := ItemSlot.new(26)
+		slot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.set_item(String(row.get("type", "")), "", Slate.TEXT)
+		slot.modulate.a = 0.5 if dim else 1.0
+		line.add_child(slot)
+		# The key stands in the same place on every row while something is being picked.
+		if _key != "":
+			var chip := Slate.key_chip(_key, 10)
+			chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			chip.custom_minimum_size.x = 20
+			line.add_child(chip)
+		elif dim:
+			var gap := Control.new()
+			gap.custom_minimum_size.x = 20
+			line.add_child(gap)
+		var name := Slate.rich(13)
+		name.autowrap_mode = TextServer.AUTOWRAP_OFF
+		name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		name.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		name.clip_contents = true
+		name.text = Slate.bbcode(row.get("name", []), Slate.FAINT if dim else Slate.TEXT)
+		if dim:
+			name.modulate.a = 0.6
+		line.add_child(name)
+		# Its condition, as on the rows of the parts on a square; the word is in the tooltip.
+		if row.has("health"):
+			var level := int(row.get("level", 0))
+			var color := Slate.CYAN if level < 0 else (Slate.GOOD if level <= 1 else (Slate.WARN if level == 2 else Slate.DANGER))
+			var bar := Hud.SegmentBar.new(5)
+			bar.custom_minimum_size = Vector2(44, 6)
+			bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			bar.set_level(float(row.get("health", 1.0)), color)
+			bar.modulate.a = 0.5 if dim else 1.0
+			line.add_child(bar)
+			tooltip_text = String(row.get("state", ""))
+		var detail := Slate.rich(12)
+		detail.autowrap_mode = TextServer.AUTOWRAP_OFF
+		detail.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		detail.add_theme_font_override("normal_font", Slate.mono())
+		detail.text = Slate.split_line(row.get("detail", []), Slate.SOFT)[1]
+		# Every row keeps the same width for it, so the bars before it line up.
+		detail.custom_minimum_size.x = 150
+		detail.text = "[right]%s[/right]" % detail.text
+		line.add_child(detail)
+
+	func _gui_input(event: InputEvent) -> void:
+		if _key != "" and event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			accept_event()
+			chosen.emit(_key)
 
 
 ## A board of character squares (the minigames) in the game's colors, as large as fits. Text
