@@ -148,7 +148,8 @@ var _compass: CompassStrip
 var _groups := {}
 var _wanted := {}
 var _wind_arrow: TextureRect
-var _vehicle_row: HBoxContainer
+var _vehicle_module: Module
+var _vehicle_body: VBoxContainer
 var _place_box: PanelContainer
 var _place: Label
 var _coords: Label
@@ -460,11 +461,6 @@ func _build_top() -> void:
 	_clock_time = Slate.label("", 17, Slate.ACCENT, Slate.mono())
 	clock.add_child(_clock_time)
 	_status_row.add_child(_vline())
-	_vehicle_row = HBoxContainer.new()
-	_vehicle_row.add_theme_constant_override("separation", 10)
-	_vehicle_row.mouse_filter = Control.MOUSE_FILTER_PASS
-	_vehicle_row.visible = false
-	_status_row.add_child(_vehicle_row)
 	_compass = CompassStrip.new()
 	_compass.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_status_row.add_child(_compass)
@@ -628,6 +624,16 @@ func _build_left() -> void:
 	_widgets.add_theme_constant_override("separation", GUT)
 	_widgets.visible = false
 	_left.add_child(_widgets)
+
+	# While you drive: speed, cruise control, heading and fuel, where the eye finds them fast.
+	_vehicle_module = Module.new("Vehicle")
+	_vehicle_module.visible = false
+	_vehicle_module.tooltip_text = "The vehicle you are controlling"
+	_left.add_child(_vehicle_module)
+	_vehicle_body = VBoxContainer.new()
+	_vehicle_body.add_theme_constant_override("separation", 8)
+	_vehicle_body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_vehicle_module.set_body(_vehicle_body, 12, 10)
 
 	# The log fills the rest of the column, newest at the bottom; older lines scroll off the top.
 	_log_module = Module.new("Event log")
@@ -1323,41 +1329,55 @@ func _weather_icon(weather: String) -> String:
 func _update_vehicle(veh: Dictionary) -> void:
 	if not _changed("vehicle", veh):
 		return
-	_vehicle_row.visible = not veh.is_empty()
-	for c in _vehicle_row.get_children():
+	_vehicle_module.visible = not veh.is_empty()
+	for c in _vehicle_body.get_children():
+		_vehicle_body.remove_child(c)
 		c.queue_free()
 	if veh.is_empty():
 		return
-	_vehicle_row.add_child(Slate.icon_rect("car", 17, Slate.CYAN))
-	_vehicle_row.add_child(Slate.label(String(veh.get("name", "")).to_upper(), 13, Slate.TEXT, Slate.heading()))
-	_vehicle_row.tooltip_text = "The vehicle you are controlling"
-	_vehicle_row.add_child(Slate.label(String(veh.get("heading", "")), 13, Slate.SOFT, Slate.mono()))
+	_vehicle_module.set_note(String(veh.get("name", "")))
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 8)
+	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_vehicle_body.add_child(top)
 	var speed: Dictionary = veh.get("speed", {})
-	var speed_label := Slate.label("%s %s" % [_text(speed), String(veh.get("unit", ""))], 14,
-			_colored(speed, Slate.INFO), Slate.mono())
+	var speed_label := Slate.label(_text(speed).strip_edges(), 24, _colored(speed, Slate.INFO), Slate.mono_bold())
 	speed_label.tooltip_text = "Speed; the color shows engine strain"
 	speed_label.mouse_filter = Control.MOUSE_FILTER_PASS
-	_vehicle_row.add_child(speed_label)
+	top.add_child(speed_label)
+	var unit := Slate.label(String(veh.get("unit", "")).to_upper(), 11, Slate.MUTED, Slate.mono())
+	unit.size_flags_vertical = Control.SIZE_SHRINK_END
+	unit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(unit)
 	if veh.has("cruise"):
-		var cruise := Slate.label("→ %d" % int(veh["cruise"]), 13, Slate.curses("c_light_green"), Slate.mono())
-		cruise.tooltip_text = "Cruise control speed"
-		cruise.mouse_filter = Control.MOUSE_FILTER_PASS
-		_vehicle_row.add_child(cruise)
-	if veh.has("takeoff"):
-		var takeoff: Dictionary = veh["takeoff"]
-		_vehicle_row.add_child(Slate.icon_rect("plane", 15, Slate.MUTED))
-		var lift := Slate.label(_text(takeoff), 13, _colored(takeoff, Slate.SOFT), Slate.mono())
-		lift.tooltip_text = "Speed needed to take off"
-		lift.mouse_filter = Control.MOUSE_FILTER_PASS
-		_vehicle_row.add_child(lift)
+		var cruise := StatPair.new("Cruise")
+		cruise.size_flags_vertical = Control.SIZE_SHRINK_END
+		cruise.set_value(str(int(veh["cruise"])), Slate.GOOD, "Cruise control speed")
+		top.add_child(cruise)
+	var heading := StatPair.new("Heading")
+	heading.size_flags_vertical = Control.SIZE_SHRINK_END
+	heading.set_value(String(veh.get("heading", "")).strip_edges(), Slate.TEXT, "Which way the vehicle points")
+	top.add_child(heading)
+	if not (veh.has("fuel") or veh.has("takeoff")):
+		return
+	var low := HBoxContainer.new()
+	low.add_theme_constant_override("separation", 8)
+	low.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_vehicle_body.add_child(low)
 	if veh.has("fuel"):
 		var fuel: Dictionary = veh["fuel"]
-		_vehicle_row.add_child(Slate.icon_rect("fuel", 15, Slate.MUTED))
+		low.add_child(Slate.icon_rect("fuel", 15, Slate.MUTED))
 		var gauge := FuelGauge.new(int(fuel.get("mark", 0)), _colored(fuel, Slate.WARN))
 		gauge.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		_vehicle_row.add_child(gauge)
-		_vehicle_row.add_child(Slate.label(String(fuel.get("name", "")).to_upper(), 11, Slate.MUTED, Slate.mono()))
-	_vehicle_row.add_child(_vline())
+		low.add_child(gauge)
+		var fuel_name := Slate.label(String(fuel.get("name", "")).to_upper(), 11, Slate.MUTED, Slate.mono())
+		fuel_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		low.add_child(fuel_name)
+	if veh.has("takeoff"):
+		var takeoff: Dictionary = veh["takeoff"]
+		var lift := StatPair.new("Takeoff")
+		lift.set_value(_text(takeoff).strip_edges(), _colored(takeoff, Slate.SOFT), "Speed needed to take off")
+		low.add_child(lift)
 
 
 func _update_map() -> void:
