@@ -27,6 +27,8 @@
 #if defined(TILES)
 #include <memory>
 
+#include "godot_bridge.h"
+#include "json.h"
 #include "cata_tiles.h" // all animation functions will be pushed out to a cata_tiles function in some manner
 #include "sdltiles.h"
 #endif
@@ -777,6 +779,14 @@ void game::draw_hit_mon( const tripoint_bub_ms &p, const monster &m, const bool 
         return;
     }
 
+    cata::godot_bridge::queue_fx( [&]( JsonOut & jsout ) {
+        jsout.member( "k", "hit" );
+        jsout.member( "x", p.x() );
+        jsout.member( "y", p.y() );
+        jsout.member( "dead", dead );
+        jsout.member( "you", false );
+    } );
+
     shared_ptr_fast<draw_callback_t> hit_cb = make_shared_fast<draw_callback_t>( [&]() {
         tilecontext->init_draw_hit( p, m.type->id.str() );
     } );
@@ -821,6 +831,15 @@ void game::draw_hit_player( const Character &p, const int dam )
 
     const std::string &type = p.is_player() ? ( p.male ? player_male : player_female )
                               : p.male ? npc_male : npc_female;
+
+    cata::godot_bridge::queue_fx( [&]( JsonOut & jsout ) {
+        jsout.member( "k", "hit" );
+        jsout.member( "x", p.bub_pos().x() );
+        jsout.member( "y", p.bub_pos().y() );
+        jsout.member( "dead", p.is_dead_state() );
+        jsout.member( "you", p.is_player() );
+        jsout.member( "dmg", dam );
+    } );
 
     shared_ptr_fast<draw_callback_t> hit_cb = make_shared_fast<draw_callback_t>( [&]() {
         tilecontext->init_draw_hit( p.bub_pos(), type );

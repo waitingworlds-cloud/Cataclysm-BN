@@ -266,6 +266,18 @@ Game to Godot: `[u32 length, little endian][u8 kind][payload]`
   the HUD shows the map.
 - kind 4, sprites: `[u32 json length][JSON {ids, found, w, h}][u32 width][u32 height][RGBA8]`, a
   strip of `w` by `h` tiles, one per asked id, in answer to `sprites`.
+- kind 5, scene: `[u32 json length][JSON][u32 width][u32 height][RGBA8]`, what the map view shows,
+  sent ahead of a frame of the main screen when it changed. The JSON has `tile` and `at` (pixel
+  size of a tile and the view's corner in the frame), `size`, `origin` (the map square in the
+  corner), `cam` (the view's center on the world map), `hour`, `sun` (0 to 1), `underground`,
+  `weather`, `precip` (0 to 4), `rain`, and `mobs` (`[column, row, health 0 to 1, hostile]` for
+  each creature in view). The image has one pixel per tile: red is light, green is how well you
+  see the tile now (0 for not at all), blue holds flags (1 blocks light, 2 open to the sky,
+  4 creature, 8 plant, 16 water, 32 wall).
+
+The JSON message `fx {list}` carries one-off effects for the map, each with `k` and the map square
+`x, y`: `hit {dead, you}` when something is struck, and `text {a, ak, b, bk, kind, dmg, hp}` for
+the game's scrolling combat text (`dmg` is the damage behind it when known).
 
 Godot to game: `[u32 length][JSON]`
 
@@ -290,9 +302,14 @@ Game side: `src/godot_bridge.{h,cpp}` (connection, input, frames, native screens
 for `screen` views), and a native branch in each screen's own file, found by searching for
 `native_view`.
 
+Game side of the map's look: `src/godot_scene.{h,cpp}` builds the scene after each draw of the
+map; hits come from `src/animation.cpp` and combat text from `scrollingcombattext::add`.
+
 Godot side: `src/bridge.gd` (process and socket), `src/main.gd` (layers), `src/ui/hud.gd`,
 `src/ui/item_slot.gd` (the steel item slot), `src/sprites.gd`, `src/views/*.gd`, and
-`src/ui/slate.gd` (colors, fonts, icons and shared styles).
+`src/ui/slate.gd` (colors, fonts, icons and shared styles), `src/ui/fx.gd` (glow, scanlines and
+grain, screen transitions) and `src/ui/map_stage.gd` (the map's light, weather and motion: a
+shader on the frame fed by the scene, the glide between tiles, and hit effects over the map).
 
 ## Credits
 

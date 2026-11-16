@@ -319,6 +319,7 @@ func apply(msg: Dictionary) -> void:
 	_apply_nav(msg)
 	_apply_section(msg.get("section", {}))
 	_tip.text = Slate.bbcode(msg.get("tip", []), Slate.SOFT)
+	Fx.last_tip = _tip.text
 	_notice.text = Slate.bbcode(msg.get("notice", []), Slate.MUTED)
 	_apply_hints(msg.get("hints", []))
 	_layout()

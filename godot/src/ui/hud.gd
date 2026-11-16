@@ -172,6 +172,8 @@ var _widgets: VBoxContainer
 var _log_module: Module
 var _log_list: VBoxContainer
 var _log_button: Button
+## The log's lines as last drawn, to tell which are new.
+var _log_texts: Array = []
 
 # Right column
 var _right: VBoxContainer
@@ -230,6 +232,15 @@ func _ready() -> void:
 	Display.changed.connect(_layout)
 	resized.connect(_layout)
 	_layout()
+
+
+## Lights the deck button a key belongs to, so playing by keyboard shows on the screen too.
+func flash_key(key: String) -> void:
+	for action in _dock_buttons:
+		var button := _dock_buttons[action] as DockButton
+		if button != null and button.key_text() == key:
+			Fx.flash(button, Slate.CYAN)
+			return
 
 
 ## The last state the game sent, for screens that show who you are while the HUD is hidden.
@@ -1644,6 +1655,14 @@ func _update_log(messages: Array) -> void:
 	for c in _log_list.get_children():
 		c.queue_free()
 	var n := messages.size()
+	# Lines that were not there a moment ago slide in; the first fill of the log does not.
+	var texts := messages.map(func(m): return str(m.get("text", [])))
+	var fresh_from := n
+	if not _log_texts.is_empty():
+		var last_old: String = _log_texts[-1]
+		var at := texts.rfind(last_old)
+		fresh_from = at + 1 if at >= 0 else maxi(n - 3, 0)
+	_log_texts = texts
 	for i in n:
 		var msg: Dictionary = messages[i]
 		var line := HBoxContainer.new()
@@ -1660,7 +1679,32 @@ func _update_log(messages: Array) -> void:
 		text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		text.text = Slate.bbcode(msg.get("text", []), Slate.SOFT)
 		line.add_child(text)
-		_log_list.add_child(line)
+		if i >= fresh_from:
+			_log_list.add_child(_slide_in(line, (i - fresh_from) * 0.05))
+		else:
+			_log_list.add_child(line)
+
+
+## Wraps a new log line so it slides in from the left and settles, lit for a moment.
+func _slide_in(line: Control, delay: float) -> Control:
+	var wrap := MarginContainer.new()
+	wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wrap.add_child(line)
+	var target := line.modulate.a
+	line.modulate.a = 0.0
+	var lit := ColorRect.new()
+	lit.color = Color(Slate.CYAN, 0.16)
+	lit.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lit.show_behind_parent = true
+	wrap.add_child(lit)
+	wrap.move_child(lit, 0)
+	lit.modulate.a = 0.0
+	var t := wrap.create_tween().set_parallel(true)
+	t.tween_method(func(x: float): wrap.add_theme_constant_override("margin_right", roundi(x)), 18.0, 0.0, 0.22).set_delay(delay).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+	t.tween_property(line, "modulate:a", target, 0.18).set_delay(delay)
+	t.tween_property(lit, "modulate:a", 1.0, 0.08).set_delay(delay)
+	t.chain().tween_property(lit, "modulate:a", 0.0, 0.9).set_ease(Tween.EASE_OUT)
+	return wrap
 
 
 func _update_deck(hud: Dictionary) -> void:
@@ -1757,7 +1801,15 @@ class FrameView extends Control:
 				[Vector2(r.position.x, r.end.y), Vector2(1, -1)], [r.end, Vector2(-1, -1)]]:
 			var at: Vector2 = corner[0]
 			var way: Vector2 = corner[1]
-			draw_polyline(PackedVector2Array([at + Vector2(arm * way.x, 0), at, at + Vector2(0, arm * way.y)]), color, 2.0)
+			var line := PackedVector2Array([at + Vector2(arm * way.x, 0), at, at + Vector2(0, arm * way.y)])
+			if color == Slate.DANGER:
+				# Threats breathe: a soft halo behind the bracket that swells and fades.
+				var b := Fx.breath()
+				draw_polyline(line, Color(color, 0.10 + 0.14 * b), 7.0 + 3.0 * b)
+				draw_polyline(line, Color(color, 0.22 + 0.2 * b), 4.5)
+			else:
+				draw_polyline(line, Color(color, 0.22), 5.0)
+			draw_polyline(line, color, 2.0)
 
 	## A small label beside a marked square, kept inside the viewport.
 	func _draw_target_tag(rect: Rect2, text: String, color: Color) -> void:
@@ -1802,15 +1854,46 @@ class FrameView extends Control:
 				_draw_brackets(rect, Slate.ACCENT)
 				_draw_target_tag(rect, String(reach.get("tag", "")).to_upper(), Slate.ACCENT)
 
+	## Brackets on hostile creatures breathe, so the frame redraws while any is marked.
+	func _process(_delta: float) -> void:
+		if not is_visible_in_tree() or _targets.is_empty():
+			return
+		for s in _targets[1]:
+			if bool(s.get("hostile", false)):
+				queue_redraw()
+				return
+
+	## A band along one edge of `r`, `color` at the edge fading to nothing `depth` units in
+	## (or out, for a negative depth).
+	func _edge_fade(r: Rect2, depth: float, color: Color) -> void:
+		var clear := Color(color, 0.0)
+		var o := r
+		var i := r.grow(-depth)
+		var quads := [
+			[o.position, Vector2(o.end.x, o.position.y), Vector2(i.end.x, i.position.y), i.position],
+			[Vector2(o.end.x, o.position.y), o.end, i.end, Vector2(i.end.x, i.position.y)],
+			[o.end, Vector2(o.position.x, o.end.y), Vector2(i.position.x, i.end.y), i.end],
+			[Vector2(o.position.x, o.end.y), o.position, i.position, Vector2(i.position.x, i.end.y)],
+		]
+		for q in quads:
+			draw_polygon(PackedVector2Array(q), PackedColorArray([color, color, clear, clear]))
+
 	func _draw() -> void:
 		var v := viewport
+		# The viewport darkens toward its edges, like a screen set into the frame.
+		if v.size.x > 200 and v.size.y > 200:
+			_edge_fade(v, minf(v.size.x, v.size.y) * 0.16, Color(0, 0, 0, 0.42))
+			_edge_fade(v, 26.0, Color(0, 0, 0, 0.35))
 		_draw_targets()
 		# The frame: everything outside the viewport.
 		draw_rect(Rect2(0, 0, size.x, v.position.y), Slate.GROUND)
 		draw_rect(Rect2(0, v.end.y, size.x, size.y - v.end.y), Slate.GROUND)
 		draw_rect(Rect2(0, v.position.y, v.position.x, v.size.y), Slate.GROUND)
 		draw_rect(Rect2(v.end.x, v.position.y, size.x - v.end.x, v.size.y), Slate.GROUND)
-		# The bezel.
+		# The bezel, lit: a soft glow out into the frame and a fainter one over the map's edge.
+		for step in 4:
+			draw_rect(v.grow(1.5 + step * 2.0), Color(Slate.CYAN, 0.16 - step * 0.035), false, 2.0)
+		_edge_fade(v.grow(-2), 9.0, Color(Slate.CYAN, 0.16))
 		draw_rect(v.grow(-1), Color(Slate.CYAN, 0.75), false, 2.0)
 		draw_rect(v.grow(-2.5), Color(0, 0, 0, 0.55), false, 1.0)
 		var arm := 22.0
@@ -1950,6 +2033,9 @@ class ReachButton extends Button:
 		var fill := Slate.DANGER if danger else Slate.ACCENT
 		var normal := Slate.box(fill if primary else Color(0, 0, 0, 0), 12 if primary else 0, Color(Slate.CYAN, 0.35), 0 if primary else 1)
 		var hot := Slate.box(fill.lightened(0.25) if primary else Color(Slate.CYAN, 0.14), 12 if primary else 0, Slate.BORDER_STRONG, 0 if primary else 1)
+		if primary:
+			Fx.glow(normal, fill, 9, 0.32)
+			Fx.glow(hot, fill, 12, 0.45)
 		add_theme_stylebox_override("normal", normal)
 		add_theme_stylebox_override("hover", hot)
 		add_theme_stylebox_override("pressed", hot)
@@ -2162,7 +2248,11 @@ class SegmentBar extends Control:
 			draw_rect(r, Slate.TRACK)
 			var fill := clampf(level * cells - i, 0.0, 1.0)
 			if fill > 0.0:
-				draw_rect(Rect2(r.position, Vector2(maxf(r.size.x * fill, 2), r.size.y)), color)
+				var lit := Rect2(r.position, Vector2(maxf(r.size.x * fill, 2), r.size.y))
+				# Lit cells glow a little into the track around them.
+				draw_rect(lit.grow(2.5), Color(color, 0.10))
+				draw_rect(lit.grow(1.2), Color(color, 0.16))
+				draw_rect(lit, color)
 
 
 ## One need: its name, the game's word for how it stands, and a bar. Some can be clicked to
@@ -2431,6 +2521,7 @@ class SightRow extends PanelContainer:
 		if _lead:
 			sb.border_color = Slate.DANGER
 			sb.border_width_left = 3
+			Fx.glow(sb, Slate.DANGER, 7, 0.28)
 		add_theme_stylebox_override("panel", sb)
 
 	func _gui_input(event: InputEvent) -> void:
@@ -2554,3 +2645,6 @@ class DockButton extends Button:
 		_key.text = " %s " % key if key.length() > 1 else key
 		_key.visible = key != ""
 		tooltip_text = "%s  (%s)" % [_hint, key] if key != "" else _hint
+
+	func key_text() -> String:
+		return _key.text.strip_edges()

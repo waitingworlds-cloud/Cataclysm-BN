@@ -2,6 +2,7 @@
 
 #if defined(TILES)
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -102,6 +103,33 @@ struct sprite_strip {
     point tile;
 };
 auto send_sprites( const sprite_strip &strip ) -> void;
+
+/// What the map view shows, for the effects Godot draws over it: where the tiles are on screen
+/// and, per tile, how lit, visible and open to the sky it is.
+struct scene_state {
+    /// JSON object of type `scene` (tile size, view position, time, weather, creatures).
+    std::string json;
+    /// One RGBA pixel per tile of the view, row by row: light, visibility, flags, unused.
+    std::vector<std::uint8_t> tiles;
+    /// Tiles across and down.
+    point grid;
+};
+/// Replaces the scene sent with the next frame of the main view.
+auto set_scene( scene_state scene ) -> void;
+
+/// Queues a one-off effect (a hit, a floating text) that Godot plays over the map; it goes out
+/// with the next frame. `write_body` adds the members of the effect's JSON object.
+auto queue_fx( const std::function<void( JsonOut & )> &write_body ) -> void;
+
+/// Notes the damage behind the scrolling combat text about to be added, so Godot can show the
+/// number. `hp_left` is the target's remaining health as a share of its maximum.
+auto note_damage( int damage, double hp_left ) -> void;
+/// The damage noted for the text being added, if any. Clears it.
+struct damage_note {
+    int damage = 0;
+    double hp_left = 1.0;
+};
+auto take_damage_note() -> std::optional<damage_note>;
 
 auto shutdown() -> void;
 

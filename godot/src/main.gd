@@ -16,6 +16,8 @@ const Keys := preload("res://src/keys.gd")
 
 var frame_view: TextureRect
 var hud: Hud
+## Light, weather and motion on the map, and the effects that play over it.
+var _stage: MapStage
 var view_layer: Control
 var splash: Control
 var views := {}
@@ -29,6 +31,11 @@ var _grab_moved := 0.0
 var _toast: PanelContainer
 var _toast_label: Label
 var _toast_tween: Tween
+## Scanlines and grain over the panels; `_map_hole` is the part of the window the map shows in.
+var _atmosphere: ColorRect
+var _map_hole := Rect2()
+## When a screen last went away, to tell a screen opening from one taking another's place.
+var _last_hide_ms := -100000
 
 
 func _ready() -> void:
@@ -50,6 +57,10 @@ func _ready() -> void:
 	frame_view.mouse_exited.connect(func(): hud.set_map_hover(false))
 	add_child(frame_view)
 
+	_stage = MapStage.new()
+	add_child(_stage)
+	_stage.setup(frame_view)
+
 	hud = Hud.new()
 	hud.set_anchors_preset(Control.PRESET_FULL_RECT)
 	hud.visible = false
@@ -59,6 +70,12 @@ func _ready() -> void:
 	view_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
 	view_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(view_layer)
+
+	_atmosphere = ColorRect.new()
+	_atmosphere.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_atmosphere.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_atmosphere.material = Fx.material(Fx.ATMOSPHERE_SHADER)
+	add_child(_atmosphere)
 
 	splash = _make_splash()
 	add_child(splash)
@@ -147,6 +164,23 @@ func _place_frame() -> void:
 		break
 	if frame_view.position != at:
 		frame_view.position = at
+	# The panels' scanlines and grain stay off the map, wherever it is showing.
+	var hole := Rect2()
+	for i in range(frames.size() - 1, -1, -1):
+		var shown := frames[i] as Cockpit
+		if shown != null and shown.is_visible_in_tree():
+			hole = shown.strip
+			break
+	if not framed and _main_view:
+		hole = hud.map_rect()
+	if hole != _map_hole or _atmosphere.get_meta("scale", 0.0) != Display.ui_scale():
+		_map_hole = hole
+		var ui := Display.ui_scale()
+		_atmosphere.set_meta("scale", ui)
+		var m := _atmosphere.material as ShaderMaterial
+		m.set_shader_parameter("hole", Vector4(hole.position.x, hole.position.y, hole.size.x, hole.size.y) * ui)
+		m.set_shader_parameter("scale", ui)
+	_stage.place(hud.map_rect(), _main_view and not framed, _main_view)
 	# The frame of a full screen takes the HUD's place while it is open.
 	hud.visible = _main_view and not framed
 
@@ -253,7 +287,12 @@ func _on_frame_meta(main_view: bool, shown: Array) -> void:
 	Cockpit.in_game = main_view
 	visible_views = shown.map(func(id): return int(id))
 	for id in views:
-		views[id].visible = id in visible_views
+		var on: bool = id in visible_views
+		if on and not views[id].visible:
+			_enter(views[id])
+		elif not on and views[id].visible:
+			_last_hide_ms = Time.get_ticks_msec()
+		views[id].visible = on
 	_place_frame()
 
 
@@ -285,7 +324,27 @@ func _on_view(msg: Dictionary) -> void:
 		view.visible = id in visible_views
 		view_layer.add_child(view)
 		views[id] = view
+		if view.visible:
+			_enter(view)
 	views[id].apply(msg)
+
+
+## A screen coming up fades and settles in. Screens docked beside the map and screens that take
+## turns with another (one closing as the next opens) stay put, so nothing flickers.
+func _enter(view: Control) -> void:
+	if view.has_meta("fx_shown") or view is LoadingView or view is TitleView:
+		return
+	view.set_meta("fx_shown", true)
+	var card := view is MenuView or view is PopupView or view is TextInputView or view is ItemActionsView
+	if not card:
+		# One full screen handing over to the next (a tab, a follow-up screen) just switches.
+		if Time.get_ticks_msec() - _last_hide_ms < 250:
+			return
+		for id in views:
+			var other: Control = views[id]
+			if other != view and other.visible and not (other is MenuView or other is PopupView or other is TextInputView or other is ItemActionsView):
+				return
+	Fx.enter.call_deferred(view, card)
 
 
 func _on_entries(id: int, entries: Array) -> void:
@@ -301,6 +360,8 @@ func _on_entries(id: int, entries: Array) -> void:
 
 func _on_view_closed(id: int) -> void:
 	if views.has(id):
+		if views[id].visible:
+			_last_hide_ms = Time.get_ticks_msec()
 		views[id].queue_free()
 		views.erase(id)
 
@@ -314,6 +375,9 @@ func _input(event: InputEvent) -> void:
 			return
 		if get_tree().get_first_node_in_group("godot_modal") != null:
 			return
+		var key := event as InputEventKey
+		if key.pressed and not key.echo and key.unicode > 32 and _on_map():
+			hud.flash_key(char(key.unicode))
 		for msg in Keys.translate(event):
 			if OS.has_environment("BN_BRIDGE_DEBUG"):
 				print("key ", event, " -> ", msg)
