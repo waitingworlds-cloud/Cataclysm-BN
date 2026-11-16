@@ -35,6 +35,8 @@ const LIST_ACTIONS := [
 	["DROP_NON_FAVORITE", "Not favorites", "Mark or unmark everything that is not a favorite or worn"],
 ]
 const SETTINGS := "user://interface.cfg"
+## What dropping a dragged item does, by verb.
+const DROP_WORDS := {"wear": "Wear", "wield": "Wield", "take_off": "Take off", "drop": "Drop here"}
 
 ## Slots or rows for plain item lists; the player's choice, kept between runs.
 static var grid_view := true
@@ -77,6 +79,14 @@ var _amount: Label
 var _confirm: ActionButton
 var _actions: GridContainer
 var _buttons := {}
+## Items can be dragged in the inventory itself (not in the "choose an item" prompts): onto the
+## rig to wear, back to carried to take off, onto Wield or Wear, onto the map strip to drop.
+var _draggable := false
+## Vector2i(pane, row index) -> the row's data, for the picture that follows the mouse.
+var _rows := {}
+var _drop_glow: PanelContainer
+var _drop_word: Label
+var _glow_area: Control
 
 
 func _ready() -> void:
@@ -114,6 +124,12 @@ func _ready() -> void:
 	_load_module.visible = false
 	middle.add_child(_load_module)
 	_cols.add_child(_build_detail())
+	_build_drop_glow()
+	var strip := _cockpit.drop_area()
+	strip.set_drag_forwarding(Callable(), _can_drop.bind("map", strip), _drop.bind("map"))
+	for act in ["WIELD", "WEAR"]:
+		var b: Control = _buttons[act]
+		b.set_drag_forwarding(Callable(), _can_drop.bind(act, b), _drop.bind(act))
 	_layout()
 
 
@@ -284,6 +300,7 @@ func apply(msg: Dictionary) -> void:
 	var keys: Dictionary = msg.get("keys", {})
 	var quit := Slate.key_name(String(keys.get("QUIT", "Esc")))
 	# The inventory itself is one of the big screens; everything else is a question to answer.
+	_draggable = title == "Inventory"
 	if title == "Inventory":
 		_cockpit.set_tabs("inventory")
 		_cockpit.set_back("Back to map", quit)
@@ -490,6 +507,7 @@ func _build_panes() -> void:
 		_panes.remove_child(c)
 		c.queue_free()
 	_cells.clear()
+	_rows.clear()
 	_pane_modules.clear()
 	_multi = false
 	_keyed = false
@@ -528,6 +546,7 @@ func _build_panes() -> void:
 		list.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		scroll.add_child(list)
 		module.set_body(scroll, 12, 10)
+		scroll.set_drag_forwarding(Callable(), _can_drop_pane.bind(p), _drop_pane.bind(p))
 		if as_grid:
 			_fill_grid(list, p, rows, multi)
 		else:
@@ -662,7 +681,7 @@ func _fill_grid(list: VBoxContainer, p: int, rows: Array, multi: bool) -> void:
 		var index := int(row_data.get("i", -1))
 		var slot := GridSlot.new(SLOT)
 		slot.setup(row_data, multi)
-		_connect_cell(slot, Vector2i(p, index), multi)
+		_connect_cell(slot, Vector2i(p, index), multi, row_data)
 		flow.add_child(slot)
 
 
@@ -676,14 +695,16 @@ func _fill_rows(list: VBoxContainer, p: int, rows: Array, multi: bool) -> void:
 		var index := int(row_data.get("i", -1))
 		var row := InvRow.new()
 		row.setup(row_data, multi, keyed, widths)
-		_connect_cell(row, Vector2i(p, index), multi)
+		_connect_cell(row, Vector2i(p, index), multi, row_data)
 		list.add_child(row)
 
 
 ## A click selects; a second click, a double click or a right click does what Enter does here:
 ## in lists where items are marked it marks, everywhere else it chooses the item.
-func _connect_cell(cell, at: Vector2i, multi: bool) -> void:
+func _connect_cell(cell, at: Vector2i, multi: bool, row: Dictionary) -> void:
 	var code := at.x * STRIDE + at.y
+	_rows[at] = row
+	(cell as Control).set_drag_forwarding(_drag_from.bind(at), _can_drop_pane.bind(at.x), _drop_pane.bind(at.x))
 	var act := "RIGHT" if multi else "CONFIRM"
 	cell.clicked.connect(func():
 		if at != _cursor:
@@ -711,6 +732,121 @@ static func _cell_widths(rows: Array) -> Array:
 				widths.append(MIN_CELL_WIDTH)
 			widths[i] = clampf(ceilf(w) + 4, widths[i], MAX_CELL_WIDTH)
 	return widths
+
+
+# --- Dragging items ------------------------------------------------------------------------------
+
+func _build_drop_glow() -> void:
+	_drop_glow = PanelContainer.new()
+	var sb := Slate.box(Color(Slate.ACCENT, 0.10), 4, Slate.ACCENT, 2)
+	sb.set_content_margin_all(10)
+	_drop_glow.add_theme_stylebox_override("panel", sb)
+	_drop_glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_drop_glow.visible = false
+	_drop_glow.top_level = true
+	_drop_word = Slate.label("", 14, Slate.ACCENT_TEXT, Slate.spaced(Slate.heavy(), 2))
+	_drop_word.uppercase = true
+	var chip := PanelContainer.new()
+	var chip_box := Slate.box(Slate.ACCENT, 2, Slate.ACCENT, 0)
+	chip_box.content_margin_left = 10
+	chip_box.content_margin_right = 10
+	chip_box.content_margin_top = 4
+	chip_box.content_margin_bottom = 4
+	chip.add_theme_stylebox_override("panel", chip_box)
+	chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	chip.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_child(_drop_word)
+	_drop_glow.add_child(chip)
+	add_child(_drop_glow)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_DRAG_END and _drop_glow != null:
+		_drop_glow.visible = false
+
+
+func _process(_delta: float) -> void:
+	# Leaving a place to drop for one that takes nothing hides its glow.
+	if _drop_glow != null and _drop_glow.visible and (not is_instance_valid(_glow_area)
+			or not _glow_area.get_global_rect().has_point(_glow_area.get_global_mouse_position())):
+		_drop_glow.visible = false
+
+
+func _role(p: int) -> String:
+	return String(_columns[p].get("role", "")) if p >= 0 and p < _columns.size() else ""
+
+
+func _drag_from(_at_pos: Vector2, at: Vector2i) -> Variant:
+	var role := _role(at.x)
+	if not _draggable or role not in ["carried", "worn"] or not _rows.has(at):
+		return null
+	var row: Dictionary = _rows[at]
+	if not bool(row.get("enabled", true)):
+		return null
+	var ghost := ItemSlot.new(SLOT)
+	ghost.set_item(String(row.get("type", "")), String(row.get("sym", "?")), Slate.curses(String(row.get("sym_color", "c_white"))))
+	ghost.selected = true
+	ghost.modulate.a = 0.85
+	# The picture sits under the pointer's tip, not to its lower right.
+	var holder := Control.new()
+	holder.add_child(ghost)
+	ghost.position = -Vector2(SLOT, SLOT) / 2
+	set_drag_preview(holder)
+	return {"inv_cell": at, "from": role}
+
+
+## What dropping `data` on `target` does: a verb, or "" when it does nothing there.
+func _verb_for(target: String, data: Variant) -> String:
+	if not (data is Dictionary and data.has("inv_cell")):
+		return ""
+	var from := String(data["from"])
+	match target:
+		"worn", "WEAR":
+			return "wear" if from != "worn" else ""
+		"carried":
+			return "take_off" if from == "worn" else ""
+		"WIELD":
+			return "wield"
+		"map":
+			return "drop"
+	return ""
+
+
+func _can_drop_pane(at_pos: Vector2, data: Variant, p: int) -> bool:
+	var area: Control = _pane_modules[p] if p < _pane_modules.size() and _pane_modules[p] != null else null
+	return area != null and _can_drop(at_pos, data, _role(p), area)
+
+
+func _drop_pane(at_pos: Vector2, data: Variant, p: int) -> void:
+	_drop(at_pos, data, _role(p))
+
+
+func _can_drop(_at_pos: Vector2, data: Variant, target: String, area: Control) -> bool:
+	var verb := _verb_for(target, data)
+	if verb == "":
+		_drop_glow.visible = false
+		return false
+	_drop_word.text = DROP_WORDS[verb]
+	_glow_area = area
+	var rect := area.get_global_rect()
+	# On a button the item under the pointer would hide the word, so the glow grows upward to
+	# show it above the button.
+	var chip_h := _drop_word.get_combined_minimum_size().y + 18
+	if rect.size.y < chip_h * 2.5:
+		rect = rect.grow_side(SIDE_TOP, chip_h)
+	_drop_glow.position = rect.position
+	_drop_glow.size = rect.size
+	_drop_glow.visible = true
+	return true
+
+
+func _drop(_at_pos: Vector2, data: Variant, target: String) -> void:
+	_drop_glow.visible = false
+	var verb := _verb_for(target, data)
+	if verb != "":
+		var at: Vector2i = data["inv_cell"]
+		Bridge.drag_item(view_id, at.x * STRIDE + at.y, verb)
 
 
 func _apply_cursor(force_scroll: bool) -> void:
@@ -750,6 +886,7 @@ func _scroll_to(cell: Control) -> void:
 class GridSlot extends ItemSlot:
 	signal clicked
 	signal activated
+	var _on_release := ""
 
 	var _enabled := true
 	var _cursor := false
@@ -784,15 +921,25 @@ class GridSlot extends ItemSlot:
 			refresh()
 
 	func _gui_input(event: InputEvent) -> void:
+		# A click chooses or acts on release, so a press can start dragging the item instead
+		# (choosing it on the press would rebuild the list under the pointer).
+		if event is InputEventMouseButton and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			var on_release := _on_release
+			_on_release = ""
+			if on_release != "" and not get_viewport().gui_is_dragging():
+				emit_signal(on_release)
 		if event is InputEventMouseButton and event.pressed:
+			_on_release = ""
 			if event.button_index == MOUSE_BUTTON_LEFT:
 				accept_event()
 				if not _enabled:
 					return
-				if event.double_click or _cursor:
+				if event.double_click:
 					activated.emit()
+				elif _cursor:
+					_on_release = "activated"
 				else:
-					clicked.emit()
+					_on_release = "clicked"
 			elif event.button_index == MOUSE_BUTTON_RIGHT:
 				accept_event()
 				if _enabled:
@@ -803,6 +950,7 @@ class GridSlot extends ItemSlot:
 class InvRow extends PanelContainer:
 	signal clicked
 	signal activated
+	var _on_release := ""
 
 	var _enabled := true
 	var _selected := false
@@ -997,15 +1145,25 @@ class InvRow extends PanelContainer:
 		add_theme_stylebox_override("panel", sb)
 
 	func _gui_input(event: InputEvent) -> void:
+		# A click chooses or acts on release, so a press can start dragging the item instead
+		# (choosing it on the press would rebuild the list under the pointer).
+		if event is InputEventMouseButton and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			var on_release := _on_release
+			_on_release = ""
+			if on_release != "" and not get_viewport().gui_is_dragging():
+				emit_signal(on_release)
 		if event is InputEventMouseButton and event.pressed:
+			_on_release = ""
 			if event.button_index == MOUSE_BUTTON_LEFT:
 				accept_event()
 				if not _enabled:
 					return
-				if event.double_click or (_selected and _active):
+				if event.double_click:
 					activated.emit()
+				elif (_selected and _active):
+					_on_release = "activated"
 				else:
-					clicked.emit()
+					_on_release = "clicked"
 			elif event.button_index == MOUSE_BUTTON_RIGHT:
 				accept_event()
 				if _enabled:

@@ -20,6 +20,7 @@
 #include "game.h"
 #if defined(TILES)
 #include "godot_bridge.h"
+#include "godot_drag.h"
 #include "godot_screen.h"
 #endif
 #include "input.h"
@@ -130,6 +131,13 @@ class common_inventory_selector : public inventory_pick_selector
 
     protected:
         auto handle_action( const std::string &action ) -> bool override {
+#if defined(TILES)
+            if( const auto verb = cata::godot_bridge::take_drag_verb( this ) ) {
+                // Rebuild the lists after the change, unless dropping, which happens on the map.
+                keep_open = apply_drag( *verb );
+                return true;
+            }
+#endif
             if( action != "unload_all" ) {
                 return false;
             }
@@ -139,6 +147,38 @@ class common_inventory_selector : public inventory_pick_selector
 
     private:
         bool unload_all_selected = false;
+
+#if defined(TILES)
+        /// Does `verb` with the selected item, dragged in the Godot front end; false when it
+        /// started dropping it, which closes the inventory.
+        auto apply_drag( const std::string &verb ) -> bool {
+            auto &entry = const_cast<inventory_entry &>( get_selected() );
+            if( !entry.is_item() ) {
+                return true;
+            }
+            auto &it = *entry.any_item();
+            if( verb == "wear" ) {
+                wear( entry );
+            } else if( verb == "wield" ) {
+                wield( entry );
+            } else if( verb == "take_off" ) {
+                const auto ret = u.can_takeoff( it );
+                if( ret.success() ) {
+                    u.takeoff( it );
+                } else {
+                    popup_getkey( ret.c_str() );
+                }
+            } else if( verb == "drop" ) {
+                auto what = drop_locations {};
+                for( auto *loc : entry.locations ) {
+                    what.emplace_back( *loc, loc->count() );
+                }
+                u.drop( what, u.bub_pos() );
+                return false;
+            }
+            return true;
+        }
+#endif
 };
 
 std::string good_bad_none( int value )

@@ -324,6 +324,12 @@ func pick(view_id: int, index: int, act := "CONFIRM") -> void:
 	send({"t": "pick", "id": view_id, "index": index, "act": act})
 
 
+## An item dragged in native view `view_id`: chooses entry `index`, then does `verb` with it
+## (wear, wield, take_off or drop; see `godot_drag.h`).
+func drag_item(view_id: int, index: int, verb: String) -> void:
+	send({"t": "pick", "id": view_id, "index": index, "act": "", "verb": verb})
+
+
 ## Presses the key bound to `act` in native view `view_id`'s input context.
 func press(view_id: int, act: String) -> void:
 	send({"t": "press", "id": view_id, "act": act})
