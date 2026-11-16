@@ -1,4 +1,5 @@
 #include "messages.h"
+#include "godot_alerts.h"
 #include "message_log_view.h"
 #include "message_types.h"
 #include "calendar.h"
@@ -351,6 +352,22 @@ auto Messages::sidebar_lines( const std::size_t count ) -> std::vector<log_line>
     std::ranges::reverse( lines );
     player_messages.curmes = calendar::turn;
     return lines;
+}
+
+auto cata::godot_hud::new_warnings() -> std::vector<std::pair<std::string, std::string>>
+{
+    auto out = std::vector<std::pair<std::string, std::string>> {};
+    for( auto i = static_cast<int>( player_messages.messages.size() ) - 1; i >= 0; --i ) {
+        const auto &m = player_messages.messages[i];
+        if( !m.is_new( player_messages.curmes ) ) {
+            break;
+        }
+        if( m.type == m_warning && !m.is_in_cooldown() ) {
+            out.emplace_back( to_string_time_of_day( m.turn() ), remove_color_tags( m.get_with_count() ) );
+        }
+    }
+    std::ranges::reverse( out );
+    return out;
 }
 
 std::vector<std::pair<std::string, std::string>> Messages::recent_messages( const size_t count )

@@ -27,6 +27,7 @@
 #include "debug.h"
 #include "godot_bridge_socket.h"
 #include "godot_commands.h"
+#include "godot_drag.h"
 #include "godot_hotbar.h"
 #include "godot_square.h"
 #include "input.h"
@@ -63,6 +64,11 @@ struct pending_pick {
     int index = 0;
 };
 
+struct pending_drag {
+    const void *owner = nullptr;
+    std::string verb;
+};
+
 struct bridge_state {
     std::unique_ptr<net::connection> link;
     std::atomic<bool> running = false;
@@ -84,6 +90,7 @@ struct bridge_state {
     int next_view_id = 1;
     std::vector<native_view *> views;
     std::optional<pending_pick> pick;
+    std::optional<pending_drag> drag;
     int suppression_depth = 0;
 
     const ui_adaptor *main_view = nullptr;
@@ -536,6 +543,9 @@ auto translate_event( SDL_Event &ev ) -> event_result
             }
             if( type == "pick" ) {
                 s.pick = pending_pick{ .owner = view->get_owner(), .index = obj.get_int( "index" ) };
+                const auto verb = obj.get_string( "verb", "" );
+                s.drag = verb.empty() ? std::nullopt :
+                         std::optional( pending_drag{ .owner = view->get_owner(), .verb = verb } );
             }
             return press_action( obj.get_string( "act", "CONFIRM" ), view->get_input_category() );
         }
@@ -713,6 +723,15 @@ auto native_view::compose( const std::string &type,
 auto native_view::send( const std::string &message ) const -> void
 {
     send_json( message );
+}
+
+auto take_drag_verb( const void *owner ) -> std::optional<std::string>
+{
+    auto &drag = state().drag;
+    if( !drag || drag->owner != owner ) {
+        return std::nullopt;
+    }
+    return std::exchange( drag, std::nullopt )->verb;
 }
 
 auto take_pick( const void *owner ) -> std::optional<int>

@@ -1049,6 +1049,10 @@ const recipe *select_crafting_recipe( int &batch_size_out, Character &crafter )
         const auto batch_size = batch ? line + 1 : 1;
         const auto &shown_recipes = show_unavailable ? all_recipes : available_recipes;
         const auto label_of = []( const std::string & id ) {
+            // The favorites and recent recipes tab is called "*" in the old interface.
+            if( id == "CC_*" ) {
+                return std::string( _( "Favorites" ) );
+            }
             return normalized_names.contains( id ) ? normalized_names[id] : id;
         };
         const auto category_label = [&]( const recipe & rec ) {

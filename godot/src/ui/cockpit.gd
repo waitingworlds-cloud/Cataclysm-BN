@@ -297,6 +297,11 @@ func set_foot(title: String, content: Control) -> void:
 	foot.set_body(content, 12, 8)
 
 
+## The map strip, as a place to drop things dragged onto it.
+func drop_area() -> Control:
+	return _strip_click
+
+
 func has_foot() -> bool:
 	return foot.visible
 

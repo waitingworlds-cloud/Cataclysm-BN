@@ -2514,13 +2514,15 @@
     "type": "keybinding",
     "name": "Quicksave",
     "category": "DEFAULTMODE",
-    "id": "quicksave"
+    "id": "quicksave",
+    "bindings": [ { "input_method": "keyboard", "key": "F5" } ]
   },
   {
     "type": "keybinding",
     "name": "Quickload",
     "category": "DEFAULTMODE",
-    "id": "quickload"
+    "id": "quickload",
+    "bindings": [ { "input_method": "keyboard", "key": "F9" } ]
   },
   {
     "type": "keybinding",

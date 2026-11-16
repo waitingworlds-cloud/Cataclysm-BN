@@ -2865,11 +2865,19 @@ bool game::handle_action()
                 break;
 
             case ACTION_QUICKSAVE:
+                if( !moves_since_last_save ) {
+                    add_msg( m_info, _( "Nothing new to save." ) );
+                    return false;
+                }
                 quicksave();
+                add_msg( m_good, _( "Game saved." ) );
                 return false;
 
             case ACTION_QUICKLOAD:
-                quickload();
+                // One key loses everything since the last save, so it asks first.
+                if( query_yn( _( "Load your last save?  Anything since then is lost." ) ) ) {
+                    quickload();
+                }
                 return false;
 
             case ACTION_PL_INFO:
