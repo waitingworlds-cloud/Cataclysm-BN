@@ -3167,6 +3167,15 @@ auto game::handle_wait_activity_redraw( const bool force ) -> void
                 ui_manager::redraw();
             }
 
+#if defined(TILES)
+            // The Godot front end shows the message in the HUD's progress card instead.
+            if( cata::godot_bridge::is_active() ) {
+                ui_manager::redraw();
+                refresh_display();
+                first_redraw_since_waiting_started = false;
+                return;
+            }
+#endif
             ui_adaptor dummy( ui_adaptor::disable_uis_below {} );
             wait_popup = std::make_unique<static_popup>();
             wait_popup->on_top( true ).wait_message( "%s", wait_message );

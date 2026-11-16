@@ -18,6 +18,8 @@ extends Control
 const DisplayCard := preload("res://src/ui/display_card.gd")
 const CommandPalette := preload("res://src/ui/command_palette.gd")
 const HotbarStrip := preload("res://src/ui/hotbar_strip.gd")
+const ProgressCard := preload("res://src/ui/progress_card.gd")
+const AlertFeed := preload("res://src/ui/alert_feed.gd")
 
 ## Deck buttons: action, label, icon, tooltip.
 const DOCK := [
@@ -133,6 +135,8 @@ var _right_width := float(RIGHT_WIDTH)
 
 # Frame and bezel
 var _frame: FrameView
+var _progress: ProgressCard
+var _warnings: AlertFeed
 
 # Top bar
 var _identity: PanelContainer
@@ -225,6 +229,12 @@ func _ready() -> void:
 	_build_right()
 	_build_deck()
 	_build_hover()
+	_progress = ProgressCard.new()
+	add_child(_progress)
+	_progress.resized.connect(_place_progress)
+	_warnings = AlertFeed.new()
+	add_child(_warnings)
+	_warnings.minimum_size_changed.connect(_place_progress)
 	Bridge.minimap_received.connect(func(texture: ImageTexture): _minimap.texture = texture)
 	Bridge.connected.connect(_send_insets)
 	Display.changed.connect(_layout)
@@ -280,6 +290,7 @@ func _layout() -> void:
 	_deck.size = Vector2(maxf(size.x - 2 * GUT, 80), DECK_HEIGHT)
 	_frame.viewport = map
 	_frame.queue_redraw()
+	_place_progress()
 	_fit_deck()
 	_fit_status()
 	# A panel can't be made smaller than its content, so set the sizes again now that the deck
@@ -823,6 +834,12 @@ func _build_deck() -> void:
 		var button := DockButton.new(entry[0], entry[1], entry[2], entry[3])
 		if entry[0] == "#commands":
 			button.pressed.connect(open_commands)
+		elif entry[0] == "craft":
+			# Right-click crafts the last recipe again, as the recraft key does.
+			button.gui_input.connect(func(e: InputEvent):
+				if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_RIGHT:
+					button.accept_event()
+					Bridge.run("recraft"))
 		dock.add_child(button)
 		_dock_buttons[entry[0]] = button
 
@@ -1042,6 +1059,23 @@ func apply(hud: Dictionary) -> void:
 	_update_deck(hud)
 	_frame.set_tags(_level_name(hud), "Wheel zooms // Middle button drags")
 	_update_hover()
+	_progress.apply(hud.get("activity", {}), _key("pause"))
+	_warnings.apply(hud.get("alerts", []))
+	_place_progress()
+
+
+## The progress card sits at the foot of the map, centered, above the map's bottom tags.
+func _place_progress() -> void:
+	if _progress == null:
+		return
+	var map := map_rect()
+	var card := _progress.get_combined_minimum_size()
+	_progress.size = card
+	_progress.position = Vector2(roundf(map.get_center().x - card.x / 2), map.end.y - card.y - 34)
+	# Warnings sit at the top of the map, under its top tags.
+	var feed := _warnings.get_combined_minimum_size()
+	_warnings.size = feed
+	_warnings.position = Vector2(roundf(map.get_center().x - feed.x / 2), map.position.y + 40)
 
 
 func _level_name(hud: Dictionary) -> String:
@@ -1706,6 +1740,12 @@ func _update_deck(hud: Dictionary) -> void:
 
 	for action in _dock_buttons:
 		_dock_buttons[action].set_key("^K" if action == "#commands" else Slate.key_name(_key(action)))
+	var last := String(hud.get("last_recipe", ""))
+	if last != "" and _dock_buttons.has("craft"):
+		var again := "Right-click: craft %s again" % last
+		if _key("recraft") != "":
+			again += "  (%s)" % Slate.key_name(_key("recraft"))
+		_dock_buttons["craft"].tooltip_text += "\n" + again
 	_options_button.tooltip_text = _with_key("HUD options: choose what the HUD shows", "toggle_panel_adm")
 
 

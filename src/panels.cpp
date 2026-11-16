@@ -23,6 +23,7 @@
 #include "effect.h"
 #include "fstream_utils.h"
 #include "game.h"
+#include "godot_alerts.h"
 #include "godot_hotbar.h"
 #include "game_constants.h"
 #include "game_ui.h"
@@ -51,6 +52,8 @@
 #include "panels_utility.h"
 #include "path_info.h"
 #include "player.h"
+#include "player_activity.h"
+#include "recipe.h"
 #include "pldata.h"
 #include "point.h"
 #if defined(TILES)
@@ -99,6 +102,7 @@ static const efftype_id effect_bite( "bite" );
 static const efftype_id effect_bleed( "bleed" );
 static const efftype_id effect_got_checked( "got_checked" );
 static const efftype_id effect_infected( "infected" );
+static const efftype_id effect_sleep( "sleep" );
 
 static const itype_id fuel_type_muscle( "muscle" );
 
@@ -3102,12 +3106,13 @@ auto write_runs( JsonOut &jsout, const std::string &text, const nc_color &base )
 /// Actions the HUD offers as buttons, with the key each is bound to.
 auto write_action_keys( JsonOut &jsout ) -> void
 {
-    static const auto actions = std::array<std::string, 36> {
+    static const auto actions = std::array<std::string, 40> {
         "inventory", "advinv", "craft", "construct", "pickup", "look", "fire", "wait", "map",
         "eat", "wear", "apply", "sleep", "messages", "player_data", "safemode", "mutations",
         "bionics", "reload_weapon", "wield", "drop", "open", "toggle_panel_adm", "toggle_pixel_minimap",
         "close", "examine", "butcher", "chat", "listitems", "cycle_move", "reset_move", "toggle_run",
-        "toggle_crouch", "toggle_prone", "zoom_in", "zoom_out"
+        "toggle_crouch", "toggle_prone", "zoom_in", "zoom_out", "pause", "quicksave", "quickload",
+        "recraft"
     };
     jsout.member( "keys" );
     jsout.start_object();
@@ -3615,6 +3620,48 @@ auto write_lua_widgets( JsonOut &jsout ) -> void
 
 } // namespace
 
+namespace
+{
+
+/// What the player is busy with, for the HUD's progress card: the game's own wait message (the
+/// popup the old interface shows during long actions), and whether a key can stop it.
+auto write_activity( JsonOut &jsout, const avatar &u ) -> void
+{
+    auto text = std::optional<std::string> {};
+    auto kind = std::string( "activity" );
+    if( u.has_effect( effect_sleep ) ) {
+        text = _( "Sleeping" );
+        kind = "sleep";
+    } else if( u.has_destination() ) {
+        text = _( "Travelling" );
+        kind = "travel";
+    } else if( u.activity ) {
+        text = u.activity->get_progress_message( u );
+    }
+    if( !text ) {
+        return;
+    }
+    jsout.member( "activity" );
+    jsout.start_object();
+    jsout.member( "kind", kind );
+    jsout.member( "text" );
+    write_runs( jsout, *text, c_light_gray );
+    jsout.member( "stoppable", kind != "activity" || u.activity->interruptable_with_kb );
+    // Simple activities (waiting) say nothing about their progress; their move counters do.
+    if( kind == "activity" ) {
+        const auto &act = *u.activity;
+        // Activities with an actor keep their moves there and leave moves_total at 0.
+        const auto left = act.get_moves_left();
+        if( act.moves_total > 0 && left >= 0 ) {
+            jsout.member( "done", 1.0 - static_cast<double>( left ) / act.moves_total );
+            jsout.member( "left", to_string_clipped( time_duration::from_turns( left / 100 ) ) );
+        }
+    }
+    jsout.end_object();
+}
+
+} // namespace
+
 auto cata::godot_hud::build() -> std::string
 {
     auto &u = get_avatar();
@@ -3628,6 +3675,10 @@ auto cata::godot_hud::build() -> std::string
     write_runs( jsout, character_funcs::fmt_wielded_weapon( u ), c_light_gray );
     jsout.member( "style", u.martial_arts_data->selected_style_name( u ) );
     jsout.member( "armed", u.is_armed() );
+    write_activity( jsout, u );
+    if( u.lastrecipe.is_valid() && !u.lastrecipe.is_null() ) {
+        jsout.member( "last_recipe", u.lastrecipe->result_name() );
+    }
     cata::godot_hotbar::write( jsout );
 #if defined(TILES)
     write_wielded( jsout, u );
@@ -3703,6 +3754,16 @@ auto cata::godot_hud::build() -> std::string
         cata::godot_bridge::request_minimap();
     }
 #endif
+
+    jsout.member( "alerts" );
+    jsout.start_array();
+    for( const auto &[time, text] : cata::godot_hud::new_warnings() ) {
+        jsout.start_array();
+        jsout.write( time );
+        jsout.write( text );
+        jsout.end_array();
+    }
+    jsout.end_array();
 
     jsout.member( "messages" );
     jsout.start_array();
