@@ -240,6 +240,10 @@ auto cata::godot_square::move_view( const view_change &change ) -> void
                                          closest ) ) );
         g->mark_main_ui_adaptor_resize();
     }
+    if( change.shift != point_zero ) {
+        you.view_offset.x() = std::clamp( you.view_offset.x() + change.shift.x, -reach, reach );
+        you.view_offset.y() = std::clamp( you.view_offset.y() + change.shift.y, -reach, reach );
+    }
     if( change.drag != point_zero && tilecontext ) {
         const auto square = point( std::max( tilecontext->get_tile_width(), 1 ),
                                    std::max( tilecontext->get_tile_height(), 1 ) );

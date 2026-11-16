@@ -68,6 +68,8 @@ struct view_change {
     int zoom = 0;
     /// How far the map was dragged, in screen pixels.
     point drag;
+    /// Squares to move the view by.
+    point shift;
     /// Put the view back on the avatar.
     bool center = false;
 };

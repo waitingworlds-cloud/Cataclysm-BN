@@ -289,6 +289,11 @@ func drag_map(delta: Vector2) -> void:
 	_pending_drag += delta
 
 
+## Moves the main map's view by `squares`.
+func shift_map(squares: Vector2i) -> void:
+	send({"t": "map", "sx": squares.x, "sy": squares.y})
+
+
 ## Puts the main map's view back on the player.
 func center_map() -> void:
 	_pending_drag = Vector2.ZERO

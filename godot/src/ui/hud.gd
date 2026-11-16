@@ -1031,16 +1031,16 @@ func apply(hud: Dictionary) -> void:
 	_update_status(hud)
 	_update_vehicle(hud.get("vehicle", {}))
 	_update_map()
-	_update_sight(hud, show)
 	var reach := _reach_sorted(hud.get("reach", []))
+	_frame.set_targets(hud.get("view", {}), hud.get("sight", []) if bool(show.get("compass", true)) else [],
+			_reach_target(reach))
+	_update_sight(hud, show)
 	_update_reach(reach)
 	_update_widgets(hud.get("widgets", []))
 	_log_module.visible = bool(show.get("log", true))
 	_update_log(hud.get("messages", []))
 	_update_deck(hud)
 	_frame.set_tags(_level_name(hud), "Wheel zooms // Middle button drags")
-	_frame.set_targets(hud.get("view", {}), hud.get("sight", []) if bool(show.get("compass", true)) else [],
-			_reach_target(reach))
 	_update_hover()
 
 
@@ -1416,7 +1416,7 @@ func _update_sight(hud: Dictionary, show: Dictionary) -> void:
 	if not _sight_module.visible:
 		return
 	var sight: Array = hud.get("sight", [])
-	if not _changed("sight", [sight, _key("listitems"), _right_width]):
+	if not _changed("sight", [sight, _key("listitems"), _right_width, hud.get("view", {}), _frame.viewport]):
 		return
 	var hostile := sight.any(func(s): return bool(s.get("hostile", false)))
 	_sight_module.set_title("In sight  %02d" % sight.size(), Slate.DANGER if hostile else Slate.CYAN)
@@ -1430,7 +1430,8 @@ func _update_sight(hud: Dictionary, show: Dictionary) -> void:
 	var room := 6
 	var lead := true
 	for i in mini(sight.size(), room):
-		var row := SightRow.new(sight[i], lead and bool(sight[i].get("hostile", false)))
+		var at := Vector2(float(sight[i].get("dx", 0)), float(sight[i].get("dy", 0)))
+		var row := SightRow.new(sight[i], lead and bool(sight[i].get("hostile", false)), _frame.shift_to_show(at))
 		lead = lead and not bool(sight[i].get("hostile", false))
 		_sight_list.add_child(row)
 	if sight.size() > room:
@@ -1750,6 +1751,54 @@ class FrameView extends Control:
 		var at := Vector2(float(view.get("x", 0)), float(view.get("y", 0))) + offset * tile
 		return Rect2(at * scale, tile * scale)
 
+	## How many squares the view has to move for the map to show the square `offset` from the
+	## player, with a little room around it; zero when it is in view already.
+	func shift_to_show(offset: Vector2) -> Vector2i:
+		if _targets.is_empty() or (_targets[0] as Dictionary).is_empty():
+			return Vector2i.ZERO
+		var rect := _square(offset)
+		var tile := rect.size
+		if tile.x <= 0 or tile.y <= 0:
+			return Vector2i.ZERO
+		var inside := viewport.grow(-6)
+		if inside.encloses(rect):
+			return Vector2i.ZERO
+		var room := inside.grow_individual(-tile.x * 2, -tile.y * 2, -tile.x * 2, -tile.y * 2)
+		var shift := Vector2.ZERO
+		if rect.position.x < room.position.x:
+			shift.x = floorf((rect.position.x - room.position.x) / tile.x)
+		elif rect.end.x > room.end.x:
+			shift.x = ceilf((rect.end.x - room.end.x) / tile.x)
+		if rect.position.y < room.position.y:
+			shift.y = floorf((rect.position.y - room.position.y) / tile.y)
+		elif rect.end.y > room.end.y:
+			shift.y = ceilf((rect.end.y - room.end.y) / tile.y)
+		return Vector2i(shift)
+
+	## An arrowhead on the edge of the map toward a creature in sight that the map's view
+	## doesn't reach. Returns where it was drawn.
+	func _draw_pointer(rect: Rect2, color: Color) -> Vector2:
+		var edge := viewport.grow(-22)
+		var from := edge.get_center()
+		var way := rect.get_center() - from
+		if way == Vector2.ZERO:
+			return from
+		# Where the line to the creature leaves the map.
+		var reach := INF
+		if way.x != 0:
+			reach = minf(reach, (edge.size.x / 2) / absf(way.x))
+		if way.y != 0:
+			reach = minf(reach, (edge.size.y / 2) / absf(way.y))
+		var tip := from + way * reach
+		var ahead := way.normalized()
+		var side := Vector2(-ahead.y, ahead.x)
+		# A notched arrowhead, so that it reads as pointing one way at any angle.
+		var points := PackedVector2Array([tip + ahead * 11, tip - ahead * 7 + side * 7, tip - ahead * 3,
+				tip - ahead * 7 - side * 7])
+		draw_colored_polygon(points, color)
+		draw_polyline(PackedVector2Array([points[0], points[1], points[2], points[3], points[0]]), Color(0, 0, 0, 0.7), 1.0)
+		return tip
+
 	func _draw_brackets(rect: Rect2, color: Color) -> void:
 		var arm := maxf(rect.size.x * 0.28, 5.0)
 		var r := rect.grow(3)
@@ -1781,12 +1830,33 @@ class FrameView extends Control:
 		var inside := viewport.grow(-6)
 		var tagged := false
 		var marked := 0
+		var in_view_threat := false
+		# Creatures in sight beyond the edge of the map: an arrowhead on the edge toward each (one
+		# per spot; threats in red, drawn last so they stay on top).
+		var spots := {}
+		var nearest_threat := {}
+		for hostile in [false, true]:
+			for s in _targets[1]:
+				if bool(s.get("hostile", false)) != hostile or spots.size() >= 24:
+					continue
+				var rect := _square(Vector2(float(s.get("dx", 0)), float(s.get("dy", 0))))
+				if inside.intersects(rect):
+					continue
+				var way := (rect.get_center() - viewport.get_center()).angle()
+				var spot := [roundi(way * 24 / TAU), hostile]
+				if spots.has(spot):
+					continue
+				spots[spot] = true
+				var tip := _draw_pointer(rect, Slate.DANGER if hostile else Color(Slate.CYAN, 0.85))
+				if hostile and nearest_threat.is_empty():
+					nearest_threat = {"s": s, "tip": tip}
 		for s in _targets[1]:
 			if not bool(s.get("hostile", false)) or marked >= 16:
 				continue
 			var rect := _square(Vector2(float(s.get("dx", 0)), float(s.get("dy", 0))))
 			if not inside.encloses(rect.grow(3)):
 				continue
+			in_view_threat = true
 			marked += 1
 			_draw_brackets(rect, Slate.DANGER)
 			if not tagged:
@@ -1794,6 +1864,13 @@ class FrameView extends Control:
 				var words := PackedStringArray([String(s.get("name", "")), "%d %s" % [int(s.get("dist", 0)),
 						DIRS[clampi(int(s.get("dir", 8)), 0, 8)]], String(s.get("health", ""))])
 				_draw_target_tag(rect, " // ".join(words).to_upper(), Slate.DANGER)
+		# With no threat on the map itself, the nearest one beyond its edge is named at its arrow.
+		if not in_view_threat and not nearest_threat.is_empty():
+			var s: Dictionary = nearest_threat["s"]
+			var tip: Vector2 = nearest_threat["tip"]
+			var words := PackedStringArray([String(s.get("name", "")), "%d %s" % [int(s.get("dist", 0)),
+					DIRS[clampi(int(s.get("dir", 8)), 0, 8)]]])
+			_draw_target_tag(Rect2(tip - Vector2(8, 8), Vector2(16, 16)), " // ".join(words).to_upper(), Slate.DANGER)
 		var reach: Dictionary = _targets[2]
 		if not reach.is_empty() and not bool(reach.get("hostile", false)):
 			var offset := Vector2(float(reach.get("dx", 0)), float(reach.get("dy", 0)))
@@ -2389,11 +2466,15 @@ class MapMarks extends Control:
 ## Click for what you can do about it; the tooltip has its threat and state.
 class SightRow extends PanelContainer:
 	var _offset: Vector2i
+	var _away := Vector2i.ZERO
 	var _lead := false
 	var _hostile := false
 
-	func _init(s: Dictionary, lead: bool) -> void:
+	## `away` is how many squares the map's view has to move to show the creature (zero when
+	## the map shows it).
+	func _init(s: Dictionary, lead: bool, away := Vector2i.ZERO) -> void:
 		_lead = lead
+		_away = away
 		_hostile = bool(s.get("hostile", false))
 		_offset = Vector2i(int(s.get("dx", 0)), int(s.get("dy", 0)))
 		mouse_filter = Control.MOUSE_FILTER_STOP
@@ -2403,7 +2484,11 @@ class SightRow extends PanelContainer:
 		var threat := String(THREAT_WORDS.get(danger, ""))
 		var health := String(s.get("health", ""))
 		lines.append(", ".join(PackedStringArray([threat, health]).duplicate()).trim_prefix(", ").trim_suffix(", ") if threat != "" or health != "" else "")
-		lines.append("%d squares %s. Click for actions." % [int(s.get("dist", 0)), DIR_WORDS[clampi(int(s.get("dir", 8)), 0, 8)]])
+		var place := "%d squares %s." % [int(s.get("dist", 0)), DIR_WORDS[clampi(int(s.get("dir", 8)), 0, 8)]]
+		if away != Vector2i.ZERO:
+			lines.append(place + " Outside the map's view.\nClick to move the view there. Right-click for actions.")
+		else:
+			lines.append(place + " Click for actions.")
 		tooltip_text = "\n".join(lines).strip_edges()
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 8)
@@ -2415,6 +2500,8 @@ class SightRow extends PanelContainer:
 		name.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		name.clip_text = true
 		row.add_child(name)
+		if away != Vector2i.ZERO:
+			row.add_child(Slate.label("OFF VIEW", 9, Slate.FAINT, Slate.mono()))
 		var where := "%d %s" % [int(s.get("dist", 0)), DIRS[clampi(int(s.get("dir", 8)), 0, 8)]]
 		row.add_child(Slate.label(where, 12, Slate.TEXT if _lead else Slate.MUTED, Slate.mono()))
 		mouse_entered.connect(func(): _restyle(true))
@@ -2435,7 +2522,11 @@ class SightRow extends PanelContainer:
 
 	func _gui_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT]:
-			Bridge.square(_offset)
+			# A creature the map doesn't show is brought into view first.
+			if _away != Vector2i.ZERO and event.button_index == MOUSE_BUTTON_LEFT:
+				Bridge.shift_map(_away)
+			else:
+				Bridge.square(_offset)
 
 
 ## The sidebar's fuel gauge (E, 1/4, 1/2, 3/4, F) as five marks, lit up to the current one.
