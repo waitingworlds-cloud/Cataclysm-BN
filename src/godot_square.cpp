@@ -25,6 +25,7 @@
 #include "map/mapdata.h"
 #include "monster.h"
 #include "options.h"
+#include "output.h"
 #include "sdltiles.h"
 #include "string_formatter.h"
 #include "string_utils.h"
@@ -137,7 +138,7 @@ auto write_reach_square( JsonOut &jsout, const point offset ) -> void
                 known->count += it->count();
                 continue;
             }
-            kinds.push_back( { .type = it->typeId(), .name = it->tname(), .sym = it->symbol(),
+            kinds.push_back( { .type = it->typeId(), .name = remove_color_tags( it->tname() ), .sym = it->symbol(),
                                .color = it->color(), .count = it->count() } );
         }
     }
@@ -154,7 +155,7 @@ auto write_reach_square( JsonOut &jsout, const point offset ) -> void
     if( critter != nullptr ) {
         title = critter->get_name();
     } else if( corpse != nullptr ) {
-        title = corpse->tname();
+        title = remove_color_tags( corpse->tname() );
     } else if( veh ) {
         title = veh->vehicle().name;
     } else if( m.has_furn( p ) ) {
@@ -409,7 +410,7 @@ auto items_line( const tripoint_bub_ms &p ) -> std::optional<tip_line>
     auto total = 0;
     for( const item *const it : m.i_at( p ) ) {
         ++total;
-        const auto name = it->tname();
+        const auto name = remove_color_tags( it->tname() );
         if( !std::ranges::contains( names, name ) ) {
             names.push_back( name );
         }
