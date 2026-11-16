@@ -22,6 +22,10 @@ var views := {}
 var visible_views := []
 var _last_size := Vector2i.ZERO
 var _main_view := false
+## The middle button is held on the main map: where the mouse last was, and how far it has gone.
+var _map_grabbed := false
+var _grab_at := Vector2.ZERO
+var _grab_moved := 0.0
 var _toast: PanelContainer
 var _toast_label: Label
 var _toast_tween: Tween
@@ -319,11 +323,32 @@ func _input(event: InputEvent) -> void:
 
 func _on_frame_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
+		if _map_grabbed:
+			# The map follows the hand while the middle button is held.
+			Bridge.drag_map(event.position - _grab_at)
+			_grab_moved += (event.position - _grab_at).length()
+			_grab_at = event.position
+			return
 		Bridge.send_mouse_move(event.position)
 		hud.map_mouse_moved()
 	elif event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
-		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
+		# On the main map the wheel zooms, and the middle button drags the map (a plain middle
+		# click puts the view back on the player). Other screens the game draws get them as is.
+		if _main_view and mb.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+			if mb.pressed:
+				Bridge.zoom_map(1 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
+		elif mb.button_index == MOUSE_BUTTON_MIDDLE and (_main_view or _map_grabbed):
+			if mb.pressed:
+				_map_grabbed = true
+				_grab_at = mb.position
+				_grab_moved = 0.0
+			else:
+				if _map_grabbed and _grab_moved < 4.0:
+					Bridge.center_map()
+				_map_grabbed = false
+			frame_view.mouse_default_cursor_shape = Control.CURSOR_DRAG if _map_grabbed else Control.CURSOR_ARROW
+		elif mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
 			Bridge.send_mouse("wheel", mb.position, 0, 1)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			Bridge.send_mouse("wheel", mb.position, 0, -1)

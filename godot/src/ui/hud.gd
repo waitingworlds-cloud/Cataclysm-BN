@@ -1038,7 +1038,7 @@ func apply(hud: Dictionary) -> void:
 	_log_module.visible = bool(show.get("log", true))
 	_update_log(hud.get("messages", []))
 	_update_deck(hud)
-	_frame.set_tags(_level_name(hud), "Zoom %d× // Ctrl Shift + / −" % Display.map_scale())
+	_frame.set_tags(_level_name(hud), "Wheel zooms // Middle button drags")
 	_frame.set_targets(hud.get("view", {}), hud.get("sight", []) if bool(show.get("compass", true)) else [],
 			_reach_target(reach))
 	_update_hover()

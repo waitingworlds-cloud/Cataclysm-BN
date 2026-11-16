@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "avatar.h"
+#include "cata_tiles.h"
 #include "color.h"
 #include "creature.h"
 #include "enums.h"
@@ -23,6 +24,8 @@
 #include "map/map.h"
 #include "map/mapdata.h"
 #include "monster.h"
+#include "options.h"
+#include "sdltiles.h"
 #include "string_formatter.h"
 #include "string_utils.h"
 #include "translations.h"
@@ -213,6 +216,40 @@ auto cata::godot_square::health_word( const Creature &critter ) -> std::string
         return _( "Severely injured" );
     }
     return _( "Nearly dead" );
+}
+
+auto cata::godot_square::move_view( const view_change &change ) -> void
+{
+    // Pixels dragged that did not yet add up to a square.
+    static auto rest = point();
+    // The most squares the view can be away from the avatar.
+    constexpr auto reach = 48;
+    // Zoom is the size of a square in sixteenths: from a quarter to four times.
+    constexpr auto farthest = 4.0;
+    constexpr auto closest = 64.0;
+    auto &you = get_avatar();
+    if( change.center ) {
+        you.view_offset.x() = g->driving_view_offset.x;
+        you.view_offset.y() = g->driving_view_offset.y;
+        rest = point();
+    }
+    if( change.zoom != 0 ) {
+        const auto steps = std::max( get_option<int>( "ZOOM_STEP_COUNT" ), 1 );
+        const auto level = std::round( std::log2( g->get_zoom() ) * steps ) + change.zoom;
+        g->set_zoom( static_cast<float>( std::clamp( std::pow( 2.0, level / steps ), farthest,
+                                         closest ) ) );
+        g->mark_main_ui_adaptor_resize();
+    }
+    if( change.drag != point_zero && tilecontext ) {
+        const auto square = point( std::max( tilecontext->get_tile_width(), 1 ),
+                                   std::max( tilecontext->get_tile_height(), 1 ) );
+        // The map follows the hand: dragged right, the view moves left.
+        rest += change.drag;
+        const auto squares = point( rest.x / square.x, rest.y / square.y );
+        rest -= point( squares.x * square.x, squares.y * square.y );
+        you.view_offset.x() = std::clamp( you.view_offset.x() - squares.x, -reach, reach );
+        you.view_offset.y() = std::clamp( you.view_offset.y() - squares.y, -reach, reach );
+    }
 }
 
 auto cata::godot_square::direction_index( const point offset ) -> int

@@ -1402,9 +1402,11 @@ action_id input_context::display_menu( const bool permit_execute_action )
         if( scroll_offset > filtered_registered_actions.size() ) {
             scroll_offset = 0;
         }
+        // The row a mouse click picked, in place of a row's letter.
+        auto clicked = std::optional<size_t> {};
 #if defined(TILES)
         // A mode button switches the mode (or back when it is on); a row clicked while picking an
-        // action counts as its letter.
+        // action picks it wherever the list stands, so the list keeps its place.
         if( const auto pick = native ? cata::godot_bridge::take_pick( &ctxt ) : std::nullopt ) {
             if( *pick >= mode_pick ) {
                 const auto mode = modes[std::min<size_t>( *pick - mode_pick, modes.size() - 1 )];
@@ -1412,13 +1414,11 @@ action_id input_context::display_menu( const bool permit_execute_action )
                 continue;
             }
             const auto index = static_cast<size_t>( *pick % cata::godot_screen::row_stride );
-            if( status == s_show || index >= filtered_registered_actions.size() || hotkeys.empty() ) {
+            if( status == s_show || index >= filtered_registered_actions.size() ) {
                 continue;
             }
-            if( index < scroll_offset || index >= scroll_offset + hotkeys.size() ) {
-                scroll_offset = index;
-            }
-            raw_input_char = hotkeys[index - scroll_offset];
+            clicked = index;
+            raw_input_char = 0;
             action.clear();
         }
 #endif
@@ -1488,10 +1488,10 @@ action_id input_context::display_menu( const bool permit_execute_action )
             hotkeys = ctxt.get_available_single_char_hotkeys( display_help_hotkeys );
         } else if( !filtered_registered_actions.empty() && status != s_show ) {
             const size_t hotkey_index = hotkeys.find_first_of( raw_input_char );
-            if( hotkey_index == std::string::npos ) {
+            if( !clicked && hotkey_index == std::string::npos ) {
                 continue;
             }
-            const size_t action_index = hotkey_index + scroll_offset;
+            const size_t action_index = clicked.value_or( hotkey_index + scroll_offset );
             if( action_index >= filtered_registered_actions.size() ) {
                 continue;
             }

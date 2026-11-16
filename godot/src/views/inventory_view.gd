@@ -47,6 +47,8 @@ var _columns: Array = []
 ## Vector2i(pane, row index) -> the slot or row showing it.
 var _cells := {}
 var _pane_modules: Array = []
+## For each column: its scroll box, the names it lists and whether it is a grid, or null.
+var _pane_lists: Array = []
 var _cursor := Vector2i(-1, -1)
 var _multi := false
 
@@ -478,6 +480,12 @@ static func _has_cells(rows: Array) -> bool:
 
 
 func _build_panes() -> void:
+	# Where each list stood, to put it back when the rebuilt list is the same one with a
+	# change in it (an item was marked or is gone) and not start at the top again.
+	var kept := []
+	for old in _pane_lists:
+		kept.append(null if old == null else [old[1], old[2], (old[0] as ScrollContainer).scroll_vertical])
+	_pane_lists.clear()
 	for c in _panes.get_children():
 		_panes.remove_child(c)
 		c.queue_free()
@@ -491,6 +499,7 @@ func _build_panes() -> void:
 		var column: Dictionary = _columns[p]
 		if not bool(column.get("visible", false)):
 			_pane_modules.append(null)
+			_pane_lists.append(null)
 			continue
 		var role := String(column.get("role", ""))
 		var rows: Array = column.get("rows", [])
@@ -531,6 +540,10 @@ func _build_panes() -> void:
 			list.add_child(empty)
 		_panes.add_child(module)
 		_pane_modules.append(module)
+		var names := PackedStringArray(rows.map(func(r): return Slate.plain(r.get("text", []))))
+		_pane_lists.append([scroll, names, as_grid])
+		if p < kept.size() and kept[p] != null and kept[p][1] == as_grid and _same_list(kept[p][0], names):
+			_restore_scroll(scroll, int(kept[p][2]))
 	if _panes.get_child_count() == 0:
 		var module := Hud.Module.new("Items")
 		module.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -540,6 +553,33 @@ func _build_panes() -> void:
 		empty.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		module.set_body(empty)
 		_panes.add_child(module)
+
+
+## Whether two lists of row names are the same list with some changes: most names are in both.
+static func _same_list(before: PackedStringArray, after: PackedStringArray) -> bool:
+	if before.is_empty() or after.is_empty():
+		return false
+	var had := {}
+	for n in before:
+		had[n] = true
+	var shared := 0
+	for n in after:
+		if had.has(n):
+			shared += 1
+	return shared * 10 >= maxi(before.size(), after.size()) * 6
+
+
+## Puts a rebuilt list where it stood. The bar is given the room first, so that the list does
+## not show its top for a frame while it is laid out.
+func _restore_scroll(scroll: ScrollContainer, offset: int) -> void:
+	if offset <= 0:
+		return
+	var bar := scroll.get_v_scroll_bar()
+	bar.max_value = maxf(bar.max_value, offset + bar.page + 1)
+	scroll.scroll_vertical = offset
+	await get_tree().process_frame
+	if is_instance_valid(scroll):
+		scroll.scroll_vertical = offset
 
 
 ## Slots or rows, for plain item lists: two small buttons with the current one lit.

@@ -508,6 +508,15 @@ auto translate_event( SDL_Event &ev ) -> event_result
             cata::godot_commands::request( "SEC_SELECT" );
             return press_action( "action_menu", "DEFAULTMODE" );
         }
+        if( type == "map" ) {
+            // The mouse wheel and the middle button on the main map: zoom, drag, back to the avatar.
+            cata::godot_square::move_view( {
+                .zoom = obj.get_int( "zoom", 0 ),
+                .drag = point( obj.get_int( "dx", 0 ), obj.get_int( "dy", 0 ) ),
+                .center = obj.get_bool( "center", false ),
+            } );
+            return press_action( "", "DEFAULTMODE" );
+        }
         if( type == "sprites" ) {
             auto &wanted = s.sprites_wanted;
             std::ranges::copy( obj.get_string_array( "ids" ), std::back_inserter( wanted ) );

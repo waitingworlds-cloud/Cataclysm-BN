@@ -72,6 +72,10 @@ var _aside_slot: ItemSlot
 var _aside_icon: TextureRect
 var _aside_title: RichTextLabel
 var _foot_stamp := 0
+## Set when a list was built anew (not the same list with a change in it).
+var _fresh_lists := false
+## Where the game last asked the side text to stand.
+var _aside_asked = null
 ## Columns a grid of buttons ended up with, by what it holds (see `_fit_grid`).
 var _grid_fit := {}
 var _aside_subtitle: Label
@@ -957,6 +961,12 @@ func _pane_hash(pane: Dictionary) -> int:
 
 
 func _build_panes(panes: Array) -> void:
+	# Where each list stood, to put it back when the rebuilt list is the same one with a
+	# change in it (an option was switched, an item is gone) and not start at the top again.
+	var kept := []
+	for p in _panes.size():
+		var old := _panes[p] as Pane
+		kept.append([old.names, old.scroll_offset(), _pane_hashes[p], old.game_scroll])
 	for c in _pane_row.get_children():
 		_pane_row.remove_child(c)
 		c.queue_free()
@@ -1016,6 +1026,27 @@ func _build_panes(panes: Array) -> void:
 			pane.add_row(row)
 			_rows[at] = row
 		pane.finish()
+		pane.names = PackedStringArray(rows.map(func(r): return Slate.plain(r.get("text", []))))
+		# The same pane as before (another one changed), or the same list with a change in it.
+		if p < kept.size() and (kept[p][2] == _pane_hashes[p] or _same_list(kept[p][0], pane.names)):
+			pane.game_scroll = kept[p][3]
+			pane.restore_scroll(int(kept[p][1]))
+		else:
+			_fresh_lists = true
+
+
+## Whether two lists of row names are the same list with some changes: most names are in both.
+static func _same_list(before: PackedStringArray, after: PackedStringArray) -> bool:
+	if before.is_empty() or after.is_empty():
+		return false
+	var had := {}
+	for n in before:
+		had[n] = true
+	var shared := 0
+	for n in after:
+		if had.has(n):
+			shared += 1
+	return shared * 10 >= maxi(before.size(), after.size()) * 6
 
 
 ## A board's squares send their pick, `pane * STRIDE + row * 1000 + column`, with the action the
@@ -1056,7 +1087,9 @@ func _apply_cursor() -> void:
 		var c := int(panes[p].get("cursor", -1))
 		if p == active:
 			cursor = Vector2i(p, c)
-	var moved := cursor != _cursor
+	# A list that was built anew starts at its top: the chosen row is brought into view.
+	var moved := cursor != _cursor or _fresh_lists
+	_fresh_lists = false
 	_cursor = cursor
 	for at in _rows:
 		var on: bool = at.y == int(panes[at.x].get("cursor", -1)) if at.x < panes.size() else false
@@ -1142,11 +1175,15 @@ func _apply_aside(msg: Dictionary) -> void:
 	else:
 		_aside_body.remove_theme_font_override("normal_font")
 		_aside_body.add_theme_font_size_override("normal_font_size", Slate.fs(13))
-	if body != _aside_body.text:
+	var fresh_body := body != _aside_body.text
+	if fresh_body:
 		_aside_body.text = body
 		_aside_scroll.scroll_vertical = 0
-	if aside.has("scroll"):
+	# The game's own scroll position is followed when it changes or the text is new; text
+	# scrolled with the mouse stays put when the game sends the screen again.
+	if aside.has("scroll") and (aside["scroll"] != _aside_asked or fresh_body):
 		_aside_scroll.scroll_vertical = int(float(aside["scroll"]) * LINE_HEIGHT)
+	_aside_asked = aside.get("scroll")
 	_apply_buttons(aside.get("buttons", msg.get("buttons", [])))
 
 
@@ -1398,6 +1435,30 @@ class Pane extends VBoxContainer:
 	var _entries: Array[Control] = []
 	var _items := 0
 	var _empty := ""
+	## Names of the rows the list was built from.
+	var names := PackedStringArray()
+
+	## Where the game last asked the list to stand. It is followed again only when it changes, so a
+	## list scrolled with the mouse stays put when the game sends the screen again.
+	var game_scroll = null
+	var _restores := 0
+
+	func scroll_offset() -> int:
+		return _scroll.scroll_vertical if _scroll != null else 0
+
+	## Puts the list where it stood before it was rebuilt. The bar is given the room first, so
+	## that the list does not show its top for a frame while it is laid out.
+	func restore_scroll(offset: int) -> void:
+		if _scroll == null or offset <= 0:
+			return
+		var bar := _scroll.get_v_scroll_bar()
+		bar.max_value = maxf(bar.max_value, offset + bar.page + 1)
+		_scroll.scroll_vertical = offset
+		_restores += 1
+		var mine := _restores
+		await get_tree().process_frame
+		if is_instance_valid(_scroll) and mine == _restores:
+			_scroll.scroll_vertical = offset
 
 	func setup(spec: Dictionary, framed := false) -> void:
 		add_theme_constant_override("separation", 0)
@@ -1529,6 +1590,11 @@ class Pane extends VBoxContainer:
 		_note.text = Slate.bbcode(spec.get("note", []), Slate.FAINT).strip_edges()
 		_note.visible = _note.text != ""
 		_note_box.visible = _note.visible
+		var asked := [spec.get("scroll"), spec.get("scroll_row"), spec.get("scroll_entry"), spec.get("scroll_end", false)]
+		if asked == game_scroll:
+			return
+		game_scroll = asked
+		_restores += 1
 		if _text != null and spec.has("scroll"):
 			_scroll.scroll_vertical = int(float(spec["scroll"]) * LINE_HEIGHT)
 		if spec.has("scroll_row") and _list.get_child_count() > 0:

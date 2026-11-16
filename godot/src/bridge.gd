@@ -35,6 +35,8 @@ var _texture: ImageTexture
 var _minimap: ImageTexture
 var _said_hello := false
 var _pending_mouse := {}
+## How far the main map was dragged since the game was last told, in game pixels.
+var _pending_drag := Vector2.ZERO
 var launch_error := ""
 var _debug := OS.has_environment("BN_BRIDGE_DEBUG")
 ## With `BN_BRIDGE_DEBUG=full`, messages print whole instead of cut to 300 characters.
@@ -148,6 +150,10 @@ func _process(_delta: float) -> void:
 	if not _pending_mouse.is_empty():
 		send(_pending_mouse)
 		_pending_mouse = {}
+	var dragged := Vector2i(_pending_drag)
+	if dragged != Vector2i.ZERO:
+		_pending_drag -= Vector2(dragged)
+		send({"t": "map", "dx": dragged.x, "dy": dragged.y})
 	_read()
 
 
@@ -271,6 +277,22 @@ func send_mouse(kind: String, pos: Vector2, button := 1, dy := 0) -> void:
 	if _debug:
 		print("mouse ", kind, " ", pos, " button ", button)
 	send({"t": "mouse", "e": kind, "x": int(pos.x), "y": int(pos.y), "b": button, "dy": dy})
+
+
+## Zooms the main map in (positive) or out by `steps`; it stops at either end.
+func zoom_map(steps: int) -> void:
+	send({"t": "map", "zoom": steps})
+
+
+## Drags the main map by `delta` game pixels. The game is told once a frame.
+func drag_map(delta: Vector2) -> void:
+	_pending_drag += delta
+
+
+## Puts the main map's view back on the player.
+func center_map() -> void:
+	_pending_drag = Vector2.ZERO
+	send({"t": "map", "center": true})
 
 
 ## Runs a game action (as named in the keybindings) by pressing the key bound to it.

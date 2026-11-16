@@ -62,6 +62,20 @@ auto write_tip( JsonOut &jsout, const tripoint_bub_ms &target ) -> void;
 /// How hurt a creature looks, in a word or two: "Uninjured" to "Nearly dead".
 auto health_word( const Creature &critter ) -> std::string;
 
+/// A change of the main map's view made with the mouse.
+struct view_change {
+    /// Zoom steps in (positive) or out (negative).
+    int zoom = 0;
+    /// How far the map was dragged, in screen pixels.
+    point drag;
+    /// Put the view back on the avatar.
+    bool center = false;
+};
+
+/// Zooms and moves the main map's view. Unlike the zoom keys the zoom stops at either end, and a
+/// drag moves the view by whole squares (what is left over counts toward the next drag).
+auto move_view( const view_change &change ) -> void;
+
 /// Compass direction of `offset` for the HUD: 0 to 7 clockwise from north, 8 for no offset.
 auto direction_index( point offset ) -> int;
 
