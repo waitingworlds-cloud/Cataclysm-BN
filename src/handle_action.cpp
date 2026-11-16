@@ -32,6 +32,7 @@
 #include "flag.h"
 #include "fstream_utils.h"
 #include "game.h" // IWYU pragma: associated
+#include "godot_bridge.h"
 #include "game_constants.h"
 #include "game_inventory.h"
 #include "gamemode.h"
@@ -389,6 +390,10 @@ input_context game::get_player_input( std::string &action )
             const bool weather_has_anim = init_weather_anim( get_weather().weather_id, wPrint );
 
             animate_weather = weather_has_anim && get_option<bool>( "ANIMATION_RAIN" );
+#if defined(TILES)
+            // The Godot front end draws the weather over the map itself.
+            animate_weather = animate_weather && !cata::godot_bridge::is_active();
+#endif
             animate_sct = !SCT.vSCT.empty() && uquit != QUIT_WATCH && get_option<bool>( "ANIMATION_SCT" );
 
 #if defined(TILES)

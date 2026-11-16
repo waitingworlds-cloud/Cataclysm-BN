@@ -3535,6 +3535,10 @@ void player_hit_message( Character *attacker, const std::string &message,
 
     if( dam > 0 && attacker->is_player() ) {
         //player hits monster melee
+#if defined(TILES)
+        cata::godot_bridge::note_damage( dam, static_cast<double>( std::max( t.get_hp(),
+                                         0 ) ) / std::max( t.get_hp_max(), 1 ) );
+#endif
         SCT.add( point( t.bub_pos().x(), t.bub_pos().y() ),
                  direction_from( point_zero, point( t.bub_pos().x() - attacker->bub_pos().x(),
                                  t.bub_pos().y() - attacker->bub_pos().y() ) ),

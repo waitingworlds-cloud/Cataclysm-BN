@@ -57,6 +57,8 @@ enum class message_kind : std::uint8_t {
     minimap = 3,
     /// A strip of tile sprites: `[u32 JSON length][JSON][image laid out like frame]`.
     sprites = 4,
+    /// The map view's per-tile data: `[u32 JSON length][JSON][image laid out like frame]`.
+    scene = 5,
 };
 
 struct pending_pick {
@@ -103,6 +105,13 @@ struct bridge_state {
     std::vector<std::string> sprites_wanted;
     std::vector<std::uint8_t> minimap_bytes;
     std::vector<std::uint8_t> sent_minimap;
+
+    scene_state scene;
+    std::string sent_scene_json;
+    std::vector<std::uint8_t> sent_scene_tiles;
+    /// Effects waiting for the next frame, each a JSON object.
+    std::vector<std::string> fx;
+    std::optional<damage_note> damage;
 };
 
 auto state() -> bridge_state & // *NOPAD*
@@ -332,6 +341,50 @@ auto read_image( SDL_Renderer *renderer, SDL_Texture *texture,
     }
     SDL_DestroySurface( rgba );
     return true;
+}
+
+} // namespace
+
+namespace
+{
+
+/// Sends the map view's scene ahead of its frame, when it changed.
+auto send_scene() -> void
+{
+    auto &s = state();
+    if( !main_view_visible() || s.scene.json.empty() ||
+        ( s.scene.json == s.sent_scene_json && s.scene.tiles == s.sent_scene_tiles ) ) {
+        return;
+    }
+    const auto &json = s.scene.json;
+    auto head = std::vector<std::uint8_t>( 4 + json.size() + 8 );
+    put_u32( head.data(), static_cast<std::uint32_t>( json.size() ) );
+    std::ranges::copy( json, head.begin() + 4 );
+    put_u32( head.data() + 4 + json.size(), static_cast<std::uint32_t>( s.scene.grid.x ) );
+    put_u32( head.data() + 8 + json.size(), static_cast<std::uint32_t>( s.scene.grid.y ) );
+    send_message( message_kind::scene, head.data(), head.size(), s.scene.tiles.data(),
+                  s.scene.tiles.size() );
+    s.sent_scene_json = json;
+    s.sent_scene_tiles = s.scene.tiles;
+}
+
+/// Sends the effects queued since the last frame.
+auto send_fx() -> void
+{
+    auto &s = state();
+    if( s.fx.empty() ) {
+        return;
+    }
+    auto text = std::string( R"({"t":"fx","list":[)" );
+    for( const auto &one : s.fx ) {
+        if( text.back() != '[' ) {
+            text += ',';
+        }
+        text += one;
+    }
+    text += "]}";
+    s.fx.clear();
+    send_json( text );
 }
 
 } // namespace
@@ -577,7 +630,38 @@ auto send_frame( SDL_Renderer *renderer, SDL_Texture *frame ) -> void
         return;
     }
     sync_screens();
+    send_scene();
+    send_fx();
     send_message( message_kind::frame, nullptr, 0, s.frame_bytes.data(), s.frame_bytes.size() );
+}
+
+auto set_scene( scene_state scene ) -> void
+{
+    state().scene = std::move( scene );
+}
+
+auto queue_fx( const std::function<void( JsonOut & )> &write_body ) -> void
+{
+    auto &s = state();
+    if( !s.link || s.fx.size() >= 64 ) {
+        return;
+    }
+    auto text = std::ostringstream();
+    auto jsout = JsonOut( text );
+    jsout.start_object();
+    write_body( jsout );
+    jsout.end_object();
+    s.fx.push_back( text.str() );
+}
+
+auto note_damage( const int damage, const double hp_left ) -> void
+{
+    state().damage = damage_note{ .damage = damage, .hp_left = hp_left };
+}
+
+auto take_damage_note() -> std::optional<damage_note>
+{
+    return std::exchange( state().damage, std::nullopt );
 }
 
 auto request_minimap() -> void

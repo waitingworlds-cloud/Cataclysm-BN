@@ -2009,6 +2009,31 @@ void scrollingcombattext::add( point pos, direction p_oDir,
     if( test_mode ) {
         return;
     }
+#if defined(TILES)
+    if( cata::godot_bridge::is_active() ) {
+        // The Godot front end floats these over the map itself.
+        static constexpr auto kinds = std::array<const char *, num_game_message_type> {
+            "good", "bad", "mixed", "warning", "info", "neutral", "debug", "headshot", "critical",
+            "grazing"
+        };
+        const auto note = cata::godot_bridge::take_damage_note();
+        cata::godot_bridge::queue_fx( [&]( JsonOut & jsout ) {
+            jsout.member( "k", "text" );
+            jsout.member( "x", pos.x );
+            jsout.member( "y", pos.y );
+            jsout.member( "a", p_sText );
+            jsout.member( "ak", kinds[p_gmt] );
+            jsout.member( "b", p_sText2 );
+            jsout.member( "bk", kinds[p_gmt2] );
+            jsout.member( "kind", p_sType );
+            if( note ) {
+                jsout.member( "dmg", note->damage );
+                jsout.member( "hp", note->hp_left );
+            }
+        } );
+        return;
+    }
+#endif
     if( get_option<bool>( "ANIMATION_SCT" ) ) {
 
         int iCurStep = 0;

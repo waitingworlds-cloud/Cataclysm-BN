@@ -128,6 +128,7 @@ func _restyle() -> void:
 	var sb: StyleBoxFlat
 	if _primary:
 		sb = Slate.box(Slate.ACCENT.lightened(0.3) if hot else Slate.ACCENT, 14, Slate.BORDER, 0)
+		Fx.glow(sb, Slate.ACCENT, 12 if hot else 8, 0.42 if hot else 0.3)
 	elif _on:
 		sb = Slate.box(Color(Slate.CYAN, 0.3 if hot else 0.22), 0, Color(Slate.CYAN, 0.9), 1)
 	else:

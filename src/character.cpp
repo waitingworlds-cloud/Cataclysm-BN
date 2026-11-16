@@ -10162,6 +10162,10 @@ dealt_damage_instance Character::deal_damage( Creature *source, bodypart_id bp,
 
         if( is_player() && source ) {
             //monster hits player melee
+#if defined(TILES)
+            cata::godot_bridge::note_damage( dam, static_cast<double>( std::max( get_part_hp_cur( bp ),
+                                             0 ) ) / std::max( get_part_hp_max( bp ), 1 ) );
+#endif
             SCT.add( point( bub_pos().x(), bub_pos().y() ),
                      direction_from( point_zero, point( bub_pos().x() - source->bub_pos().x(),
                                      bub_pos().y() - source->bub_pos().y() ) ),

@@ -19,6 +19,7 @@
 #    include "game_ui.h"
 #    include "get_version.h"
 #    include "godot_bridge.h"
+#    include "godot_scene.h"
 #    include "hash_utils.h"
 #    include "input.h"
 #    include "json.h"
@@ -1736,6 +1737,15 @@ void cata_cursesport::curses_drawwindow( const catacurses::window &w )
             TERRAIN_WINDOW_TERM_HEIGHT * font->height,
             overlay_strings,
             color_blocks );
+        if( cata::godot_bridge::is_active() && !tile_iso ) {
+            cata::godot_scene::publish( {
+                .at = point( win->pos.x * fontwidth, win->pos.y * fontheight ),
+                .center = g->ter_view_p,
+                .tile = point( tilecontext->get_tile_width(), tilecontext->get_tile_height() ),
+                .size = point( TERRAIN_WINDOW_TERM_WIDTH * font->width,
+                               TERRAIN_WINDOW_TERM_HEIGHT * font->height ),
+            } );
+        }
 
         // color blocks overlay
         if( !color_blocks.second.empty() ) {

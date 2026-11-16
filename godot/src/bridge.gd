@@ -4,7 +4,7 @@ extends Node
 ## Godot listens on a local port, starts the game with BN_GODOT_BRIDGE pointing at it, then
 ## exchanges length-prefixed messages over the socket:
 ##   game -> Godot: [u32 length][u8 kind][payload]; kind 1 = frame, 2 = JSON, 3 = minimap,
-##   4 = sprites ([u32 JSON length][JSON][image])
+##   4 = sprites ([u32 JSON length][JSON][image]), 5 = scene (the same layout)
 ##   Godot -> game: [u32 length][JSON]
 ## See README.md for the message types.
 
@@ -19,12 +19,18 @@ signal view_closed(id: int)
 signal commands_received(list: Array, suggested: Array)
 ## A strip of tile sprites the game drew for `Sprites`: `meta` lists the ids, left to right.
 signal sprites_received(meta: Dictionary, strip: Image)
+## What the map view shows: `meta` is the `scene` message, `tiles` has one pixel per tile (light,
+## visibility, flags).
+signal scene_received(meta: Dictionary, tiles: Image)
+## One-off effects to play over the map (hits, floating text).
+signal fx_received(list: Array)
 signal game_exited(reason: String)
 
 const KIND_FRAME := 1
 const KIND_JSON := 2
 const KIND_MINIMAP := 3
 const KIND_SPRITES := 4
+const KIND_SCENE := 5
 
 var _server := TCPServer.new()
 var _peer: StreamPeerTCP
@@ -32,6 +38,8 @@ var _pid := -1
 var _buf := PackedByteArray()
 var _pos := 0
 var _texture: ImageTexture
+## The frame before the current one; the two textures take turns, so both stay on the GPU.
+var _texture_before: ImageTexture
 var _minimap: ImageTexture
 var _said_hello := false
 var _pending_mouse := {}
@@ -175,7 +183,9 @@ func _read() -> void:
 		var start := _pos + 5
 		var end := _pos + 4 + length
 		if kind == KIND_FRAME:
-			_texture = _decode_image(start, end, _texture)
+			var target := _texture_before
+			_texture_before = _texture
+			_texture = _decode_image(start, end, target)
 			if _texture != null:
 				frame_received.emit(_texture)
 		elif kind == KIND_MINIMAP:
@@ -186,6 +196,8 @@ func _read() -> void:
 			_on_json(_buf.slice(start, end).get_string_from_utf8())
 		elif kind == KIND_SPRITES:
 			_on_sprites(start, end)
+		elif kind == KIND_SCENE:
+			_on_scene(start, end)
 		_pos = end
 	if _pos > 0 and _pos >= _buf.size():
 		_buf.clear()
@@ -225,6 +237,27 @@ func _on_sprites(start: int, end: int) -> void:
 	sprites_received.emit(meta, Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, pixels))
 
 
+## The frame shown before the current one, or null when there is none of the same size.
+func frame_before() -> ImageTexture:
+	if _texture == null or _texture_before == null or _texture_before.get_size() != _texture.get_size():
+		return null
+	return _texture_before
+
+
+func _on_scene(start: int, end: int) -> void:
+	var json_size := _buf.decode_u32(start)
+	var meta = JSON.parse_string(_buf.slice(start + 4, start + 4 + json_size).get_string_from_utf8())
+	var at := start + 4 + json_size
+	if typeof(meta) != TYPE_DICTIONARY or end - at < 8:
+		return
+	var width := _buf.decode_u32(at)
+	var height := _buf.decode_u32(at + 4)
+	var pixels := _buf.slice(at + 8, end)
+	if width <= 0 or height <= 0 or pixels.size() != width * height * 4:
+		return
+	scene_received.emit(meta, Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, pixels))
+
+
 func _on_json(text: String) -> void:
 	var msg = JSON.parse_string(text)
 	if typeof(msg) != TYPE_DICTIONARY:
@@ -250,6 +283,8 @@ func _on_json(text: String) -> void:
 			entries_received.emit(int(msg.get("id", 0)), msg.get("entries", []))
 		"close":
 			view_closed.emit(int(msg.get("id", 0)))
+		"fx":
+			fx_received.emit(msg.get("list", []))
 		"commands":
 			commands_received.emit(msg.get("list", []), msg.get("suggested", []))
 
