@@ -32,9 +32,9 @@ uniform float rain = 0.0;
 uniform float snow = 0.0;
 
 float hash(vec2 p) {
-	p = fract(p * vec2(123.34, 456.21));
-	p += dot(p, p + 45.32);
-	return fract(p.x * p.y);
+	vec3 q = fract(vec3(p.xyx) * 0.1031);
+	q += dot(q, q.yzx + 33.33);
+	return fract((q.x + q.y) * q.z);
 }
 float noise(vec2 p) {
 	vec2 i = floor(p);
@@ -236,7 +236,7 @@ var _health := {}
 var _lost: Array = []
 var _on := false
 var _debug := OS.has_environment("BN_FX_DEBUG")
-## Stretches the glide for looking at it frame by frame (development only).
+## Slows every effect down for looking at it frame by frame (development only).
 var _slow := float(OS.get_environment("BN_FX_SLOW")) if OS.has_environment("BN_FX_SLOW") else 1.0
 var _frames := 0
 var _debug_at := 0.0
@@ -270,7 +270,7 @@ func place(rect: Rect2, overlay: bool, lighting: bool) -> void:
 
 
 func _now() -> float:
-	return Time.get_ticks_msec() / 1000.0
+	return Time.get_ticks_msec() / 1000.0 / _slow
 
 
 func _vec(value, fallback := Vector2.ZERO) -> Vector2:
@@ -378,7 +378,7 @@ func _on_frame(_texture: ImageTexture) -> void:
 
 
 func _glide_now(now: float) -> Vector2:
-	var t := (now - _glide_start) / (GLIDE_TIME * _slow)
+	var t := (now - _glide_start) / GLIDE_TIME
 	if t >= 1.0 or t < 0.0:
 		return Vector2.ZERO
 	var k := 1.0 - t
@@ -403,7 +403,7 @@ func _process(_delta: float) -> void:
 	glide = (glide * per).round() / per
 	_material.set_shader_parameter("glide", glide)
 	_material.set_shader_parameter("shake", (_shake_now(now) * per).round() / per)
-	_material.set_shader_parameter("blend", clampf((now - _blend_start) / (BLEND_TIME * _slow), 0.0, 1.0))
+	_material.set_shader_parameter("blend", clampf((now - _blend_start) / BLEND_TIME, 0.0, 1.0))
 	if _debug:
 		_frames += 1
 		if now - _debug_at >= 1.0:
@@ -435,7 +435,8 @@ func _on_fx(list: Array) -> void:
 			"hit":
 				var you := bool(fx.get("you", false))
 				var dead := bool(fx.get("dead", false))
-				_flashes.append({"cell": cell, "color": Slate.DANGER if you else Color.WHITE, "born": now, "dead": dead})
+				_flashes.append({"cell": cell, "color": Slate.DANGER if you else Color.WHITE, "born": now, "dead": dead,
+						"angle": -0.9 + randf() * 0.7 + (PI / 2 if randf() < 0.5 else 0.0)})
 				if you:
 					_hurt_at = now
 					_shake(2.2, 0.26)
@@ -497,13 +498,21 @@ func _draw() -> void:
 	for f in _flashes:
 		var age: float = now - f["born"]
 		var at := _tile_at(f["cell"])
-		var k := clampf(1.0 - age / 0.16, 0.0, 1.0)
+		var mid := at + unit / 2
+		var color: Color = f["color"]
+		# A slash across the tile and a burst of light behind it.
+		var k := clampf(1.0 - age / 0.2, 0.0, 1.0)
 		if k > 0.0:
-			draw_rect(Rect2(at, unit), Color(f["color"], 0.55 * k * k))
+			for i in 5:
+				draw_circle(mid, unit.x * (0.62 - 0.1 * i), Color(color, 0.09 * k * k))
+			var lean := Vector2.from_angle(float(f["angle"]))
+			var reach := unit.x * (0.35 + 0.45 * (1.0 - k))
+			draw_line(mid - lean * reach, mid + lean * reach, Color(color, 0.95 * k), maxf(unit.x * 0.07 * k, 1.0), true)
+			draw_line(mid - lean * reach * 0.7, mid + lean * reach * 0.7, Color(1, 1, 1, k), maxf(unit.x * 0.025, 1.0), true)
 		if f["dead"]:
 			var r := age / 0.45
 			var ring := Color(Slate.DANGER, 0.7 * (1.0 - r))
-			draw_arc(at + unit / 2, unit.x * (0.3 + 0.7 * r), 0, TAU, 40, ring, maxf(2.0 * (1.0 - r), 0.6), true)
+			draw_arc(mid, unit.x * (0.3 + 0.7 * r), 0, TAU, 40, ring, maxf(2.0 * (1.0 - r), 0.6), true)
 	_draw_health(now, unit)
 	var font := Slate.heavy()
 	var small := Slate.bold()

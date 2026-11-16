@@ -16,9 +16,9 @@ uniform float scale = 1.0;
 uniform float lines = 0.10;
 uniform float grain = 0.045;
 float hash(vec2 p) {
-	p = fract(p * vec2(123.34, 456.21));
-	p += dot(p, p + 45.32);
-	return fract(p.x * p.y);
+	vec3 q = fract(vec3(p.xyx) * 0.1031);
+	q += dot(q, q.yzx + 33.33);
+	return fract((q.x + q.y) * q.z);
 }
 void fragment() {
 	vec2 p = FRAGCOORD.xy;

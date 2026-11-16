@@ -786,6 +786,10 @@ void game::draw_hit_mon( const tripoint_bub_ms &p, const monster &m, const bool 
         jsout.member( "dead", dead );
         jsout.member( "you", false );
     } );
+    if( cata::godot_bridge::is_active() ) {
+        // The Godot front end plays the hit over the map; the game does not stop for it.
+        return;
+    }
 
     shared_ptr_fast<draw_callback_t> hit_cb = make_shared_fast<draw_callback_t>( [&]() {
         tilecontext->init_draw_hit( p, m.type->id.str() );
@@ -840,6 +844,9 @@ void game::draw_hit_player( const Character &p, const int dam )
         jsout.member( "you", p.is_player() );
         jsout.member( "dmg", dam );
     } );
+    if( cata::godot_bridge::is_active() ) {
+        return;
+    }
 
     shared_ptr_fast<draw_callback_t> hit_cb = make_shared_fast<draw_callback_t>( [&]() {
         tilecontext->init_draw_hit( p.bub_pos(), type );
