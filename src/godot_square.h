@@ -76,6 +76,13 @@ struct view_change {
 /// drag moves the view by whole squares (what is left over counts toward the next drag).
 auto move_view( const view_change &change ) -> void;
 
+/// Adds a drag of the overmap screen with the middle button, in screen pixels.
+auto drag_overmap( point drag ) -> void;
+
+/// How many overmap squares the view should move for the drags since the last call (the map
+/// follows the hand); taking it clears it. Pixels that don't make a whole square are kept.
+auto take_overmap_drag() -> point;
+
 /// Compass direction of `offset` for the HUD: 0 to 7 clockwise from north, 8 for no offset.
 auto direction_index( point offset ) -> int;
 

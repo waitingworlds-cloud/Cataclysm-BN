@@ -9,6 +9,7 @@
 #    include "cata_tiles.h"
 #    include "godot_bridge.h"
 #    include "godot_screen.h"
+#    include "godot_square.h"
 #endif // TILES
 #include "../ime.h"
 #include "cata_utility.h"
@@ -1579,7 +1580,8 @@ auto write_side_panel(JsonOut& jsout, const std::string& title, const std::strin
     // Where the map is drawn, in pixels: the front end centers this in its viewport.
     const auto window = cata::godot_bridge::window_size();
     if (window.x > 0 && TERMX > 0) {
-        jsout.member("view", std::array{0, 0, OVERMAP_WINDOW_TERM_WIDTH * window.x / TERMX, window.y});
+        jsout.member("view",
+                     std::array{0, 0, OVERMAP_WINDOW_TERM_WIDTH * window.x / TERMX, window.y});
     }
 }
 
@@ -2341,7 +2343,11 @@ static auto display(const tripoint_abs_omt& orig, const draw_data_t& data = draw
         cata::godot_bridge::native_screens()
             ? std::make_unique<cata::godot_bridge::native_view>("screen", &ui, "OVERMAP")
             : nullptr;
-    if (native) { native->attach(ui); }
+    if (native) {
+        native->attach(ui);
+        // Drags made on other screens don't count here.
+        cata::godot_square::take_overmap_drag();
+    }
 #endif
     ui.on_screen_resize([&](ui_adaptor& ui) {
         /**
@@ -2453,6 +2459,10 @@ static auto display(const tripoint_abs_omt& orig, const draw_data_t& data = draw
         action = ictxt.handle_input(scroll_timeout);
 #else
         action = ictxt.handle_input(get_option<int>("BLINK_SPEED"));
+#endif
+#if defined(TILES)
+        // Dragged with the middle mouse button: the map follows the hand.
+        if (native) { curs += cata::godot_square::take_overmap_drag(); }
 #endif
         if (const std::optional<tripoint_rel_ms> vec = ictxt.get_direction(action)) {
             int scroll_d = fast_scroll ? fast_scroll_offset : 1;

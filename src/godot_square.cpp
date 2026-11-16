@@ -252,6 +252,36 @@ auto cata::godot_square::move_view( const view_change &change ) -> void
     }
 }
 
+namespace
+{
+
+auto overmap_dragged() -> point & // *NOPAD*
+{
+    static auto dragged = point();
+    return dragged;
+}
+
+} // namespace
+
+auto cata::godot_square::drag_overmap( const point drag ) -> void
+{
+    overmap_dragged() += drag;
+}
+
+auto cata::godot_square::take_overmap_drag() -> point
+{
+    auto &rest = overmap_dragged();
+    if( !overmap_tilecontext ) {
+        rest = point();
+        return point();
+    }
+    const auto square = point( std::max( overmap_tilecontext->get_tile_width(), 1 ),
+                               std::max( overmap_tilecontext->get_tile_height(), 1 ) );
+    const auto squares = point( rest.x / square.x, rest.y / square.y );
+    rest -= point( squares.x * square.x, squares.y * square.y );
+    return -squares;
+}
+
 auto cata::godot_square::direction_index( const point offset ) -> int
 {
     if( offset == point_zero ) {

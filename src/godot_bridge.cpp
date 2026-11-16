@@ -510,11 +510,17 @@ auto translate_event( SDL_Event &ev ) -> event_result
         }
         if( type == "map" ) {
             // The mouse wheel and the middle button on the main map: zoom, drag, back to the avatar.
-            cata::godot_square::move_view( {
-                .zoom = obj.get_int( "zoom", 0 ),
-                .drag = point( obj.get_int( "dx", 0 ), obj.get_int( "dy", 0 ) ),
-                .center = obj.get_bool( "center", false ),
-            } );
+            // With another map over it (the overmap screen), a drag is that screen's to take.
+            const auto drag = point( obj.get_int( "dx", 0 ), obj.get_int( "dy", 0 ) );
+            if( main_view_visible() ) {
+                cata::godot_square::move_view( {
+                    .zoom = obj.get_int( "zoom", 0 ),
+                    .drag = drag,
+                    .center = obj.get_bool( "center", false ),
+                } );
+            } else {
+                cata::godot_square::drag_overmap( drag );
+            }
             return press_action( "", "DEFAULTMODE" );
         }
         if( type == "sprites" ) {

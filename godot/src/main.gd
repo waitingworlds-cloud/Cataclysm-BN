@@ -338,13 +338,14 @@ func _on_frame_input(event: InputEvent) -> void:
 		if _main_view and mb.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 			if mb.pressed:
 				Bridge.zoom_map(1 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
-		elif mb.button_index == MOUSE_BUTTON_MIDDLE and (_main_view or _map_grabbed):
+		elif mb.button_index == MOUSE_BUTTON_MIDDLE:
+			# The big Map screen is dragged the same way; the game knows which map is up.
 			if mb.pressed:
 				_map_grabbed = true
 				_grab_at = mb.position
 				_grab_moved = 0.0
 			else:
-				if _map_grabbed and _grab_moved < 4.0:
+				if _map_grabbed and _grab_moved < 4.0 and _main_view:
 					Bridge.center_map()
 				_map_grabbed = false
 			frame_view.mouse_default_cursor_shape = Control.CURSOR_DRAG if _map_grabbed else Control.CURSOR_ARROW
