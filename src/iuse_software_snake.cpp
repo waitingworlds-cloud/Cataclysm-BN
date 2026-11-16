@@ -1,6 +1,7 @@
 #include "iuse_software_snake.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -11,6 +12,10 @@
 #include "catacharset.h"  // utf8_width()
 #include "color.h"
 #include "cursesdef.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "output.h"
 #include "point.h"
@@ -91,6 +96,14 @@ int snake_game::start_game()
 
     catacurses::window w_snake;
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot draws the playing field as a board; the snake still steers with the keys.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "SNAKE" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         const point iOffset( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0,
                              TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 : 0 );
@@ -99,6 +112,12 @@ int snake_game::start_game()
                                       iOffset );
 
         ui.position_from_window( w_snake );
+#if defined(TILES)
+        if( native ) {
+            w_snake = cata::godot_bridge::capture_window( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH );
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -127,6 +146,40 @@ int snake_game::start_game()
     ctxt.register_action( "QUIT" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
+#if defined(TILES)
+    // The field inside the border; the score moves from the border to a stat.
+    const auto publish_native = [&]( const bool over ) {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "SNAKE" );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Snake" ) );
+            jsout.member( "icon", "worm" );
+            jsout.member( "size", std::array{ 1060, 760 } );
+            jsout.member( "stats" );
+            jsout.start_array();
+            gs::write_stat( jsout, { .icon = "trophy", .label = over ? _( "Total score" ) : _( "Score" ), .value = { .text = std::to_string( iScore ), .color = over ? c_yellow : c_white } } );
+            jsout.end_array();
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "cell", 18 );
+            jsout.member( "fill", "#" );
+            jsout.member( "dot", "*" );
+            jsout.member( "grid" );
+            cata::godot_bridge::write_window_grid( jsout, w_snake, { .at = point_south_east, .size = point( FULL_SCREEN_WIDTH - 2, FULL_SCREEN_HEIGHT - 2 ) } );
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "hints" );
+            jsout.start_array();
+            if( !over ) {
+                gs::write_fixed_hint( jsout, "↑↓←→", _( "Steer" ) );
+            }
+            gs::write_hint( jsout, "QUIT", category, over ? _( "Exit" ) : _( "Quit" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
         werase( w_snake );
         print_header( w_snake );
@@ -139,6 +192,11 @@ int snake_game::start_game()
         }
         print_score( w_snake, iScore );
         wnoutrefresh( w_snake );
+#if defined(TILES)
+        if( native ) {
+            publish_native( false );
+        }
+#endif
     } );
 
     do {
@@ -236,6 +294,11 @@ int snake_game::start_game()
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
         snake_over( w_snake, iScore );
+#if defined(TILES)
+        if( native ) {
+            publish_native( true );
+        }
+#endif
     } );
     do {
         ui_manager::redraw();

@@ -13,6 +13,15 @@
 #include "uistate.h"
 
 #include <algorithm>
+#include <array>
+#include <ranges>
+
+#if defined(TILES)
+#   include "color.h"
+#   include "godot_bridge.h"
+#   include "godot_screen.h"
+#   include "json.h"
+#endif
 
 namespace cata
 {
@@ -82,6 +91,19 @@ auto build_numbered_prompt_lines( const std::string &text, const int content_wid
     }
     return lines;
 }
+
+#if defined(TILES)
+/// Writes `text` as one span, as the console prints it: color tags in Lua output stay literal.
+auto write_plain_span( JsonOut &jsout, const std::string &text, const nc_color &color ) -> void
+{
+    jsout.start_array();
+    jsout.start_array();
+    jsout.write( text );
+    jsout.write( string_from_color( color ) );
+    jsout.end_array();
+    jsout.end_array();
+}
+#endif
 
 } // namespace
 
@@ -154,7 +176,7 @@ void show_lua_console_impl()
     ctxt.register_action( "HELP_KEYBINDINGS" );
     ctxt.register_action( "EDIT" );
     ctxt.register_action( "QUIT" );
-    ctxt.register_action( "LUA_RELOAD" );
+    ctxt.register_action( "RELOAD" );
     ctxt.register_action( "TOGGLE_EXPANDED" );
     ctxt.register_action( "HISTORY_UP" );
     ctxt.register_action( "HISTORY_DOWN" );
@@ -207,6 +229,15 @@ void show_lua_console_impl()
 
     auto is_editing = false;
 
+#if defined(TILES)
+    // Godot draws the console as a screen: the output, the command and the console's keys.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &ui, "LUA_CONSOLE" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
+
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         win_size = point( TERMX, TERMY );
         win_pos = point( ( TERMX - win_size.x ) / 2, ( TERMY - win_size.y ) / 2 );
@@ -218,11 +249,119 @@ void show_lua_console_impl()
         w_console = catacurses::newwin( win_size.y, win_size.x, win_pos );
         w_log = catacurses::newwin( log_size.y, log_size.x, log_pos );
         w_prompt = catacurses::newwin( prompt_size.y, prompt_size.x, prompt_pos );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         ui.position_from_window( w_console );
     } );
     ui.mark_resize();
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto &entries = get_lua_log_instance().get_entries();
+        // The old window scrolls by folded lines up from the newest; find the entry at the top of that view.
+        auto top_entry = std::optional<int>();
+        if( log_scroll_pos > 0 ) {
+            auto lines = 0;
+            for( const auto &[i, msg] : entries | std::views::enumerate ) {
+                lines += static_cast<int>( foldstring( msg.text, 76 ).size() );
+                if( lines >= log_scroll_pos + log_size.y || i + 1 == std::ssize( entries ) ) {
+                    top_entry = static_cast<int>( std::ssize( entries ) - 1 - i );
+                    break;
+                }
+            }
+        }
+        const auto browsing = history_cursor != CURRENT_INPUT;
+        const auto &command = browsing ? get_input_history()[history_cursor] : current_input;
+        const auto category = std::string( "LUA_CONSOLE" );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Lua console" ) );
+            jsout.member( "icon", "terminal" );
+            jsout.member( "size", std::array{ 1280, 900 } );
+            jsout.member( "toggles" );
+            jsout.start_array();
+            gs::write_toggle( jsout, { .act = "TOGGLE_EXPANDED", .text = _( "Tall editor" ), .icon = "unfold-vertical", .category = category },
+                              use_expanded_view );
+            jsout.end_array();
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Output" ) );
+            jsout.member( "icon", "scroll-text" );
+            jsout.member( "count", std::to_string( entries.size() ) );
+            if( top_entry ) {
+                jsout.member( "scroll_entry", *top_entry );
+            } else {
+                jsout.member( "scroll_end", true );
+            }
+            jsout.member( "entries" );
+            jsout.start_array();
+            for( const auto &msg : entries | std::views::reverse ) {
+                jsout.start_object();
+                jsout.member( "text" );
+                // Commands stand out with a prompt mark, as in the old window.
+                write_plain_span( jsout, msg.level == LuaLogLevel::Input ? "> " + msg.text : msg.text,
+                                  get_log_level_color( msg.level ) );
+                jsout.end_object();
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 520 );
+            jsout.member( "share", 0.4 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = browsing ? string_format( _( "Command %d of %d" ), history_cursor + 1, num_history_entries() ) : _( "Command" ), .color = c_white } );
+            jsout.member( "subtitle", browsing ? _( "From history" ) : command.empty() ? "" :
+                          _( "Not run yet" ) );
+            if( !command.empty() ) {
+                jsout.member( "body" );
+                write_plain_span( jsout, command, c_light_gray );
+                jsout.member( "mono", true );
+            }
+            jsout.member( "empty", _( "Nothing written yet." ) );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "EDIT", .text = command.empty() ? _( "Write a command" ) : _( "Edit and run" ), .icon = "pencil", .category = category, .primary = true } );
+            gs::write_button( jsout, { .act = "HISTORY_UP", .text = _( "Older command" ), .icon = "chevron-up", .category = category,
+                                       .enabled = num_history_entries() > 0 && history_cursor != 0
+                                     } );
+            gs::write_button( jsout, { .act = "HISTORY_DOWN", .text = _( "Newer command" ), .icon = "chevron-down", .category = category,
+                                       .enabled = browsing
+                                     } );
+            gs::write_button( jsout, { .act = "RELOAD", .text = _( "Reload Lua" ), .icon = "refresh-cw", .category = category } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_hint( jsout, "EDIT", category, _( "Edit" ) );
+            gs::write_hint( jsout, "HISTORY_UP", category, _( "Older" ) );
+            gs::write_hint( jsout, "HISTORY_DOWN", category, _( "Newer" ) );
+            gs::write_hint( jsout, "SCROLL_UP", category, _( "Scroll up" ) );
+            gs::write_hint( jsout, "SCROLL_DOWN", category, _( "Scroll down" ) );
+            gs::write_hint( jsout, "SCROLL_TOP", category, _( "Oldest" ) );
+            gs::write_hint( jsout, "SCROLL_BOTTOM", category, _( "Newest" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         werase( w_console );
         draw_border( w_console );
         std::string separator;
@@ -402,7 +541,9 @@ void show_lua_console_impl()
                 // Canceled, save input for later use
                 current_input = res.second;
             }
-        } else if( act == "LUA_RELOAD" ) {
+            // Godot draws the editor, so closing it frees no part of the console that would redraw it.
+            ui.invalidate_ui();
+        } else if( act == "RELOAD" ) {
             ui.invalidate_ui();
             log_invalidated = true;
             reload_lua_code();

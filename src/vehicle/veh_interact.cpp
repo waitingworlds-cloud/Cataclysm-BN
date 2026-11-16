@@ -16,6 +16,10 @@
 #include "fault.h"
 #include "game.h"
 #include "game_constants.h"
+#if defined(TILES)
+#    include "godot_bridge.h"
+#    include "godot_screen.h"
+#endif
 #include "handle_liquid.h"
 #include "item.h"
 #include "item_contents.h"
@@ -61,6 +65,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <regex>
 #include <set>
 #include <string>
 #include <utility>
@@ -89,6 +94,186 @@ static const activity_id ACT_VEHICLE("ACT_VEHICLE");
 static const std::string flag_MOUNTABLE("MOUNTABLE");
 
 namespace {
+
+#if defined(TILES)
+/// Width of the Godot side panel, in pixels.
+constexpr auto godot_panel_width = 720;
+/// Terminal columns the vehicle view leaves free at the right for the Godot front end.
+constexpr auto godot_disp_margin = 2;
+
+/// The parts on one square of a vehicle, for the Godot side panel.
+struct parts_here_options {
+    vehicle& veh;
+    /// Any part on the square.
+    int part = -1;
+    /// Place in the square's list of the part an action is about, or -1.
+    int highlight = -1;
+    /// Adds what each part does below its name.
+    bool describe = true;
+    /// Place in the list to bring into view (the keys that page through the descriptions).
+    int scroll_to = 0;
+};
+
+/// A word for how damaged a part is, for players who do not know the `|\` marks.
+auto condition_name(const vehicle_part& vp) -> std::string {
+    if (vp.is_broken()) { return _("Broken"); }
+    switch (vp.damage_level(4)) {
+        case 0:
+            return _("Intact");
+        case 1:
+            return _("Scuffed");
+        case 2:
+            return _("Damaged");
+        case 3:
+            return _("Badly damaged");
+        case 4:
+            return _("Nearly broken");
+        default:
+            return _("Reinforced");
+    }
+}
+
+/// Writes the parts on a square as one row each: picture, name, kind, condition, contents and
+/// what the part does.
+/// One line of the vehicle's stats ("Mass:  1200 kg", color tags and padding included) as a
+/// label and a value.
+auto write_stat_line(JsonOut& jsout, const std::string& line) -> void {
+    static const auto blanks = std::regex(R"(\s+)");
+    static const auto after_tag = std::regex(R"((<color_[a-z_]+>) )");
+    const auto colon = line.find(':');
+    const auto has_label = colon != std::string::npos && line.find('<') > colon;
+    const auto value = std::regex_replace(
+        std::regex_replace(has_label ? line.substr(colon + 1) : line, blanks, " "), after_tag,
+        "$1");
+    jsout.start_object();
+    jsout.member("label", has_label ? line.substr(0, colon) : std::string());
+    jsout.member("value");
+    cata::godot_screen::write_span(jsout, {.text = trim(value)});
+    jsout.end_object();
+}
+
+/// Every fuel the vehicle carries as a gauge: its name, color and how full it is, with the
+/// game's own readout beside it (percent, use per hour, time until empty or full).
+auto write_fuel_gauges(JsonOut& jsout, vehicle& veh) -> void {
+    const auto fuels = veh.get_printable_fuel_types();
+    // The game prints at most twelve gauges at a time.
+    const auto shown = std::min(static_cast<int>(fuels.size()), 12);
+    const auto readout_width = 100;
+    const auto readout = cata::godot_bridge::capture_window(std::max(shown, 1), readout_width);
+    veh.print_fuel_indicators(readout, point_zero, 0, true, true, false, true);
+    // The readout starts after the game's own five letter gauge.
+    const auto gauge_width = 6;
+    jsout.member("gauges");
+    jsout.start_array();
+    for (auto i = 0; i < static_cast<int>(fuels.size()); i++) {
+        const auto& fuel = fuels[i];
+        const auto capacity = veh.fuel_capacity(fuel);
+        jsout.start_object();
+        jsout.member("name", item::nname(fuel));
+        jsout.member("color", string_from_color(fuel->color));
+        jsout.member("level",
+                     capacity > 0 ? static_cast<double>(veh.fuel_left(fuel)) / capacity : 0.0);
+        if (i < shown) {
+            jsout.member("detail");
+            cata::godot_bridge::write_window_grid(
+                jsout, readout,
+                {.at = point(gauge_width, i), .size = point(readout_width - gauge_width, 1)});
+        }
+        jsout.end_object();
+    }
+    jsout.end_array();
+}
+
+auto write_parts_here(JsonOut& jsout, const parts_here_options& opts) -> void {
+    auto& veh = opts.veh;
+    if (opts.part < 0 || opts.part >= veh.part_count()) { return; }
+    const auto here = veh.parts_at_relative(veh.part(opts.part).mount, true);
+    if (here.empty()) { return; }
+    const auto place = vpart_position(veh, here.front());
+    jsout.start_object();
+    jsout.member("title", _("Parts here"));
+    jsout.member("tag", place.is_inside() ? _("Interior") : _("Exterior"));
+    if (const auto label = place.get_label()) {
+        jsout.member("label", string_format(_("Label: %s"), *label));
+    }
+    jsout.member("scroll_to", opts.scroll_to);
+    jsout.member("parts");
+    jsout.start_array();
+    auto row = 0;
+    for (const auto index : here) {
+        const auto& vp = veh.part(index);
+        const auto& info = vp.info();
+        jsout.start_object();
+        jsout.member("type", "vp_" + info.get_id().str());
+        jsout.member(
+            "sym",
+            utf32_to_utf8(static_cast<uint32_t>(vp.is_broken() ? info.sym_broken : info.sym)));
+        jsout.member("sym_color",
+                     string_from_color(vp.is_broken() ? info.color_broken : info.color));
+        jsout.member("name", vp.name(false));
+        if (veh.part_flag(index, "ARMOR")) {
+            jsout.member("kind", _("Armor"));
+        } else if (info.location == "structure") {
+            jsout.member("kind", _("Structure"));
+        }
+        jsout.member("state", condition_name(vp));
+        // 0 intact to 4 nearly broken, 5 broken, below 0 reinforced.
+        jsout.member("level", vp.is_broken() ? 5 : vp.damage_level(4));
+        jsout.member("health", vp.is_broken() ? 0.0 : std::clamp(vp.health_percent(), 0.0, 1.0));
+        auto notes = std::vector<std::string>{};
+        if (vp.is_fuel_store() && !vp.ammo_current().is_null()) {
+            if (vp.ammo_current() == itype_battery) {
+                notes.push_back(
+                    string_format(_("%s/%s charge"), vp.ammo_remaining(), vp.ammo_capacity()));
+            } else {
+                const auto stack = units::legacy_volume_factor / vp.ammo_current()->stack_size;
+                notes.push_back(string_format(
+                    _("%.1fL %s"), round_up(units::to_liter(vp.ammo_remaining() * stack), 1),
+                    item::nname(vp.ammo_current())));
+            }
+        }
+        if (veh.part_flag(index, "CARGO")) {
+            notes.push_back(string_format(
+                _("Holds %s/%s %s"), format_volume(veh.stored_volume(index)),
+                format_volume(veh.max_volume(index)), volume_units_abbr()));
+        }
+        if (!notes.empty()) { jsout.member("note", join(notes, "  ·  ")); }
+        jsout.member("selected", row == opts.highlight);
+        if (opts.describe) {
+            auto text = std::string{};
+            info.format_description(text, c_light_gray, 2000);
+            // Without the "Description" heading and the "> " mark: the row is the heading.
+            if (const auto mark = text.find("\n> "); mark != std::string::npos) {
+                text = text.substr(mark + 3);
+            }
+            if (vp.has_flag(vehicle_part::carrying_flag)) {
+                text += _("Carrying a vehicle on a rack.\n");
+            }
+            if (vp.has_flag(vehicle_part::carried_flag)) {
+                text += string_format(_("Part of a %s carried on a rack.\n"), vp.carried_name());
+            }
+            jsout.member("desc");
+            cata::godot_bridge::write_spans(jsout, text, c_light_gray);
+        }
+        jsout.end_object();
+        ++row;
+    }
+    jsout.end_array();
+    jsout.end_object();
+}
+#endif
+
+/// Where the second and third columns of the vehicle stats start.
+struct stats_columns {
+    int second = 0;
+    int third = 0;
+};
+
+auto get_stats_columns() -> stats_columns {
+    // see exec()
+    const int extraw = ((TERMX - FULL_SCREEN_WIDTH) / 4) * 2;
+    return {.second = 33 + (extraw / 4), .third = 65 + (extraw / 2)};
+}
 
 auto spawn_debug_install_base(const vpart_info& vpinfo) -> detached_ptr<item> {
     auto spawned = item::spawn(vpinfo.item);
@@ -253,6 +438,7 @@ veh_interact::veh_interact(vehicle& veh, tripoint_mnt_veh p)
     main_context.register_action("FILTER");
     main_context.register_action("ZOOM_IN");
     main_context.register_action("ZOOM_OUT");
+    main_context.register_action("SELECT");
     main_context.register_action("ANY_INPUT");
 
     count_durability();
@@ -312,6 +498,21 @@ void veh_interact::allocate_windows() {
     w_stats = catacurses::newwin(stats_h, grid_w, point(grid.x, stats_y));
     w_name = catacurses::newwin(name_h, grid_w, point(grid.x, name_y));
     w_details = catacurses::newwin(details_h, details_w, point(details_x, details_y));
+#if defined(TILES)
+    if (native) {
+        // The vehicle is drawn across the whole window: Godot's frame shows the middle of it in
+        // a viewport and covers the rest; the text goes in the panel beside it.
+        w_disp = catacurses::newwin(TERMY, std::max(TERMX - godot_disp_margin, 10), point_zero);
+        w_border = cata::godot_bridge::capture_window(TERMY, TERMX);
+        w_mode = cata::godot_bridge::capture_window(mode_h, grid_w);
+        w_msg = cata::godot_bridge::capture_window(page_size, pane_w);
+        w_parts = cata::godot_bridge::capture_window(parts_h, pane_w);
+        w_list = cata::godot_bridge::capture_window(page_size, pane_w);
+        w_stats = cata::godot_bridge::capture_window(stats_h, grid_w);
+        w_name = cata::godot_bridge::capture_window(name_h, grid_w);
+        w_details = cata::godot_bridge::capture_window(details_h, details_w);
+    }
+#endif
 }
 
 auto veh_interact::format_reqs(
@@ -353,6 +554,9 @@ auto veh_interact::create_or_get_ui_adaptor() -> shared_ptr_fast<ui_adaptor> {
     shared_ptr_fast<ui_adaptor> current_ui = ui.lock();
     if (!current_ui) {
         ui = current_ui = make_shared_fast<ui_adaptor>();
+#if defined(TILES)
+        if (!ui_hidden) { open_native(*current_ui); }
+#endif
         current_ui->on_screen_resize([this](ui_adaptor& current_ui) {
             if (ui_hidden) {
                 current_ui.position(point_zero, point_zero);
@@ -392,6 +596,9 @@ auto veh_interact::create_or_get_ui_adaptor() -> shared_ptr_fast<ui_adaptor> {
                 display_overview();
             }
             display_mode();
+#if defined(TILES)
+            if (native) { publish_native(); }
+#endif
         });
     }
     return current_ui;
@@ -400,9 +607,281 @@ auto veh_interact::create_or_get_ui_adaptor() -> shared_ptr_fast<ui_adaptor> {
 void veh_interact::hide_ui(const bool hide) {
     if (hide != ui_hidden) {
         ui_hidden = hide;
+#if defined(TILES)
+        // The side panel hides with the rest of the screen.
+        if (hide) {
+            native.reset();
+        } else if (const shared_ptr_fast<ui_adaptor> current_ui = ui.lock()) {
+            open_native(*current_ui);
+        }
+#endif
         create_or_get_ui_adaptor()->mark_resize();
     }
 }
+
+#if defined(TILES)
+void veh_interact::open_native(const ui_adaptor& current_ui) {
+    if (!cata::godot_bridge::native_screens()) { return; }
+    native = std::make_unique<cata::godot_bridge::native_view>("screen", this, "VEH_INTERACT");
+    native->attach(current_ui);
+}
+
+void veh_interact::write_overview(JsonOut& jsout) const {
+    // The game's own header and detail texts, printed a line at a time and sent as they are.
+    const auto line_width = 64;
+    const auto line = cata::godot_bridge::capture_window(1, line_width);
+    const auto write_line = [&](const std::string& name) {
+        jsout.member(name);
+        cata::godot_bridge::write_window_grid(jsout, line, {});
+    };
+    const auto choosing = overview_enable && overview_action;
+    jsout.start_object();
+    jsout.member("title", _("Overview"));
+    jsout.member("groups");
+    jsout.start_array();
+    auto last = std::string();
+    for (auto idx = 0; idx < static_cast<int>(overview_opts.size()); idx++) {
+        const auto& opt = overview_opts[idx];
+        const auto& pt = *opt.part;
+        if (opt.key != last) {
+            if (!last.empty()) {
+                jsout.end_array();
+                jsout.end_object();
+            }
+            last = opt.key;
+            jsout.start_object();
+            werase(line);
+            overview_headers.at(opt.key)(line, 0);
+            write_line("head");
+            jsout.member("rows");
+            jsout.start_array();
+        }
+        jsout.start_object();
+        if (opt.hotkey) { jsout.member("key", std::string(1, opt.hotkey)); }
+        jsout.member("name");
+        cata::godot_screen::write_span(jsout, {.text = pt.name(false), .color = c_white});
+        jsout.member("state", condition_name(pt));
+        jsout.member("level", pt.is_broken() ? 5 : pt.damage_level(4));
+        jsout.member("health", pt.is_broken() ? 0.0 : std::clamp(pt.health_percent(), 0.0, 1.0));
+        jsout.member("type", "vp_" + pt.info().get_id().str());
+        // While a part is being chosen the ones that can't be are dimmed.
+        jsout.member("dim", choosing && !opt.hotkey);
+        jsout.member(
+            "selected",
+            overview_pos < 0 && overview_enable && !overview_action
+                ? overview_enable(pt)
+                : overview_pos == idx);
+        werase(line);
+        opt.details(pt, line, 0);
+        write_line("detail");
+        jsout.end_object();
+    }
+    if (!last.empty()) {
+        jsout.end_array();
+        jsout.end_object();
+    }
+    jsout.end_array();
+    jsout.end_object();
+}
+
+void veh_interact::publish_native() {
+    namespace gs = cata::godot_screen;
+    const auto category = std::string("VEH_INTERACT");
+    native->publish([&](JsonOut& jsout) {
+        jsout.member("title", veh->name);
+        jsout.member("icon", "car");
+        jsout.member("dock", "side");
+        jsout.member("size", std::array{godot_panel_width, 0});
+        // Where the vehicle is drawn, in pixels: the front end centers this in its viewport.
+        if (const auto window = cata::godot_bridge::window_size(); window.x > 0 && TERMX > 0) {
+            jsout.member(
+                "view", std::array{0, 0, (TERMX - godot_disp_margin) * window.x / TERMX, window.y});
+        }
+        jsout.member("subtitle");
+        gs::write_span(
+            jsout,
+            {.text = title ? remove_color_tags(*title)
+                           : string_format(_("Owner: %s"), veh->get_owner_name())});
+
+        if (install_info) {
+            // The parts that fit here: groups as tabs, then a list with their pictures.
+            jsout.member("tabs");
+            jsout.start_array();
+            for (auto i = 0; i < static_cast<int>(install_info->tab_list.size()); i++) {
+                gs::write_tab(
+                    jsout,
+                    {.text = install_info->tab_list[i],
+                     .active = i == static_cast<int>(install_info->tab),
+                     .pick = gs::tab_pick + i});
+            }
+            jsout.end_array();
+            jsout.member("tab_keys");
+            jsout.start_object();
+            jsout.member("prev", cata::godot_bridge::key_label("PREV_TAB", category));
+            jsout.member("next", cata::godot_bridge::key_label("NEXT_TAB", category));
+            jsout.end_object();
+            jsout.member("panes");
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member("title", _("Parts you can install"));
+            jsout.member("icon", "plus");
+            jsout.member("cursor", install_info->pos);
+            jsout.member("confirm", "CONFIRM");
+            jsout.member("empty", _("Nothing in this group fits here."));
+            jsout.member("rows");
+            jsout.start_array();
+            std::ranges::for_each(install_info->tab_vparts, [&](const vpart_info* info) {
+                gs::write_row(
+                    jsout,
+                    {.text = {.text = info->name(),
+                              .color = can_potentially_install(*info) ? c_white : c_dark_gray},
+                     .sym = std::string(1, static_cast<char>(info->sym)),
+                     .sym_color = string_from_color(info->color),
+                     .type = "vp_" + info->get_id().str()});
+            });
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member("active_pane", 0);
+        }
+
+        jsout.member("aside");
+        jsout.start_object();
+        jsout.member("sections");
+        jsout.start_array();
+        const auto section =
+            [&](const std::string& name, const catacurses::window& w,
+                const cata::godot_bridge::window_columns& columns) {
+                jsout.start_object();
+                jsout.member("title", name);
+                jsout.member("mono", true);
+                jsout.member("body");
+                cata::godot_bridge::write_window_spans(jsout, w, columns);
+                jsout.end_object();
+            };
+        if (install_info) {
+            // What the part chosen in the list is, and what installing it needs.
+            // With nothing to choose, the game lists what is on the square instead.
+            const auto choosing = !install_info->tab_vparts.empty();
+            if (choosing) {
+                section(_("Details"), w_details, {});
+                section(_("Requirements"), w_msg, {});
+            }
+            write_parts_here(
+                jsout,
+                {.veh = *veh, .part = cpart, .highlight = highlight_part, .describe = !choosing});
+        } else {
+            // What the game answered (why something can't be done) first, where it is seen.
+            if (msg) { section(_("Note"), w_msg, {}); }
+            write_parts_here(
+                jsout,
+                {.veh = *veh,
+                 .part = cpart,
+                 .highlight = highlight_part,
+                 .describe = !msg,
+                 .scroll_to = start_at});
+            write_overview(jsout);
+        }
+        jsout.end_array();
+
+        jsout.member("buttons");
+        jsout.start_array();
+        if (!title) {
+            struct task {
+                std::string act;
+                std::string text;
+                char mode = ' ';
+                std::string icon;
+            };
+            const auto tasks = std::array{
+                task{"INSTALL", pgettext("veh_interact", "Install"), 'i', "plus"},
+                task{"REPAIR", pgettext("veh_interact", "Repair"), 'r', "wrench"},
+                task{"MEND", pgettext("veh_interact", "Mend"), 'm', "bandage"},
+                task{"REFILL", pgettext("veh_interact", "Refill"), 'f', "fuel"},
+                task{"REMOVE", pgettext("veh_interact", "Remove"), 'o', "circle-minus"},
+                task{"SIPHON", pgettext("veh_interact", "Siphon"), 's', "droplet"},
+                task{"UNLOAD", pgettext("veh_interact", "Unload"), 'd', "package-open"},
+                task{"ASSIGN_CREW", pgettext("veh_interact", "Crew"), 'w', "users"},
+                task{"RELABEL", pgettext("veh_interact", "Label"), 'a', "tag"},
+                task{"CHANGE_SHAPE", pgettext("veh_interact", "Shape"), 'p', "shapes"},
+                task{"RENAME", pgettext("veh_interact", "Rename"), ' ', "pencil"},
+            };
+            for (const task& t : tasks) {
+                gs::write_button(
+                    jsout,
+                    {.act = t.act,
+                     .text = t.text,
+                     .icon = t.icon,
+                     .category = category,
+                     .enabled = t.mode == ' ' || cant_do(t.mode) == task_reason::CAN_DO});
+            }
+            if (tile_preview) {
+                gs::write_button(
+                    jsout,
+                    {.act = "ZOOM_IN",
+                     .text = _("Zoom in"),
+                     .icon = "zoom-in",
+                     .category = category});
+                gs::write_button(
+                    jsout,
+                    {.act = "ZOOM_OUT",
+                     .text = _("Zoom out"),
+                     .icon = "zoom-out",
+                     .category = category});
+            }
+        } else {
+            if (install_info) {
+                gs::write_button(
+                    jsout,
+                    {.act = "PREV_TAB",
+                     .text = _("Previous group"),
+                     .icon = "chevron-left",
+                     .category = category});
+                gs::write_button(
+                    jsout,
+                    {.act = "NEXT_TAB",
+                     .text = _("Next group"),
+                     .icon = "chevron-right",
+                     .category = category});
+                gs::write_button(
+                    jsout,
+                    {.act = "FILTER", .text = _("Filter"), .icon = "search", .category = category});
+            }
+            gs::write_button(
+                jsout, {.act = "QUIT", .text = _("Back"), .icon = "undo-2", .category = category});
+            gs::write_button(
+                jsout,
+                {.act = "CONFIRM",
+                 .text = _("Choose"),
+                 .icon = "check",
+                 .category = category,
+                 .primary = true});
+        }
+        jsout.end_array();
+        jsout.end_object();
+
+        // The vehicle's numbers and fuel go in a panel under its picture.
+        jsout.member("foot");
+        jsout.start_object();
+        jsout.member("title", _("Vehicle"));
+        jsout.member("stats");
+        jsout.start_array();
+        std::ranges::for_each(stat_lines, [&](const std::string& line) {
+            write_stat_line(jsout, line);
+        });
+        jsout.end_array();
+        write_fuel_gauges(jsout, *veh);
+        jsout.end_object();
+
+        jsout.member("hints");
+        jsout.start_array();
+        gs::write_fixed_hint(jsout, "←↑→↓", title ? _("Choose") : _("Move cursor"));
+        gs::write_hint(jsout, "HELP_KEYBINDINGS", category, _("All keys"));
+        gs::write_hint(jsout, "QUIT", category, title ? _("Back") : _("Close"));
+        jsout.end_array();
+    });
+}
+#endif
 
 void veh_interact::do_main_loop() {
     avatar& you = get_avatar();
@@ -503,6 +982,12 @@ void veh_interact::do_main_loop() {
             if (tile_preview) { tile_preview->zoom_in(); }
         } else if (action == "ZOOM_OUT") {
             if (tile_preview) { tile_preview->zoom_out(); }
+        } else if (action == "SELECT") {
+            // A click on the picture of the vehicle moves the cursor to that square.
+            if (native && tile_preview) {
+                const auto to = tile_preview->offset_at_pixel(cata::godot_bridge::mouse_position());
+                if (to && *to != point_rel_veh::zero()) { move_cursor(tripoint_rel_veh(*to, 0)); }
+            }
 #endif
         }
         if (sel_cmd != ' ') { finish = true; }
@@ -1001,6 +1486,28 @@ void veh_interact::do_install() {
 
         const std::string action = main_context.handle_input();
         msg.reset();
+#if defined(TILES)
+        // A click on a group or on a part in the front end's list.
+        if (const auto pick = native ? cata::godot_bridge::take_pick(this) : std::nullopt) {
+            namespace gs = cata::godot_screen;
+            if (*pick >= gs::tab_pick) {
+                if (*pick - gs::tab_pick < static_cast<int>(tab_list.size())) {
+                    tab = *pick - gs::tab_pick;
+                    tab_vparts.clear();
+                    pos = 0;
+                    copy_if(can_mount.begin(), can_mount.end(), back_inserter(tab_vparts),
+                            tab_filters[tab]);
+                }
+                continue;
+            }
+            const auto row = *pick % gs::row_stride;
+            // A click on another part only moves to it; a click on the chosen one installs it.
+            if (row < static_cast<int>(tab_vparts.size()) && row != pos) {
+                pos = row;
+                continue;
+            }
+        }
+#endif
         if (action == "FILTER") {
             string_input_popup()
                 .title(_("Search for part"))
@@ -2338,7 +2845,11 @@ void veh_interact::display_veh() {
  */
 void veh_interact::display_veh_tiles() {
     // Initialize tile preview if needed
-    if (!tile_preview) { tile_preview = std::make_unique<vehicle_preview_window>(); }
+    if (!tile_preview) {
+        tile_preview = std::make_unique<vehicle_preview_window>();
+        // The Godot front end gives the vehicle a big viewport: start one step closer.
+        if (native) { tile_preview->zoom_in(); }
+    }
 
     // Prepare the preview window with current display window bounds
     tile_preview->prepare(w_disp);
@@ -2400,11 +2911,21 @@ static auto wheel_state_description(const vehicle& veh) -> std::string {
  */
 void veh_interact::display_stats() const {
     werase(w_stats);
+    // The same lines go to the Godot front end, which lays them out itself.
+    const auto note_stat = [&]([[maybe_unused]] const std::string& line) {
+#if defined(TILES)
+        if (native) { stat_lines.push_back(line); }
+#endif
+    };
+#if defined(TILES)
+    stat_lines.clear();
+#endif
 
     // see exec()
     const int extraw = ((TERMX - FULL_SCREEN_WIDTH) / 4) * 2;
     // 3 * stats_h
     const int slots = 24;
+    const stats_columns columns = get_stats_columns();
     int x[slots], y[slots], w[slots];
 
     units::volume total_cargo = 0_ml;
@@ -2415,8 +2936,8 @@ void veh_interact::display_stats() const {
         free_cargo += veh->free_volume(p);
     }
 
-    const int second_column = 33 + (extraw / 4);
-    const int third_column = 65 + (extraw / 2);
+    const int second_column = columns.second;
+    const int third_column = columns.third;
     for (int i = 0; i < slots; i++) {
         if (i < stats_h) {
             // First column
@@ -2449,6 +2970,10 @@ void veh_interact::display_stats() const {
     // these lambdas simplifies printing stat for vehicle line-by-line
     const auto print_stat_color = [&](auto color, auto... args) {
         fold_and_print(w_stats, point(x[i], y[i]), w[i], color, args...);
+        note_stat(
+            color == c_light_gray
+                ? string_format(args...)
+                : colorize(string_format(args...), color));
         i++;
     };
     const auto print_stat = [&](auto... args) { print_stat_color(c_light_gray, args...); };
@@ -2528,12 +3053,27 @@ void veh_interact::display_stats() const {
     mvwprintz(w_stats, point(x[i], y[i]), c_light_gray, _("Status:"));
     x[i] += utf8_width(_("Status:")) + 1;
     print_stat_color(total_durability_color, total_durability_text);
+#if defined(TILES)
+    if (native && !stat_lines.empty()) {
+        stat_lines.back() = string_format("%s %s", _("Status:"), stat_lines.back());
+    }
+#endif
 
     print_stat(wheel_state_description(*veh));
 
     // This lambda handles printing parts in the "Most damaged" and "Needs repair" cases
     // for the veh_interact ui
     const auto print_part = [&](const std::string& str, int slot, vehicle_part* pt) {
+#if defined(TILES)
+        if (native) {
+            // The condition as a word in place of the game's damage marks.
+            const auto level = pt->is_broken() ? 4 : pt->damage_level(4);
+            const auto* tone = level >= 3 ? "red" : (level == 2 ? "yellow" : "light_gray");
+            stat_lines.push_back(string_format(
+                "%s %s <color_%s>(%s)</color>", str, pt->name(false), tone,
+                to_lower_case(condition_name(*pt))));
+        }
+#endif
         mvwprintz(w_stats, point(x[slot], y[slot]), c_light_gray, str);
         int iw = utf8_width(str) + 1;
         return fold_and_print(
@@ -2743,8 +3283,16 @@ void veh_interact::display_details(const vpart_info* part) {
 
     werase(w_details);
 
-    wborder(w_details, LINE_XOXO, LINE_XOXO, LINE_OXOX, LINE_OXOX, LINE_OXXO, LINE_OOXX, LINE_XXOO,
-            LINE_XOOX);
+    // The Godot front end frames the details itself.
+#if defined(TILES)
+    const auto boxed = !native;
+#else
+    const auto boxed = true;
+#endif
+    if (boxed) {
+        wborder(w_details, LINE_XOXO, LINE_XOXO, LINE_OXOX, LINE_OXOX, LINE_OXXO, LINE_OOXX,
+                LINE_XXOO, LINE_XOOX);
+    }
 
     if (part == nullptr) {
         wnoutrefresh(w_details);

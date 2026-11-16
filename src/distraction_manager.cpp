@@ -7,6 +7,10 @@
 #include "cata_utility.h"
 #include "color.h"
 #include "cursesdef.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "json.h"
 #include "output.h"
@@ -68,6 +72,15 @@ void distraction_manager_gui::show()
     catacurses::window w;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the distractions with a check box for each and the chosen one's meaning beside.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "DISTRACTION_MANAGER" ) :
+                  nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         iContentHeight = FULL_SCREEN_HEIGHT - 2 - iHeaderHeight;
 
@@ -84,6 +97,11 @@ void distraction_manager_gui::show()
                                 iOffset + point( 1, iHeaderHeight + 1 ) );
 
         ui.position_from_window( w_border );
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -103,7 +121,66 @@ void distraction_manager_gui::show()
     ctx.register_action( "HELP_KEYBINDINGS" );
     ctx.register_action( "CONFIRM" );
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "DISTRACTION_MANAGER" );
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", _( "Distractions manager" ) );
+            jsout.member( "icon", "bell" );
+            jsout.member( "size", std::array{ 1040, 760 } );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Interrupt what I'm doing when…" ) );
+            jsout.member( "icon", "bell" );
+            jsout.member( "cursor", currentLine );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &type : distractions_status ) {
+                const auto ignored = distractions.contains( type ) && distractions.at( type );
+                gs::write_row( jsout, {
+                    .text = { .text = _( distraction_desc.at( type ).first.c_str() ), .color = ignored ? c_light_gray : c_white },
+                    .note = { .text = ignored ? _( "Disabled" ) : "", .color = c_light_red },
+                    .mark = !ignored,
+                    .mark_act = "CONFIRM",
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 380 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = _( distraction_desc.at( cur_distraction ).first.c_str() ), .color = c_white } );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = _( distraction_desc.at( cur_distraction ).second.c_str() ) } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            const auto ignored = distractions.contains( cur_distraction ) && distractions.at( cur_distraction );
+            gs::write_button( jsout, {
+                .act = "CONFIRM", .text = ignored ? _( "Enable" ) : _( "Disable" ),
+                .icon = ignored ? "circle-check" : "circle-x", .category = category, .primary = true
+            } );
+            jsout.end_array();
+            jsout.end_object();
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Save and close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         // Draw border
         draw_border( w_border, BORDER_COLOR, _( "Distractions manager" ) );
         mvwputch( w_border, point( 0, iHeaderHeight - 1 ), c_light_gray, LINE_XXXO );
@@ -173,6 +250,14 @@ void distraction_manager_gui::show()
         ui_manager::redraw();
 
         const std::string currentAction = ctx.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            if( *pick >= 0 && *pick < num_distractions ) {
+                currentLine = *pick;
+                cur_distraction = distractions_status[currentLine];
+            }
+        }
+#endif
 
         if( currentAction == "QUIT" ) {
             save();

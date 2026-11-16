@@ -1,5 +1,7 @@
 #include "enums.h"
+#include "message_log_view.h"
 #include "messages.h"
+#include "godot_alerts.h"
 
 #include <cstddef>
 #include <string>
@@ -9,7 +11,8 @@
 class JsonObject;
 class JsonOut;
 
-namespace catacurses {
+namespace catacurses
+{
 class window;
 } // namespace catacurses
 
@@ -17,19 +20,22 @@ class window;
  * Stubs to turn all Messages calls into no-ops for unit testing.
  */
 
-auto Messages::recent_messages(size_t) -> std::vector<std::pair<std::string, std::string>> {
+auto Messages::recent_messages( size_t ) -> std::vector<std::pair<std::string, std::string>>
+{
     return std::vector<std::pair<std::string, std::string>>();
 }
-void Messages::add_msg(std::string) {}
-void Messages::add_msg(const game_message_params&, std::string) {}
+void Messages::add_msg( std::string ) {}
+void Messages::add_msg( const game_message_params &, std::string ) {}
 void Messages::clear_messages() {}
 void Messages::deactivate() {}
 auto Messages::size() -> size_t { return 0; }
 auto Messages::has_undisplayed_messages() -> bool { return false; }
 void Messages::display_messages() {}
-void Messages::display_messages(const catacurses::window&, int, int, int, int) {}
-void Messages::serialize(JsonOut&) {}
-void Messages::deserialize(const JsonObject&) {}
+void Messages::display_messages( const catacurses::window &, int, int, int, int ) {}
+auto Messages::sidebar_lines( std::size_t ) -> std::vector<log_line> { return {}; }
+auto cata::godot_hud::new_warnings() -> std::vector<std::pair<std::string, std::string>> { return {}; }
+void Messages::serialize( JsonOut & ) {}
+void Messages::deserialize( const JsonObject & ) {}
 
-void add_msg(std::string) {}
-void add_msg(const game_message_params&, std::string) {}
+void add_msg( std::string ) {}
+void add_msg( const game_message_params &, std::string ) {}

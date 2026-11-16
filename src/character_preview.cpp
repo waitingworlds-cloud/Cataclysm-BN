@@ -367,4 +367,15 @@ auto character_preview_window::clothes_showing() const -> bool
     return !show_clothes;
 }
 
+auto character_preview_window::drawn_area() const -> std::optional<frame_area>
+{
+    if( TERMX - ncols_width < hide_below_ncols ) {
+        return std::nullopt;
+    }
+    return frame_area{
+        .at = point( ( pos.x + 1 ) * termx_pixels, ( pos.y + 1 ) * termy_pixels ),
+        .size = point( ( ncols_width - 2 ) * termx_pixels, ( nlines_width - 2 ) * termy_pixels ),
+    };
+}
+
 #endif // TILES

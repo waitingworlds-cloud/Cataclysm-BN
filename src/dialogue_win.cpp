@@ -1,6 +1,7 @@
 #include "dialogue_win.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -10,6 +11,12 @@
 #include "point.h"
 #include "translations.h"
 #include "ui_manager.h"
+
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#include "json.h"
+#endif
 
 void dialogue_window::resize_dialogue( ui_adaptor &ui )
 {
@@ -279,3 +286,115 @@ void dialogue_window::display_responses( const std::vector<talk_data> &responses
     }
     wnoutrefresh( d_win );
 }
+
+#if defined(TILES)
+namespace
+{
+
+namespace screen = cata::godot_screen;
+
+/// Talk commands that work in every conversation, with the key that runs them.
+struct talk_command {
+    char key;
+    const char *text;
+    const char *icon;
+};
+
+constexpr auto talk_commands = std::array
+{
+    talk_command{ .key = 'L', .text = translate_marker( "Look at" ), .icon = "scan-eye" },
+    talk_command{ .key = 'S', .text = translate_marker( "Size up stats" ), .icon = "user-search" },
+    talk_command{ .key = 'O', .text = translate_marker( "Check opinion" ), .icon = "heart-handshake" },
+    talk_command{ .key = 'Y', .text = translate_marker( "Yell" ), .icon = "megaphone" },
+};
+
+/// Responses are rows of the second pane; the talk commands are picks above every row code.
+constexpr auto responses_pane = 1;
+constexpr auto command_pick = screen::tab_pick + 1000;
+
+} // namespace
+
+auto read_dialogue_click( const int pick ) -> dialogue_click
+{
+    if( pick >= command_pick && pick < command_pick + static_cast<int>( talk_commands.size() ) ) {
+        return { .key = talk_commands[pick - command_pick].key };
+    }
+    const auto row = pick - responses_pane * screen::row_stride;
+    if( row >= 0 && row < screen::row_stride ) {
+        return { .response = static_cast<size_t>( row ) };
+    }
+    return {};
+}
+
+auto dialogue_window::publish_native( cata::godot_bridge::native_view &view,
+                                      const std::vector<talk_data> &responses, const size_t selected_response ) -> void
+{
+    view.publish( [&]( JsonOut & jsout ) {
+        jsout.member( "title", remove_color_tags( npc_name ) );
+        jsout.member( "icon", "messages-square" );
+        jsout.member( "size", std::array{ 1240, 860 } );
+        // Leaving a conversation is one of its responses.
+        jsout.member( "quit", "" );
+        jsout.member( "active_pane", responses_pane );
+        jsout.member( "toggles" );
+        jsout.start_array();
+        for( const auto &[i, command] : talk_commands | std::views::enumerate ) {
+            jsout.start_object();
+            jsout.member( "text", _( command.text ) );
+            jsout.member( "icon", command.icon );
+            jsout.member( "key", std::string( 1, command.key ) );
+            jsout.member( "pick", command_pick + static_cast<int>( i ) );
+            jsout.member( "act", "" );
+            jsout.end_object();
+        }
+        jsout.end_array();
+
+        jsout.member( "panes" );
+        jsout.start_array();
+        // The conversation so far; the latest exchange stands out, as in the curses window.
+        jsout.start_object();
+        jsout.member( "title", _( "Conversation" ) );
+        jsout.member( "icon", "message-square" );
+        jsout.member( "stretch", 1.4 );
+        jsout.member( "count", "" );
+        jsout.member( "scroll_end", true );
+        jsout.member( "entries" );
+        jsout.start_array();
+        const auto recent = history.size() < 2 ? 0 : history.size() - 2;
+        for( const auto &[i, msg] : history | std::views::enumerate ) {
+            jsout.start_object();
+            jsout.member( "text" );
+            cata::godot_bridge::write_spans( jsout, msg,
+                                             static_cast<size_t>( i ) >= recent ? c_white : c_light_gray );
+            jsout.end_object();
+        }
+        jsout.end_array();
+        jsout.end_object();
+
+        jsout.start_object();
+        jsout.member( "title", _( "Your response" ) );
+        jsout.member( "icon", "corner-down-left" );
+        jsout.member( "count", "" );
+        jsout.member( "cursor", static_cast<int>( selected_response ) );
+        jsout.member( "confirm", "CONFIRM" );
+        jsout.member( "rows" );
+        jsout.start_array();
+        for( const auto &resp : responses ) {
+            screen::write_row( jsout, {
+                .text = { .text = resp.text, .color = resp.col == c_white ? c_light_gray : resp.col },
+                .key = std::string( 1, resp.letter ),
+            } );
+        }
+        jsout.end_array();
+        jsout.end_object();
+        jsout.end_array();
+
+        jsout.member( "hints" );
+        jsout.start_array();
+        screen::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+        screen::write_fixed_hint( jsout, "Enter", _( "Say it" ) );
+        screen::write_fixed_hint( jsout, "a-z", _( "Say a response" ) );
+        jsout.end_array();
+    } );
+}
+#endif // TILES

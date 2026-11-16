@@ -39,6 +39,10 @@ public:
     /** Clean up after display (restore zoom level) */
     void clear();
 
+    /// How far, in vehicle squares, the square drawn at `pixel` is from the one under the
+    /// cursor: where a click on the picture should move the cursor.
+    auto offset_at_pixel(point pixel) const -> std::optional<point_rel_veh>;
+
     /** Zoom in (larger tiles) */
     void zoom_in();
 

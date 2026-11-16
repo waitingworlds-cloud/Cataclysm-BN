@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <tuple>
 #include <unordered_map>
@@ -27,6 +28,8 @@
 #if defined(TILES)
 #   include "character_preview.h"
 #   include "cata_tiles.h"
+#   include "godot_bridge.h"
+#   include "godot_screen.h"
 #endif
 #include "character.h"
 #include "character_martial_arts.h"
@@ -222,6 +225,447 @@ tab_direction set_description( avatar &you, bool allow_reroll, points_left &poin
 
 static std::optional<std::string> query_for_template_name();
 void reset_scenario( avatar &u, const scenario *scen );
+
+#if defined(TILES)
+namespace
+{
+
+namespace gs = cata::godot_screen;
+
+/// The character creation tabs, in the order `avatar::create` steps through them.
+enum class chargen_step : int {
+    points,
+    scenario,
+    profession,
+    stats,
+    traits,
+    bionics,
+    magic,
+    skills,
+    overview,
+};
+
+/// Tab clicked in the Godot front end; `avatar::create` goes there once the current tab returns.
+auto chargen_jump = std::optional<int> {};
+
+/// Tabs shown for `prof`; a tab's position is its number in `avatar::create`.
+auto chargen_steps( const profession_id &prof ) -> std::vector<chargen_step>
+{
+    auto steps = std::vector{ chargen_step::points, chargen_step::scenario, chargen_step::profession,
+                              chargen_step::stats, chargen_step::traits };
+    if( !prof->forbids_bionics() && !g->scen->forbids_bionics() ) {
+        steps.push_back( chargen_step::bionics );
+    }
+    if( has_any_magic( prof ) && !prof->forbids_spells() && !g->scen->forbids_spells() ) {
+        steps.push_back( chargen_step::magic );
+    }
+    steps.push_back( chargen_step::skills );
+    steps.push_back( chargen_step::overview );
+    return steps;
+}
+
+struct step_label {
+    std::string text;
+    std::string icon;
+};
+
+auto label_of( const chargen_step step ) -> step_label
+{
+    switch( step ) {
+        case chargen_step::points:
+            return { .text = _( "Points" ), .icon = "coins" };
+        case chargen_step::scenario:
+            return { .text = _( "Scenario" ), .icon = "map" };
+        case chargen_step::profession:
+            return { .text = _( "Profession" ), .icon = "briefcase" };
+        case chargen_step::stats:
+            return { .text = _( "Stats" ), .icon = "chart-column" };
+        case chargen_step::traits:
+            return { .text = _( "Traits" ), .icon = "dna" };
+        case chargen_step::bionics:
+            return { .text = _( "Bionics" ), .icon = "cpu" };
+        case chargen_step::magic:
+            return { .text = _( "Magic" ), .icon = "sparkles" };
+        case chargen_step::skills:
+            return { .text = _( "Skills" ), .icon = "graduation-cap" };
+        case chargen_step::overview:
+            return { .text = _( "Overview" ), .icon = "id-card" };
+    }
+    return {};
+}
+
+/// Number of `step` among the tabs shown for `prof`.
+auto step_index( const chargen_step step, const profession_id &prof ) -> int
+{
+    const auto steps = chargen_steps( prof );
+    return static_cast<int>( std::ranges::find( steps, step ) - steps.begin() );
+}
+
+/// Direction that leaves `current` when `pick` is a click on another tab; the tab is remembered
+/// in `chargen_jump`.
+auto chargen_tab_click( const int pick, const chargen_step current,
+                        const profession_id &prof ) -> std::optional<tab_direction>
+{
+    const auto to = pick - gs::tab_pick;
+    const auto from = step_index( current, prof );
+    if( pick < gs::tab_pick || pick >= gs::subtab_pick || to == from ||
+        to >= static_cast<int>( chargen_steps( prof ).size() ) ) {
+        return std::nullopt;
+    }
+    chargen_jump = to;
+    return to > from ? tab_direction::FORWARD : tab_direction::BACKWARD;
+}
+
+/// Native view for a character creation tab: it covers the whole screen.
+auto chargen_view( ui_adaptor &ui, const avatar &u, const std::string &category,
+                   const std::function<void( ui_adaptor & )> &init_windows )
+-> std::unique_ptr<cata::godot_bridge::native_view>
+{
+    if( !cata::godot_bridge::native_screens() ) {
+        return nullptr;
+    }
+    auto view = std::make_unique<cata::godot_bridge::native_view>( "screen", &u, category );
+    view->attach( ui );
+    ui.on_screen_resize( [init_windows]( ui_adaptor & ui ) {
+        init_windows( ui );
+        ui.position( point_zero, point_zero );
+    } );
+    ui.position( point_zero, point_zero );
+    return view;
+}
+
+/// What every character creation tab shows around its own content.
+struct chargen_frame {
+    const avatar &u;
+    const points_left &points;
+    chargen_step step = chargen_step::points;
+    /// Input category of the tab's keys.
+    std::string category;
+    /// Change to the points if the highlighted entry were chosen.
+    int net_cost = 0;
+    /// More header chips, after the points.
+    std::vector<gs::stat> extra = {};
+};
+
+auto pool_color( const int left ) -> nc_color
+{
+    return left >= 0 ? c_light_gray : c_red;
+}
+
+auto write_points_stats( JsonOut &jsout, const points_left &points ) -> void
+{
+    switch( points.limit ) {
+        case points_left::MULTI_POOL: {
+            const auto valid = points.stat_points_left() >= 0 && points.trait_points_left() >= 0 &&
+                               points.skill_points_left() >= 0;
+            gs::write_stat( jsout, { .icon = "chart-column", .label = _( "Stats" ),
+                                     .value = { .text = std::to_string( points.stat_points ), .color = pool_color( points.stat_points_left() ) }
+                                   } );
+            gs::write_stat( jsout, { .icon = "dna", .label = _( "Traits" ),
+                                     .value = { .text = std::to_string( points.trait_points ), .color = pool_color( points.trait_points_left() ) }
+                                   } );
+            gs::write_stat( jsout, { .icon = "graduation-cap", .label = _( "Skills" ),
+                                     .value = { .text = std::to_string( points.skill_points ), .color = pool_color( points.skill_points_left() ) }
+                                   } );
+            gs::write_stat( jsout, { .icon = "coins", .label = _( "Points left" ),
+                                     .value = { .text = std::to_string( points.skill_points_left() ), .color = valid ? c_white : c_red },
+                                     .tip = _( "Stats, traits and skills have separate point pools.\n"
+                                               "Putting stat points into traits and skills is allowed and putting trait points into skills is allowed.\n"
+                                               "Scenarios and professions affect skill point pool." )
+                                   } );
+            break;
+        }
+        case points_left::ONE_POOL:
+            gs::write_stat( jsout, { .icon = "coins", .label = _( "Points left" ),
+                                     .value = { .text = std::to_string( points.skill_points_left() ), .color = pool_color( points.skill_points_left() ) }
+                               } );
+            break;
+        case points_left::TRANSFER:
+            gs::write_stat( jsout, { .icon = "coins", .value = { .text = _( "Character Transfer: No changes can be made." ) } } );
+            break;
+        case points_left::FREEFORM:
+            gs::write_stat( jsout, { .icon = "coins", .value = { .text = _( "Freeform" ) } } );
+            break;
+    }
+}
+
+/// Writes the title, tabs and point counts.
+auto write_chargen_frame( JsonOut &jsout, const chargen_frame &f ) -> void
+{
+    jsout.member( "title", _( "New character" ) );
+    jsout.member( "icon", "user-plus" );
+    jsout.member( "size", std::array{ 1560, 980 } );
+    jsout.member( "subtitle" );
+    gs::write_span( jsout, { .text = string_format( "%s%s  ·  %s%s", _( "Scenario: " ),
+                                     g->scen->gender_appropriate_name( f.u.male ), _( "Profession: " ),
+                                     f.u.prof->gender_appropriate_name( f.u.male ) )
+                           } );
+    jsout.member( "tabs" );
+    jsout.start_array();
+    for( const auto &[i, step] : chargen_steps( f.u.prof ) | std::views::enumerate ) {
+        const auto label = label_of( step );
+        gs::write_tab( jsout, { .text = label.text, .active = step == f.step,
+                                .pick = gs::tab_pick + static_cast<int>( i ), .icon = label.icon
+                              } );
+    }
+    jsout.end_array();
+    gs::write_tab_keys( jsout, "PREV_TAB", "NEXT_TAB", f.category );
+    jsout.member( "stats" );
+    jsout.start_array();
+    write_points_stats( jsout, f.points );
+    if( f.net_cost != 0 ) {
+        gs::write_stat( jsout, { .label = _( "If chosen" ),
+                                 .value = { .text = string_format( "%+d", -f.net_cost ), .color = f.net_cost > 0 ? c_red : c_green }
+                               } );
+    }
+    for( const auto &s : f.extra ) {
+        gs::write_stat( jsout, s );
+    }
+    jsout.end_array();
+}
+
+/// The primary button: on to the next tab.
+auto write_next_button( JsonOut &jsout, const chargen_frame &f ) -> void
+{
+    const auto steps = chargen_steps( f.u.prof );
+    const auto next = static_cast<size_t>( step_index( f.step, f.u.prof ) + 1 );
+    const auto text = next < steps.size() ? string_format( _( "Next: %s" ),
+                      label_of( steps[next] ).text ) :
+                      std::string( _( "Finish" ) );
+    gs::write_button( jsout, { .act = "NEXT_TAB", .text = text, .icon = "chevron-right", .category = f.category, .primary = true } );
+}
+
+/// Footer hints every tab shows last.
+auto write_nav_hints( JsonOut &jsout, const std::string &category ) -> void
+{
+    gs::write_hint( jsout, "PREV_TAB", category, _( "Previous tab" ) );
+    gs::write_hint( jsout, "NEXT_TAB", category, _( "Next tab" ) );
+    gs::write_hint( jsout, "QUIT", category, _( "Main menu" ) );
+}
+
+/// Buttons that re-roll the whole character.
+auto write_reroll_toggles( JsonOut &jsout, const std::string &category,
+                           const bool appearance ) -> void
+{
+    gs::write_toggle( jsout, { .act = "REROLL_CHARACTER", .text = _( "Random character" ), .icon = "dices", .category = category,
+                               .tip = _( "Reroll random character" )
+                             }, false );
+    gs::write_toggle( jsout, { .act = "REROLL_CHARACTER_WITH_SCENARIO", .text = _( "Random scenario too" ), .icon = "shuffle",
+                               .category = category, .tip = _( "Reroll random character with scenario" )
+                             }, false );
+    if( appearance ) {
+        gs::write_toggle( jsout, { .act = "REROLL_APPEARANCE", .text = _( "Random looks" ), .icon = "palette", .category = category,
+                                   .tip = _( "Reroll appearance" )
+                                 }, false );
+    }
+}
+
+/// What choosing an entry does to the points: `-2` in red for a cost of 2.
+auto cost_span( const int cost ) -> gs::span
+{
+    if( cost == 0 ) {
+        return { .text = "0", .color = c_dark_gray };
+    }
+    return { .text = string_format( "%+d", -cost ), .color = cost > 0 ? c_light_red : c_light_green };
+}
+
+/// A scenario or profession in the list to choose from.
+struct choice_row {
+    std::string name;
+    int cost = 0;
+    bool chosen = false;
+    /// Can't be chosen in this world.
+    bool unavailable = false;
+};
+
+auto write_choice_row( JsonOut &jsout, const choice_row &c ) -> void
+{
+    const auto color = c.chosen ? COL_SKILL_USED : c.unavailable ? c_dark_gray : c_light_gray;
+    gs::write_row( jsout, { .text = { .text = c.name, .color = color }, .cells = { cost_span( c.cost ) },
+                            .note = { .text = c.chosen ? _( "Chosen" ) : "", .color = COL_SKILL_USED }
+                          } );
+}
+
+/// Search box and toggles above the scenario and profession lists.
+struct choice_toolbar {
+    std::string category;
+    std::string filter;
+    std::string placeholder;
+    bool by_points = true;
+    /// The character's gender, when the list can switch it.
+    std::optional<bool> male = std::nullopt;
+};
+
+auto write_choice_toolbar( JsonOut &jsout, const choice_toolbar &t ) -> void
+{
+    jsout.member( "search" );
+    jsout.start_object();
+    jsout.member( "text", t.filter );
+    jsout.member( "act", "FILTER" );
+    jsout.member( "key", cata::godot_bridge::key_label( "FILTER", t.category ) );
+    jsout.member( "placeholder", t.placeholder );
+    jsout.end_object();
+    jsout.member( "toggles" );
+    jsout.start_array();
+    gs::write_toggle( jsout, { .act = "SORT", .text = string_format( _( "Sort by: %s" ), t.by_points ? _( "points" ) : _( "name" ) ),
+                               .icon = "arrow-down-up", .category = t.category
+                             }, false );
+    if( t.male ) {
+        gs::write_toggle( jsout, { .act = "CHANGE_GENDER", .text = *t.male ? _( "Male" ) : _( "Female" ), .icon = "users",
+                                   .category = t.category, .tip = _( "Change gender" )
+                                 }, false );
+    }
+    jsout.end_array();
+}
+
+/// A trait or bionic on the traits or bionics tab.
+struct pick_entry {
+    std::string name;
+    int points = 0;
+    bool has = false;
+    bool blocked = false;
+};
+
+/// The traits or bionics tab: advantages, disadvantages and neutral ones side by side.
+struct pick_pages {
+    std::array<std::vector<pick_entry>, 3> pages = {};
+    int used_pages = 3;
+    int page = 0;
+    std::array<int, 3> cursors = {};
+    /// Description of the highlighted entry.
+    std::string description = {};
+    /// Button texts that add or remove the highlighted entry.
+    std::string add_text = {};
+    std::string remove_text = {};
+    /// The character's sprite shown above the description, when the preview is on.
+    const character_preview_window *preview = nullptr;
+};
+
+/// Godot covers the game's frame and crops the character preview out of it, so the preview gets
+/// room for its largest zoom instead of squeezing beside the lists.
+auto prepare_native_preview( character_preview_window &preview ) -> void
+{
+    constexpr auto orientation = character_preview_window::Orientation{ .type = character_preview_window::TOP_LEFT };
+    preview.prepare( TERMY - 2, TERMX - 2, &orientation, 0 );
+}
+
+/// Where Godot finds the character in the frame, for the side panel. `category` holds the zoom and
+/// clothes keys; a tab without them passes it empty and gets no buttons.
+auto write_preview( JsonOut &jsout, const character_preview_window &preview,
+                    const std::string &category ) -> void
+{
+    const auto area = preview.drawn_area();
+    if( !area ) {
+        return;
+    }
+    jsout.member( "preview" );
+    jsout.start_object();
+    jsout.member( "rect", std::array{ area->at.x, area->at.y, area->size.x, area->size.y } );
+    jsout.member( "buttons" );
+    jsout.start_array();
+    if( !category.empty() ) {
+        gs::write_button( jsout, { .act = "zoom_out", .text = _( "Zoom out" ), .icon = "zoom-out", .category = category } );
+        gs::write_button( jsout, { .act = "zoom_in", .text = _( "Zoom in" ), .icon = "zoom-in", .category = category } );
+        // clothes_showing() is true while the clothes are hidden.
+        gs::write_toggle( jsout, { .act = "TOGGLE_CHARACTER_PREVIEW_CLOTHES", .text = _( "Clothes" ), .icon = "shirt", .category = category },
+                          !preview.clothes_showing() );
+    }
+    jsout.end_array();
+    jsout.end_object();
+}
+
+auto write_pick_pages( JsonOut &jsout, const chargen_frame &f, const pick_pages &p ) -> void
+{
+    struct page_style {
+        std::string title;
+        std::string icon;
+        nc_color on;
+        nc_color text;
+    };
+    const auto styles = std::array{
+        page_style{ .title = _( "Advantages" ), .icon = "chevrons-up", .on = COL_TR_GOOD_ON_ACT, .text = COL_TR_GOOD },
+        page_style{ .title = _( "Disadvantages" ), .icon = "chevrons-down", .on = COL_TR_BAD_ON_ACT, .text = COL_TR_BAD },
+        page_style{ .title = _( "Neutral" ), .icon = "circle-dot", .on = COL_TR_NEUT_ON_ACT, .text = COL_TR_NEUT },
+    };
+    jsout.member( "active_pane", p.page );
+    jsout.member( "panes" );
+    jsout.start_array();
+    for( auto page = 0; page < p.used_pages; page++ ) {
+        const auto &entries = p.pages[page];
+        const auto &style = styles[page];
+        jsout.start_object();
+        jsout.member( "title", style.title );
+        jsout.member( "icon", style.icon );
+        const auto taken = std::ranges::count_if( entries, &pick_entry::has );
+        jsout.member( "count", taken > 0 ? string_format( "%d / %d", static_cast<int>( taken ),
+                      static_cast<int>( entries.size() ) ) :
+                      std::to_string( entries.size() ) );
+        jsout.member( "cursor", p.cursors[page] );
+        jsout.member( "mark_act", "CONFIRM" );
+        jsout.member( "empty", _( "None!" ) );
+        jsout.member( "rows" );
+        jsout.start_array();
+        for( const auto &e : entries ) {
+            gs::write_row( jsout, { .text = { .text = e.name, .color = e.has ? style.on : e.blocked ? c_dark_gray : c_light_gray },
+            .cells = { { .text = std::to_string( std::abs( e.points ) ), .color = e.blocked && !e.has ? c_dark_gray : style.text } },
+            .mark = e.has
+                                  } );
+        }
+        jsout.end_array();
+        jsout.end_object();
+    }
+    jsout.end_array();
+
+    jsout.member( "aside" );
+    jsout.start_object();
+    jsout.member( "width", 460 );
+    if( p.preview != nullptr ) {
+        write_preview( jsout, *p.preview, f.category );
+    }
+    const auto &entries = p.pages[p.page];
+    const auto cursor = p.cursors[p.page];
+    const auto has_entry = cursor >= 0 && static_cast<size_t>( cursor ) < entries.size();
+    if( has_entry ) {
+        const auto &e = entries[cursor];
+        const auto &style = styles[p.page];
+        const auto cost = std::abs( e.points );
+        jsout.member( "title" );
+        gs::write_span( jsout, { .text = e.name, .color = c_white } );
+        jsout.member( "subtitle", style.title );
+        jsout.member( "body" );
+        gs::write_span( jsout, { .text = colorize( string_format( vgettext( "%s %s %d point", "%s %s %d points", cost ), e.name,
+                                         e.points < 0 ? _( "earns" ) : _( "costs" ), cost ), style.text ) + "\n\n" + p.description
+                               } );
+    }
+    jsout.member( "buttons" );
+    jsout.start_array();
+    if( has_entry ) {
+        const auto &e = entries[cursor];
+        gs::write_button( jsout, { .act = "CONFIRM", .text = e.has ? p.remove_text : p.add_text, .icon = e.has ? "minus" : "plus",
+                                   .category = f.category, .enabled = e.has || !e.blocked
+                                 } );
+    }
+    write_next_button( jsout, f );
+    jsout.end_array();
+    jsout.end_object();
+
+    jsout.member( "toggles" );
+    jsout.start_array();
+    write_reroll_toggles( jsout, f.category, true );
+    jsout.end_array();
+
+    jsout.member( "hints" );
+    jsout.start_array();
+    gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+    gs::write_fixed_hint( jsout, "←→", _( "Switch list" ) );
+    gs::write_hint( jsout, "CONFIRM", f.category, _( "Take or remove" ) );
+    gs::write_hint( jsout, "RANDOMIZE", f.category, _( "Random pick" ) );
+    write_nav_hints( jsout, f.category );
+    jsout.end_array();
+}
+
+} // namespace
+#endif
 
 void Character::pick_name( bool bUseDefault )
 {
@@ -646,6 +1090,9 @@ bool avatar::create( character_type type, const std::string &tempname )
         if( points.limit == points_left::TRANSFER ) {
             tab = get_max_tabs( prof );
         }
+#if defined(TILES)
+        const auto from = tab;
+#endif
 
         switch( tab ) {
             case 0:
@@ -718,6 +1165,18 @@ bool avatar::create( character_type type, const std::string &tempname )
                 tab = -1;
                 break;
         }
+#if defined(TILES)
+        // A tab clicked in the Godot front end. The profession's cost is taken from the skill points
+        // on the tabs after the profession tab, as stepping through the tabs does.
+        if( const auto jump = std::exchange( chargen_jump, std::nullopt ); jump && tab >= 0 ) {
+            if( from < 2 && *jump > 2 ) {
+                points.skill_points -= prof->point_cost();
+            } else if( from >= 2 && *jump < 1 ) {
+                points.skill_points += prof->point_cost();
+            }
+            tab = *jump;
+        }
+#endif
 
         if( !( tab >= 0 && tab <= get_max_tabs( prof ) ) ) {
             if( tab != -1 && nameExists( name ) ) {
@@ -955,7 +1414,65 @@ tab_direction set_points( avatar &u, points_left &points )
 
     int highlighted = 0;
 
+#if defined(TILES)
+    const auto native = chargen_view( ui, u, "NEW_CHAR_POINTS", init_windows );
+    const auto publish_native = [&]() {
+        const auto frame = chargen_frame{ .u = u, .points = points, .step = chargen_step::points, .category = "NEW_CHAR_POINTS" };
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Point pools" ) );
+            jsout.member( "icon", "coins" );
+            jsout.member( "cursor", highlighted );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &[limit, name, description] : opts ) {
+                const auto chosen = points.limit == limit;
+                gs::write_row( jsout, { .text = { .text = name, .color = chosen ? COL_SKILL_USED : c_light_gray },
+                                        .note = { .text = chosen ? _( "Chosen" ) : "", .color = COL_SKILL_USED }
+                                      } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            const auto &[limit, name, description] = opts[highlighted];
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 820 );
+            jsout.member( "share", 0.55 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = name, .color = c_white } );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = description } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Use these pools" ), .icon = "check", .category = frame.category,
+                                       .enabled = points.limit != limit
+                                     } );
+            write_next_button( jsout, frame );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "CONFIRM", frame.category, _( "Use" ) );
+            write_nav_hints( jsout, frame.category );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_character_tabs( w, _( "POINTS" ), u.prof );
 
         const auto &cur_opt = opts[highlighted];
@@ -988,6 +1505,17 @@ tab_direction set_points( avatar &u, points_left &points )
         }
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::points, u.prof ) ) {
+                retval = *direction;
+                continue;
+            }
+            if( *pick < gs::tab_pick && *pick < static_cast<int>( opts.size() ) ) {
+                highlighted = *pick;
+            }
+        }
+#endif
         if( action == "DOWN" ) {
             highlighted++;
         } else if( action == "UP" ) {
@@ -1050,7 +1578,128 @@ tab_direction set_stats( avatar &u, points_left &points )
     old_pos.x() = 0;
     u.Character::setpos( old_pos );
 
+#if defined(TILES)
+    const auto native = chargen_view( ui, u, "NEW_CHAR_STATS", init_windows );
+    const auto publish_native = [&]() {
+        struct stat_row {
+            std::string name;
+            int value;
+            /// Shown when raising the stat further costs 2 points.
+            std::string expensive;
+        };
+        const auto stats = std::array{
+            stat_row{ .name = _( "Strength" ), .value = u.str_max, .expensive = _( "Increasing Str further costs 2 points." ) },
+            stat_row{ .name = _( "Dexterity" ), .value = u.dex_max, .expensive = _( "Increasing Dex further costs 2 points." ) },
+            stat_row{ .name = _( "Intelligence" ), .value = u.int_max, .expensive = _( "Increasing Int further costs 2 points." ) },
+            stat_row{ .name = _( "Perception" ), .value = u.per_max, .expensive = _( "Increasing Per further costs 2 points." ) },
+        };
+        const auto line = []( const std::string & text, const nc_color & color ) { return colorize( text, color ) + "\n"; };
+        auto body = std::string();
+        switch( sel ) {
+            case 1:
+                u.recalc_hp();
+                body = line( string_format( _( "Base HP: %d" ), u.get_part_hp_max( bodypart_id( "head" ) ) ),
+                             COL_STAT_NEUTRAL ) +
+                       line( string_format( _( "Carry weight: %.1f %s" ), convert_weight( u.weight_capacity() ),
+                                            weight_units() ),
+                             COL_STAT_NEUTRAL ) +
+                       line( string_format( _( "Melee damage bonus: +%.1f" ), u.bonus_damage( false ) ),
+                             COL_STAT_BONUS ) + "\n" +
+                       _( "Strength also makes you more resistant to many diseases and poisons, and makes actions which require brute force more effective." );
+                break;
+            case 2:
+                body = line( string_format( _( "Melee to-hit bonus: +%.2f" ), u.get_hit_base() ), COL_STAT_BONUS ) +
+                       line( string_format( _( "Throwing penalty per target's dodge: +%d" ),
+                                            ranged::throw_dispersion_per_dodge( u, false ) ), COL_STAT_BONUS ) +
+                       ( u.ranged_dex_mod() != 0 ? line( string_format( _( "Ranged penalty: -%d" ),
+                               std::abs( u.ranged_dex_mod() ) ),
+                               COL_STAT_PENALTY ) : "" ) + "\n" +
+                       _( "Dexterity also enhances many actions which require finesse." );
+                break;
+            case 3: {
+                const auto read_spd = u.read_speed( false );
+                body = line( string_format( _( "Read times: %d%%" ), read_spd ),
+                             read_spd == 100 ? COL_STAT_NEUTRAL :
+                             read_spd < 100 ? COL_STAT_BONUS : COL_STAT_PENALTY ) +
+                       line( string_format( _( "Skill rust: %d%%" ), u.rust_rate() ), COL_STAT_PENALTY ) +
+                       line( string_format( _( "Crafting bonus: +%d%%" ), u.get_int() ), COL_STAT_BONUS ) + "\n" +
+                       _( "Intelligence is also used when crafting, installing bionics, and interacting with NPCs." );
+                break;
+            }
+            default:
+                body = ( u.ranged_per_mod() > 0 ? line( string_format( _( "Aiming penalty: -%d" ),
+                                                        u.ranged_per_mod() ),
+                                                        COL_STAT_PENALTY ) : "" ) +
+                       line( string_format( _( "Night vision bonus: +%.1f" ), vision::nv_range_from_per( u.per_max ) ),
+                             COL_STAT_BONUS ) +
+                       "\n" + _( "Perception is also used for detecting traps, camouflaged creatures, and other things of interest." );
+                break;
+        }
+        const auto &current = stats[sel - 1];
+        const auto frame = chargen_frame{ .u = u, .points = points, .step = chargen_step::stats, .category = "NEW_CHAR_STATS" };
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Stats" ) );
+            jsout.member( "icon", "chart-column" );
+            jsout.member( "cursor", sel - 1 );
+            jsout.member( "confirm", "" );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &st : stats ) {
+                gs::write_row( jsout, { .text = { .text = st.name, .color = c_white },
+                .cells = { { .text = std::to_string( st.value ), .color = st.value >= HIGH_STAT ? c_yellow : c_white } },
+                .note = { .text = st.value >= HIGH_STAT ? _( "2 points per level" ) : "", .color = c_yellow }
+                                      } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 820 );
+            jsout.member( "share", 0.55 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = string_format( "%s %d", current.name, current.value ), .color = c_white } );
+            if( current.value >= HIGH_STAT ) {
+                jsout.member( "warn" );
+                gs::write_span( jsout, { .text = current.expensive, .color = c_light_red } );
+            }
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = body } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "LEFT", .text = _( "Lower" ), .icon = "minus", .category = frame.category,
+                                       .enabled = current.value > 4
+                                     } );
+            gs::write_button( jsout, { .act = "RIGHT", .text = _( "Raise" ), .icon = "plus", .category = frame.category,
+                                       .enabled = current.value < max_stat_points
+                                     } );
+            write_next_button( jsout, frame );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "LEFT", frame.category, _( "Lower" ) );
+            gs::write_hint( jsout, "RIGHT", frame.category, _( "Raise" ) );
+            write_nav_hints( jsout, frame.category );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         werase( w );
         draw_character_tabs( w, _( "STATS" ), u.prof );
         fold_and_print( w, point( 2, 16 ), getmaxx( w ) - 4, COL_NOTE_MINOR,
@@ -1172,6 +1821,16 @@ tab_direction set_stats( avatar &u, points_left &points )
     do {
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::stats, u.prof ) ) {
+                return *direction;
+            }
+            if( *pick >= 0 && *pick < 4 ) {
+                sel = static_cast<unsigned char>( *pick + 1 );
+            }
+        }
+#endif
         if( action == "DOWN" ) {
             if( sel < 4 ) {
                 sel++;
@@ -1367,7 +2026,9 @@ tab_direction set_traits( avatar &u, points_left &points )
 #if defined(TILES)
         const int int_page_width = static_cast<int>( page_width );
 
-        if( use_character_preview ) {
+        if( use_character_preview && cata::godot_bridge::native_screens() ) {
+            prepare_native_preview( character_preview );
+        } else if( use_character_preview ) {
             constexpr int preview_nlines_min = 7;
             constexpr int preview_ncols_min = 10;
             const int preview_nlines = std::max( ( TERMY - 9 ) / 3, preview_nlines_min );
@@ -1415,7 +2076,46 @@ tab_direction set_traits( avatar &u, points_left &points )
 #endif
 
 
+#if defined(TILES)
+    const auto native = chargen_view( ui, u, "NEW_CHAR_TRAITS", init_windows );
+    const auto publish_native = [&]() {
+        auto view = pick_pages{ .used_pages = used_pages, .page = iCurWorkingPage,
+                                .cursors = { iCurrentLine[0], iCurrentLine[1], iCurrentLine[2] },
+                                .add_text = _( "Take trait" ), .remove_text = _( "Remove trait" ),
+                                .preview = use_character_preview ? &character_preview : nullptr };
+        for( auto page = 0; page < 3; page++ ) {
+            view.pages[page] = vStartingTraits[page] | std::views::transform( [&]( const trait_entry & e ) {
+                return pick_entry{ .name = e.id->name(), .points = e.id->points, .has = e.avatar_has, .blocked = e.conflicts || e.forbidden };
+            } ) | std::ranges::to<std::vector>();
+        }
+        if( const auto &current = vStartingTraits[iCurWorkingPage]; !current.empty() ) {
+            const auto &e = current[iCurrentLine[iCurWorkingPage]];
+            view.description = e.id->desc();
+        }
+        auto frame = chargen_frame{ .u = u, .points = points, .step = chargen_step::traits, .category = "NEW_CHAR_TRAITS" };
+        if( !points.is_freeform() ) {
+            frame.extra = {
+                { .label = _( "Advantages" ), .value = { .text = string_format( "%d/%d", num_good, max_trait_points ), .color = c_light_green } },
+                { .label = _( "Disadvantages" ), .value = { .text = string_format( "%d/-%d", num_bad, max_trait_points ), .color = c_light_red } },
+            };
+        }
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+            write_pick_pages( jsout, frame, view );
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            if( use_character_preview ) {
+                character_preview.display();
+            }
+            return;
+        }
+#endif
         werase( w );
         werase( w_description );
 
@@ -1530,6 +2230,18 @@ tab_direction set_traits( avatar &u, points_left &points )
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
 #if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::traits, u.prof ) ) {
+                character_preview.clear();
+                return *direction;
+            }
+            const auto page = *pick / gs::row_stride;
+            const auto row = *pick % gs::row_stride;
+            if( page < used_pages && static_cast<size_t>( row ) < traits_size[page] ) {
+                iCurWorkingPage = page;
+                iCurrentLine[page] = row;
+            }
+        }
         if( action == "zoom_in" && use_character_preview ) {
             character_preview.zoom_in();
         }
@@ -1806,7 +2518,9 @@ tab_direction set_bionics( avatar &u, points_left &points )
 #if defined(TILES)
         const int int_page_width = static_cast<int>( page_width );
 
-        if( use_character_preview ) {
+        if( use_character_preview && cata::godot_bridge::native_screens() ) {
+            prepare_native_preview( character_preview );
+        } else if( use_character_preview ) {
             constexpr int preview_nlines_min = 7;
             constexpr int preview_ncols_min = 10;
             const int preview_nlines = std::max( ( TERMY - 9 ) / 3, preview_nlines_min );
@@ -1854,7 +2568,46 @@ tab_direction set_bionics( avatar &u, points_left &points )
 #endif
 
 
+#if defined(TILES)
+    const auto native = chargen_view( ui, u, "NEW_CHAR_TRAITS", init_windows );
+    const auto publish_native = [&]() {
+        auto view = pick_pages{ .used_pages = used_pages, .page = iCurWorkingPage,
+                                .cursors = { iCurrentLine[0], iCurrentLine[1], iCurrentLine[2] },
+                                .add_text = _( "Add bionic" ), .remove_text = _( "Remove bionic" ),
+                                .preview = use_character_preview ? &character_preview : nullptr };
+        for( auto page = 0; page < 3; page++ ) {
+            view.pages[page] = vStartingBionics[page] | std::views::transform( [&]( const bionic_entry & e ) {
+                return pick_entry{ .name = e.id->name.translated(), .points = e.id->points, .has = e.avatar_has, .blocked = e.conflicts || e.forbidden };
+            } ) | std::ranges::to<std::vector>();
+        }
+        if( const auto &current = vStartingBionics[iCurWorkingPage]; !current.empty() ) {
+            const auto &e = current[iCurrentLine[iCurWorkingPage]];
+            view.description = e.id->description.translated();
+        }
+        auto frame = chargen_frame{ .u = u, .points = points, .step = chargen_step::bionics, .category = "NEW_CHAR_TRAITS" };
+        if( !points.is_freeform() ) {
+            frame.extra = {
+                { .label = _( "Advantages" ), .value = { .text = string_format( "%d/%d", num_good, max_trait_points ), .color = c_light_green } },
+                { .label = _( "Disadvantages" ), .value = { .text = string_format( "%d/-%d", num_bad, max_trait_points ), .color = c_light_red } },
+            };
+        }
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+            write_pick_pages( jsout, frame, view );
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            if( use_character_preview ) {
+                character_preview.display();
+            }
+            return;
+        }
+#endif
         werase( w );
         werase( w_description );
 
@@ -1969,6 +2722,18 @@ tab_direction set_bionics( avatar &u, points_left &points )
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
 #if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::bionics, u.prof ) ) {
+                character_preview.clear();
+                return *direction;
+            }
+            const auto page = *pick / gs::row_stride;
+            const auto row = *pick % gs::row_stride;
+            if( page < used_pages && static_cast<size_t>( row ) < bionics_size[page] ) {
+                iCurWorkingPage = page;
+                iCurrentLine[page] = row;
+            }
+        }
         if( action == "zoom_in" && use_character_preview ) {
             character_preview.zoom_in();
         }
@@ -2239,7 +3004,9 @@ tab_direction set_profession( avatar &u, points_left &points,
 #if defined(TILES)
         const int int_page_width = 55;
 
-        if( use_character_preview ) {
+        if( use_character_preview && cata::godot_bridge::native_screens() ) {
+            prepare_native_preview( character_preview );
+        } else if( use_character_preview ) {
             constexpr int preview_nlines_min = 7;
             constexpr int preview_ncols_min = 10;
             const int preview_nlines = std::max( ( TERMY - 9 ) / 3, preview_nlines_min );
@@ -2283,7 +3050,263 @@ tab_direction set_profession( avatar &u, points_left &points,
 
     int iheight = 0;
 
+    // Everything a profession starts with: addictions, traits, skills, items, bionics and more.
+    const auto profession_details = [&]( const profession & prof ) -> std::string {
+        std::string buffer;
+        // Profession addictions
+        const auto prof_addictions = prof.addictions();
+        if( !prof_addictions.empty() )
+        {
+            buffer += colorize( _( "Addictions:" ), c_light_blue ) + "\n";
+            for( const auto &a : prof_addictions ) {
+                const auto format = pgettext( "set_profession_addictions", "%1$s (%2$d)" );
+                buffer += string_format( format, addiction_name( a ), a.intensity ) + "\n";
+            }
+        }
+
+        // Profession traits
+        const auto prof_traits = prof.get_locked_traits();
+        buffer += colorize( _( "Traits:" ), c_light_blue ) + "\n";
+        if( prof_traits.empty() )
+        {
+            buffer += pgettext( "set_profession_trait", "None" ) + std::string( "\n" );
+        } else
+        {
+            for( const auto &t : prof_traits ) {
+                buffer += mutation_branch::get_name( t ) + "\n";
+            }
+        }
+
+        // Profession skills
+        std::vector<std::pair<skill_id, int>> prof_skills = prof.skills();
+        std::stable_sort( prof_skills.begin(), prof_skills.end(),
+                          []( const std::pair<skill_id, int> &a, const std::pair<skill_id, int> &b )
+        {
+            return localized_compare( std::make_pair( a.first->display_category(), a.first->name() ),
+                                      std::make_pair( b.first->display_category(), b.first->name() ) );
+        } );
+        buffer += colorize( _( "Skills:" ), c_light_blue ) + "\n";
+        if( prof_skills.empty() )
+        {
+            buffer += pgettext( "set_profession_skill", "None" ) + std::string( "\n" );
+        } else
+        {
+            skill_displayType_id cur_category = skill_displayType_id::NULL_ID();
+            for( const auto &sl : prof_skills ) {
+                if( cur_category != sl.first->display_category() ) {
+                    cur_category = sl.first->display_category();
+                    buffer += colorize( string_format( sl.first->display_category()->display_string() ),
+                                        c_yellow ) + "\n";
+                }
+                const auto format = pgettext( "set_profession_skill", "%1$s (%2$d)" );
+                buffer += "  " + string_format( format, sl.first.obj().name(), sl.second ) + "\n";
+            }
+        }
+
+        // Profession items
+        const auto prof_items = prof.items( u.male, u.get_mutations() );
+        buffer += colorize( _( "Items:" ), c_light_blue ) + "\n";
+        if( prof_items.empty() )
+        {
+            buffer += pgettext( "set_profession_item", "None" ) + std::string( "\n" );
+        } else
+        {
+            // TODO: If the item group is randomized *at all*, these will be different each time
+            // and it won't match what you actually start with
+            // TODO: Put like items together like the inventory does, so we don't have to scroll
+            // through a list of a dozen forks.
+            std::string buffer_wielded;
+            std::string buffer_worn;
+            std::string buffer_inventory;
+            for( const auto &it : prof_items ) {
+                if( it->has_flag( json_flag_no_auto_equip ) ) {
+                    buffer_inventory += it->display_name() + "\n";
+                } else if( it->has_flag( json_flag_auto_wield ) ) {
+                    buffer_wielded += it->display_name() + "\n";
+                } else if( it->is_armor() ) {
+                    buffer_worn += it->display_name() + "\n";
+                } else {
+                    buffer_inventory += it->display_name() + "\n";
+                }
+            }
+            buffer += colorize( _( "Wielded:" ), c_cyan ) + "\n";
+            buffer += !buffer_wielded.empty() ? buffer_wielded : pgettext( "set_profession_item_wielded",
+                      "None\n" );
+            buffer += colorize( _( "Worn:" ), c_cyan ) + "\n";
+            buffer += !buffer_worn.empty() ? buffer_worn : pgettext( "set_profession_item_worn", "None\n" );
+            buffer += colorize( _( "Inventory:" ), c_cyan ) + "\n";
+            buffer += !buffer_inventory.empty() ? buffer_inventory : pgettext( "set_profession_item_inventory",
+                      "None\n" );
+        }
+
+        // Profession bionics, active bionics shown first
+        auto prof_CBMs = prof.CBMs();
+        std::sort( begin( prof_CBMs ), end( prof_CBMs ), []( const bionic_id & a, const bionic_id & b )
+        {
+            return a->activated && !b->activated;
+        } );
+        buffer += colorize( _( "Bionics:" ), c_light_blue ) + "\n";
+        if( prof_CBMs.empty() )
+        {
+            buffer += pgettext( "set_profession_bionic", "None" ) + std::string( "\n" );
+        } else
+        {
+            for( const auto &b : prof_CBMs ) {
+                const auto &cbm = b.obj();
+
+                if( cbm.activated && cbm.has_flag( STATIC( flag_id( "BIONIC_TOGGLED" ) ) ) ) {
+                    buffer += string_format( _( "%s (toggled)" ), cbm.name ) + "\n";
+                } else if( cbm.activated ) {
+                    buffer += string_format( _( "%s (activated)" ), cbm.name ) + "\n";
+                } else {
+                    buffer += cbm.name + "\n";
+                }
+            }
+        }
+        // Profession pet
+        if( !prof.pets().empty() )
+        {
+            buffer += colorize( _( "Pets:" ), c_light_blue ) + "\n";
+            for( auto elem : prof.pets() ) {
+                monster mon( elem );
+                buffer += mon.get_name() + "\n";
+            }
+        }
+        // Profession vehicle
+        if( prof.vehicle() )
+        {
+            buffer += colorize( _( "Vehicle:" ), c_light_blue ) + "\n";
+            vproto_id veh_id = prof.vehicle();
+            buffer += veh_id->name + "\n";
+        }
+        // Profession spells
+        if( !prof.spells().empty() )
+        {
+            buffer += colorize( _( "Spells:" ), c_light_blue ) + "\n";
+            for( const std::pair<spell_id, int> spell_pair : prof.spells() ) {
+                buffer += string_format( _( "%s level %d" ), spell_pair.first->name, spell_pair.second ) + "\n";
+            }
+        }
+
+        // Profession money
+        std::optional<int> cash = prof.starting_cash();
+
+        if( cash.has_value() )
+        {
+            buffer += colorize( _( "Money:" ), c_light_blue ) + "\n";
+            buffer += format_money( cash.value() ) + "\n";
+        }
+        // Profession companions
+        std::vector<npc_class_id> npcs = prof.npcs();
+
+        if( !npcs.empty() )
+        {
+            buffer += "\n" + colorize( _( "Companions:" ), c_light_blue ) + "\n";
+            for( const npc_class_id &id : npcs ) {
+                if( id.is_valid() ) {
+                    const npc_class &npc_cls = id.obj();
+                    buffer += npc_cls.get_name() + "\n";
+                }
+            }
+        }
+        return buffer;
+    };
+
+#if defined(TILES)
+    // Draws the character preview with the highlighted profession, so it shows that profession's
+    // clothes and bionics rather than the currently chosen one's.
+    const auto display_preview = [&]() {
+        if( cur_id < 0 || static_cast<size_t>( cur_id ) >= sorted_profs.size() ) {
+            character_preview.display();
+            return;
+        }
+        const auto old_prof = u.prof;
+        u.prof = sorted_profs[cur_id];
+        character_preview.display();
+        u.prof = old_prof;
+    };
+    const auto native = chargen_view( ui, u, "NEW_CHAR_PROFESSIONS", init_windows );
+    const auto publish_native = [&]() {
+        const auto valid = cur_id >= 0 && static_cast<size_t>( cur_id ) < sorted_profs.size();
+        const auto frame = chargen_frame{ .u = u, .points = points, .step = chargen_step::profession, .category = "NEW_CHAR_PROFESSIONS",
+                                          .net_cost = valid ? sorted_profs[cur_id]->point_cost() - u.prof->point_cost() : 0 };
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+            write_choice_toolbar( jsout, { .category = frame.category, .filter = filterstring,
+                                           .placeholder = _( "Search by profession name." ), .by_points = profession_sorter.sort_by_points,
+                                           .male = u.male
+                                         } );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Professions" ) );
+            jsout.member( "icon", "briefcase" );
+            jsout.member( "count", std::to_string( sorted_profs.size() ) );
+            jsout.member( "cursor", cur_id );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &p : sorted_profs ) {
+                write_choice_row( jsout, { .name = p->gender_appropriate_name( u.male ), .cost = p->point_cost(), .chosen = p == u.prof } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 560 );
+            if( use_character_preview ) {
+                write_preview( jsout, character_preview, "" );
+            }
+            if( valid ) {
+                const auto &prof = *sorted_profs[cur_id];
+                const auto cost = std::abs( prof.point_cost() );
+                const auto cost_text = prof.point_cost() < 0 ?
+                                       vgettext( "Profession %1$s earns %2$d point", "Profession %1$s earns %2$d points", cost ) :
+                                       vgettext( "Profession %1$s costs %2$d point", "Profession %1$s costs %2$d points", cost );
+                const auto can_pick = can_pick_prof( prof, u, points.skill_points_left() );
+                const auto details = profession_details( prof );
+                // Lets the keys scroll the details as far as the old screen did.
+                iheight = static_cast<int>( std::ranges::count( details, '\n' ) );
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = prof.gender_appropriate_name( u.male ), .color = c_white } );
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = colorize( string_format( cost_text, prof.gender_appropriate_name( u.male ), cost ),
+                                                 can_pick ? c_green : c_light_red ) + "\n\n" + prof.description( u.male ) + "\n\n" + details
+                                       } );
+                jsout.member( "scroll", desc_offset );
+            }
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Choose profession" ), .icon = "check", .category = frame.category,
+                                       .enabled = valid && sorted_profs[cur_id] != u.prof
+                                     } );
+            write_next_button( jsout, frame );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "CONFIRM", frame.category, _( "Pick" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Scroll details" ) );
+            gs::write_hint( jsout, "RANDOMIZE", frame.category, _( "Random pick" ) );
+            write_nav_hints( jsout, frame.category );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            if( use_character_preview ) {
+                display_preview();
+            }
+            return;
+        }
+#endif
         werase( w );
         draw_character_tabs( w, _( "PROFESSION" ), u.prof );
 
@@ -2363,147 +3386,7 @@ tab_direction set_profession( avatar &u, points_left &points,
         werase( w_sorting );
         werase( w_genderswap );
         if( cur_id_is_valid ) {
-            std::string buffer;
-            // Profession addictions
-            const auto prof_addictions = sorted_profs[cur_id]->addictions();
-            if( !prof_addictions.empty() ) {
-                buffer += colorize( _( "Addictions:" ), c_light_blue ) + "\n";
-                for( const auto &a : prof_addictions ) {
-                    const auto format = pgettext( "set_profession_addictions", "%1$s (%2$d)" );
-                    buffer += string_format( format, addiction_name( a ), a.intensity ) + "\n";
-                }
-            }
-
-            // Profession traits
-            const auto prof_traits = sorted_profs[cur_id]->get_locked_traits();
-            buffer += colorize( _( "Traits:" ), c_light_blue ) + "\n";
-            if( prof_traits.empty() ) {
-                buffer += pgettext( "set_profession_trait", "None" ) + std::string( "\n" );
-            } else {
-                for( const auto &t : prof_traits ) {
-                    buffer += mutation_branch::get_name( t ) + "\n";
-                }
-            }
-
-            // Profession skills
-            std::vector<std::pair<skill_id, int>> prof_skills = sorted_profs[cur_id]->skills();
-            std::stable_sort( prof_skills.begin(), prof_skills.end(),
-            []( const std::pair<skill_id, int> &a, const std::pair<skill_id, int> &b ) {
-                return localized_compare( std::make_pair( a.first->display_category(), a.first->name() ),
-                                          std::make_pair( b.first->display_category(), b.first->name() ) );
-            } );
-            buffer += colorize( _( "Skills:" ), c_light_blue ) + "\n";
-            if( prof_skills.empty() ) {
-                buffer += pgettext( "set_profession_skill", "None" ) + std::string( "\n" );
-            } else {
-                skill_displayType_id cur_category = skill_displayType_id::NULL_ID();
-                for( const auto &sl : prof_skills ) {
-                    if( cur_category != sl.first->display_category() ) {
-                        cur_category = sl.first->display_category();
-                        buffer += colorize( string_format( sl.first->display_category()->display_string() ),
-                                            c_yellow ) + "\n";
-                    }
-                    const auto format = pgettext( "set_profession_skill", "%1$s (%2$d)" );
-                    buffer += "  " + string_format( format, sl.first.obj().name(), sl.second ) + "\n";
-                }
-            }
-
-            // Profession items
-            const auto prof_items = sorted_profs[cur_id]->items( u.male, u.get_mutations() );
-            buffer += colorize( _( "Items:" ), c_light_blue ) + "\n";
-            if( prof_items.empty() ) {
-                buffer += pgettext( "set_profession_item", "None" ) + std::string( "\n" );
-            } else {
-                // TODO: If the item group is randomized *at all*, these will be different each time
-                // and it won't match what you actually start with
-                // TODO: Put like items together like the inventory does, so we don't have to scroll
-                // through a list of a dozen forks.
-                std::string buffer_wielded;
-                std::string buffer_worn;
-                std::string buffer_inventory;
-                for( const auto &it : prof_items ) {
-                    if( it->has_flag( json_flag_no_auto_equip ) ) {
-                        buffer_inventory += it->display_name() + "\n";
-                    } else if( it->has_flag( json_flag_auto_wield ) ) {
-                        buffer_wielded += it->display_name() + "\n";
-                    } else if( it->is_armor() ) {
-                        buffer_worn += it->display_name() + "\n";
-                    } else {
-                        buffer_inventory += it->display_name() + "\n";
-                    }
-                }
-                buffer += colorize( _( "Wielded:" ), c_cyan ) + "\n";
-                buffer += !buffer_wielded.empty() ? buffer_wielded : pgettext( "set_profession_item_wielded",
-                          "None\n" );
-                buffer += colorize( _( "Worn:" ), c_cyan ) + "\n";
-                buffer += !buffer_worn.empty() ? buffer_worn : pgettext( "set_profession_item_worn", "None\n" );
-                buffer += colorize( _( "Inventory:" ), c_cyan ) + "\n";
-                buffer += !buffer_inventory.empty() ? buffer_inventory : pgettext( "set_profession_item_inventory",
-                          "None\n" );
-            }
-
-            // Profession bionics, active bionics shown first
-            auto prof_CBMs = sorted_profs[cur_id]->CBMs();
-            std::sort( begin( prof_CBMs ), end( prof_CBMs ), []( const bionic_id & a, const bionic_id & b ) {
-                return a->activated && !b->activated;
-            } );
-            buffer += colorize( _( "Bionics:" ), c_light_blue ) + "\n";
-            if( prof_CBMs.empty() ) {
-                buffer += pgettext( "set_profession_bionic", "None" ) + std::string( "\n" );
-            } else {
-                for( const auto &b : prof_CBMs ) {
-                    const auto &cbm = b.obj();
-
-                    if( cbm.activated && cbm.has_flag( STATIC( flag_id( "BIONIC_TOGGLED" ) ) ) ) {
-                        buffer += string_format( _( "%s (toggled)" ), cbm.name ) + "\n";
-                    } else if( cbm.activated ) {
-                        buffer += string_format( _( "%s (activated)" ), cbm.name ) + "\n";
-                    } else {
-                        buffer += cbm.name + "\n";
-                    }
-                }
-            }
-            // Profession pet
-            if( !sorted_profs[cur_id]->pets().empty() ) {
-                buffer += colorize( _( "Pets:" ), c_light_blue ) + "\n";
-                for( auto elem : sorted_profs[cur_id]->pets() ) {
-                    monster mon( elem );
-                    buffer += mon.get_name() + "\n";
-                }
-            }
-            // Profession vehicle
-            if( sorted_profs[cur_id]->vehicle() ) {
-                buffer += colorize( _( "Vehicle:" ), c_light_blue ) + "\n";
-                vproto_id veh_id = sorted_profs[cur_id]->vehicle();
-                buffer += veh_id->name + "\n";
-            }
-            // Profession spells
-            if( !sorted_profs[cur_id]->spells().empty() ) {
-                buffer += colorize( _( "Spells:" ), c_light_blue ) + "\n";
-                for( const std::pair<spell_id, int> spell_pair : sorted_profs[cur_id]->spells() ) {
-                    buffer += string_format( _( "%s level %d" ), spell_pair.first->name, spell_pair.second ) + "\n";
-                }
-            }
-
-            // Profession money
-            std::optional<int> cash = sorted_profs[cur_id]->starting_cash();
-
-            if( cash.has_value() ) {
-                buffer += colorize( _( "Money:" ), c_light_blue ) + "\n";
-                buffer += format_money( cash.value() ) + "\n";
-            }
-            // Profession companions
-            std::vector<npc_class_id> npcs = sorted_profs[cur_id]->npcs();
-
-            if( !npcs.empty() ) {
-                buffer += "\n" + colorize( _( "Companions:" ), c_light_blue ) + "\n";
-                for( const npc_class_id &id : npcs ) {
-                    if( id.is_valid() ) {
-                        const npc_class &npc_cls = id.obj();
-                        buffer += npc_cls.get_name() + "\n";
-                    }
-                }
-            }
+            const auto buffer = profession_details( *sorted_profs[cur_id] );
             const auto scroll_msg = string_format(
                                         _( "Press <color_light_green>%1$s</color> or <color_light_green>%2$s</color> to scroll." ),
                                         ctxt.get_desc( "LEFT" ),
@@ -2532,23 +3415,8 @@ tab_direction set_profession( avatar &u, points_left &points,
         wnoutrefresh( w_genderswap );
         wnoutrefresh( w_sorting );
 #if defined(TILES)
-        // Draws character preview. Use a temporary avatar with the highlighted
-        // profession so the preview reflects the selection rather than the
-        // currently assigned profession.
         if( use_character_preview ) {
-            if( cur_id_is_valid ) {
-                // Temporarily assign the highlighted profession to `u` so the
-                // preview code that inspects `av.prof` shows the correct bionics
-                // and profession-related overlays. Restore after display.
-                auto old_prof = u.prof;
-                u.prof = sorted_profs[cur_id];
-                character_preview.init( &u );
-                character_preview.display();
-                u.prof = old_prof;
-                character_preview.init( &u );
-            } else {
-                character_preview.display();
-            }
+            display_preview();
         }
 #endif
     } );
@@ -2589,6 +3457,18 @@ tab_direction set_profession( avatar &u, points_left &points,
 
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::profession, u.prof ) ) {
+                retval = *direction;
+                continue;
+            }
+            if( *pick < profs_length && *pick != cur_id ) {
+                cur_id = *pick;
+                desc_offset = 0;
+            }
+        }
+#endif
         if( action == "DOWN" ) {
             cur_id++;
             if( cur_id > profs_length - 1 ) {
@@ -2731,40 +3611,19 @@ tab_direction set_skills( avatar &u, points_left &points )
 
     const int remaining_points_length = utf8_width( points.to_string(), true );
 
-    ui.on_redraw( [&]( const ui_adaptor & ) {
-        draw_character_tabs( w, _( "SKILLS" ), u.prof );
-
-        draw_points( w, points );
-        // Clear the bottom of the screen.
-        werase( w_description );
-        mvwprintz( w, point( remaining_points_length + 9, 3 ), c_light_gray,
-                   std::string( getmaxx( w ) - remaining_points_length - 10, ' ' ) );
-
-        // Write the hint as to upgrade costs
-        const int cost = skill_increment_cost( u, currentSkill->ident() );
-        const int level = u.get_skill_level( currentSkill->ident(), true );
-        const int upgrade_levels = level == 0 ? 2 : 1;
-        // We have two different strings to pluralize, so we have to use two
-        // translation calls.
-        const std::string upgrade_levels_s = string_format(
-                //~ levels here are skill levels at character creation time
-                vgettext( "%d level", "%d levels", upgrade_levels ), upgrade_levels );
-        const nc_color color = points.skill_points_left() >= cost ? COL_SKILL_USED : c_light_red;
-        mvwprintz( w, point( remaining_points_length + 9, 3 ), color,
-                   //~ Second string is e.g. "1 level" or "2 levels"
-                   vgettext( "Upgrading %s by %s costs %d point",
-                             "Upgrading %s by %s costs %d points", cost ),
-                   currentSkill->name(), upgrade_levels_s, cost );
-
+    // The skill's description and the recipes it would let the character craft.
+    const auto skill_text = [&]() -> std::string {
         // We want recipes from profession skills displayed, but without boosting the skills
         // Copy the skills, and boost the copy
         SkillLevelMap with_prof_skills = u.get_all_skills();
-        for( const auto &sk : prof_skills ) {
+        for( const auto &sk : prof_skills )
+        {
             with_prof_skills.mod_skill_level( sk.first, sk.second );
         }
 
         std::map<std::string, std::vector<std::pair<std::string, int> > > recipes;
-        for( const auto &e : recipe_dict ) {
+        for( const auto &e : recipe_dict )
+        {
             const auto &r = e.second;
             if( r.has_flag( "SECRET" ) ) {
                 continue;
@@ -2789,7 +3648,8 @@ tab_direction set_skills( avatar &u, points_left &points )
 
         std::string rec_disp;
 
-        for( auto &elem : recipes ) {
+        for( auto &elem : recipes )
+        {
             std::sort( elem.second.begin(), elem.second.end(),
                        []( const std::pair<std::string, int> &lhs,
             const std::pair<std::string, int> &rhs ) {
@@ -2809,7 +3669,116 @@ tab_direction set_skills( avatar &u, points_left &points )
             }
         }
 
-        rec_disp = currentSkill->description() + rec_disp;
+        return currentSkill->description() + rec_disp;
+    };
+
+#if defined(TILES)
+    const auto native = chargen_view( ui, u, "NEW_CHAR_SKILLS", init_windows );
+    const auto publish_native = [&]() {
+        const auto frame = chargen_frame{ .u = u, .points = points, .step = chargen_step::skills, .category = "NEW_CHAR_SKILLS" };
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Skills" ) );
+            jsout.member( "icon", "graduation-cap" );
+            jsout.member( "cursor", cur_pos );
+            jsout.member( "confirm", "" );
+            jsout.member( "rows" );
+            jsout.start_array();
+            auto category = skill_displayType_id::NULL_ID();
+            for( const auto &[i, entry] : skill_list | std::views::enumerate ) {
+                const auto *skill = entry.first;
+                if( category != skill->display_category() ) {
+                    category = skill->display_category();
+                    gs::write_row( jsout, { .text = { .text = category->display_string(), .color = c_yellow }, .heading = true } );
+                }
+                const auto level = u.get_skill_level( skill->ident(), true );
+                const auto bonus = prof_skills.find( skill->ident() );
+                gs::write_row( jsout, { .text = { .text = skill->name(), .color = level > 0 ? COL_SKILL_USED : c_light_gray },
+                .cells = {
+                    { .text = level > 0 ? std::to_string( level ) : "", .color = COL_SKILL_USED },
+                    { .text = bonus != prof_skills.end() ? string_format( "+%d", bonus->second ) : "", .color = c_white },
+                },
+                .i = static_cast<int>( i ),
+                .tip = bonus != prof_skills.end() ? _( "Your profession adds the levels in white." ) : ""
+                                      } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            const auto cost = skill_increment_cost( u, currentSkill->ident() );
+            const auto level = u.get_skill_level( currentSkill->ident(), true );
+            const auto upgrade_levels = level == 0 ? 2 : 1;
+            const auto upgrade_levels_s = string_format( vgettext( "%d level", "%d levels", upgrade_levels ),
+                                          upgrade_levels );
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 620 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = currentSkill->name(), .color = c_white } );
+            jsout.member( "subtitle", currentSkill->display_category()->display_string() );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = colorize( string_format( vgettext( "Upgrading %s by %s costs %d point",
+                                             "Upgrading %s by %s costs %d points", cost ), currentSkill->name(), upgrade_levels_s, cost ),
+                                             points.skill_points_left() >= cost ? COL_SKILL_USED : c_light_red ) + "\n\n" + skill_text(),
+                                     .color = c_light_gray
+                                   } );
+            jsout.member( "scroll", selected );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "LEFT", .text = _( "Lower" ), .icon = "minus", .category = frame.category, .enabled = level > 0 } );
+            gs::write_button( jsout, { .act = "RIGHT", .text = _( "Raise" ), .icon = "plus", .category = frame.category, .enabled = level < MAX_SKILL } );
+            write_next_button( jsout, frame );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "LEFT", frame.category, _( "Lower" ) );
+            gs::write_hint( jsout, "RIGHT", frame.category, _( "Raise" ) );
+            gs::write_hint( jsout, "SCROLL_DOWN", frame.category, _( "Scroll" ) );
+            write_nav_hints( jsout, frame.category );
+            jsout.end_array();
+        } );
+    };
+#endif
+
+    ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
+        draw_character_tabs( w, _( "SKILLS" ), u.prof );
+
+        draw_points( w, points );
+        // Clear the bottom of the screen.
+        werase( w_description );
+        mvwprintz( w, point( remaining_points_length + 9, 3 ), c_light_gray,
+                   std::string( getmaxx( w ) - remaining_points_length - 10, ' ' ) );
+
+        // Write the hint as to upgrade costs
+        const int cost = skill_increment_cost( u, currentSkill->ident() );
+        const int level = u.get_skill_level( currentSkill->ident(), true );
+        const int upgrade_levels = level == 0 ? 2 : 1;
+        // We have two different strings to pluralize, so we have to use two
+        // translation calls.
+        const std::string upgrade_levels_s = string_format(
+                //~ levels here are skill levels at character creation time
+                vgettext( "%d level", "%d levels", upgrade_levels ), upgrade_levels );
+        const nc_color color = points.skill_points_left() >= cost ? COL_SKILL_USED : c_light_red;
+        mvwprintz( w, point( remaining_points_length + 9, 3 ), color,
+                   //~ Second string is e.g. "1 level" or "2 levels"
+                   vgettext( "Upgrading %s by %s costs %d point",
+                             "Upgrading %s by %s costs %d points", cost ),
+                   currentSkill->name(), upgrade_levels_s, cost );
+
+        const auto rec_disp = skill_text();
 
         const auto vFolded = foldstring( rec_disp, getmaxx( w_description ) );
         int iLines = vFolded.size();
@@ -2881,6 +3850,24 @@ tab_direction set_skills( avatar &u, points_left &points )
     do {
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::skills, u.prof ) ) {
+                return *direction;
+            }
+            if( *pick < num_skills ) {
+                cur_pos = *pick;
+                currentSkill = skill_list[cur_pos].first;
+                selected = 0;
+            }
+        }
+        if( native && ( action == "SCROLL_DOWN" || action == "SCROLL_UP" ) ) {
+            // The old screen stops scrolling at the end of the text it folded; this one at its last line.
+            const auto lines = static_cast<int>( std::ranges::count( skill_text(), '\n' ) );
+            selected = std::clamp( selected + ( action == "SCROLL_DOWN" ? 1 : -1 ), 0, lines );
+            continue;
+        }
+#endif
         if( action == "DOWN" ) {
             cur_pos = modulo( cur_pos + 1, num_skills );
             currentSkill = skill_list[cur_pos].first;
@@ -2988,7 +3975,82 @@ tab_direction set_magic( avatar &u, points_left &points )
 
     const int remaining_points_length = utf8_width( points.to_string(), true );
 
+#if defined(TILES)
+    const auto native = chargen_view( ui, u, "NEW_CHAR_SKILLS", init_windows );
+    const auto publish_native = [&]() {
+        const auto frame = chargen_frame{ .u = u, .points = points, .step = chargen_step::magic, .category = "NEW_CHAR_SKILLS" };
+        const auto spell_level = [&]( const spell_id & sp ) { return u.magic->knows_spell( sp ) ? u.magic->get_spell( sp ).get_level() : -1; };
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Spells" ) );
+            jsout.member( "icon", "sparkles" );
+            jsout.member( "cursor", cur_pos );
+            jsout.member( "confirm", "" );
+            jsout.member( "rows" );
+            jsout.start_array();
+            auto spell_class = trait_id::NULL_ID();
+            for( const auto &[i, entry] : spell_list | std::views::enumerate ) {
+                const auto &sp = entry.first;
+                if( spell_class != sp->spell_class ) {
+                    spell_class = sp->spell_class;
+                    gs::write_row( jsout, { .text = { .text = spell_class == trait_id( "NONE" ) ? _( "Classless" ) : spell_class->name(), .color = c_yellow },
+                                            .heading = true
+                                          } );
+                }
+                const auto level = spell_level( sp );
+                gs::write_row( jsout, { .text = { .text = sp->name.translated(), .color = level >= 0 ? COL_SKILL_USED : c_light_gray },
+                .cells = { { .text = level >= 0 ? std::to_string( level ) : "", .color = COL_SKILL_USED } },
+                .i = static_cast<int>( i )
+                                      } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            const auto level = spell_level( current_spell );
+            const auto cost = level >= 0 ? current_spell->increase_points : current_spell->starting_points;
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 620 );
+            jsout.member( "title" );
+            gs::write_span( jsout, { .text = current_spell->name.translated(), .color = c_white } );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = colorize( string_format( vgettext( "Upgrading %s by 1 level costs %d point",
+                                             "Upgrading %s by 1 level costs %d points", cost ), current_spell->name, cost ),
+                                             points.trait_points_left() >= cost ? COL_SKILL_USED : c_light_red ) + "\n\n" +
+                                             current_spell->description.translated(), .color = c_light_gray
+                                   } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "LEFT", .text = _( "Lower" ), .icon = "minus", .category = frame.category, .enabled = level >= 0 } );
+            gs::write_button( jsout, { .act = "RIGHT", .text = _( "Raise" ), .icon = "plus", .category = frame.category,
+                                       .enabled = level < current_spell->max_starting_level
+                                     } );
+            write_next_button( jsout, frame );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "LEFT", frame.category, _( "Lower" ) );
+            gs::write_hint( jsout, "RIGHT", frame.category, _( "Raise" ) );
+            write_nav_hints( jsout, frame.category );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_character_tabs( w, _( "MAGIC" ), u.prof );
 
         draw_points( w, points );
@@ -3079,6 +4141,17 @@ tab_direction set_magic( avatar &u, points_left &points )
     do {
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::magic, u.prof ) ) {
+                return *direction;
+            }
+            if( *pick < num_spells ) {
+                cur_pos = *pick;
+                current_spell = spell_list[cur_pos].first;
+            }
+        }
+#endif
         if( action == "DOWN" ) {
             cur_pos = modulo( cur_pos + 1, num_spells );
             current_spell = spell_list[cur_pos].first;
@@ -3214,7 +4287,141 @@ tab_direction set_scenario( avatar &u, points_left &points,
         points.skill_points += u.prof->point_cost();
     }
 
+#if defined(TILES)
+    // What the old screen shows beside the list: professions, location, vehicle and flags.
+    const auto scenario_details = [&]( const scenario & scen ) -> std::string {
+        const auto heading = []( const std::string & text ) { return colorize( text, COL_HEADER ) + "\n"; };
+        auto psorter = profession_sorter;
+        psorter.sort_by_points = true;
+        const auto permitted = scen.permitted_professions();
+        const auto default_prof = *std::ranges::min_element( permitted, psorter );
+        const auto prof_points = default_prof->point_cost();
+        auto text = heading( _( "Professions:" ) ) + scen.prof_count_str() + _( ", default:\n" ) +
+                    default_prof->gender_appropriate_name( u.male );
+        if( prof_points != 0 )
+        {
+            text += colorize( string_format( " (%+d)", -prof_points ), prof_points > 0 ? c_red : c_green );
+        }
+        text += "\n\n" + heading( _( "Scenario Location:" ) ) +
+                string_format( _( "%s (%d locations, %d variants)" ), scen.start_name(), scen.start_location_count(),
+                               scen.start_location_targets_count() ) + "\n\n";
+        text += heading( _( "Scenario Vehicle:" ) ) + ( scen.vehicle() ? scen.vehicle()->name : "" ) + "\n\n";
+        text += heading( _( "Scenario Flags:" ) );
+        struct flag_text {
+            std::string flag;
+            std::string text;
+        };
+        const auto seasons = std::array{
+            flag_text{ .flag = "SPR_START", .text = _( "Spring start" ) },
+            flag_text{ .flag = "SUM_START", .text = _( "Summer start" ) },
+            flag_text{ .flag = "AUT_START", .text = _( "Autumn start" ) },
+            flag_text{ .flag = "WIN_START", .text = _( "Winter start" ) },
+            flag_text{ .flag = "SUM_ADV_START", .text = _( "Next summer start" ) },
+        };
+        if( const auto season = std::ranges::find_if( seasons, [&]( const flag_text & f ) { return scen.has_flag( f.flag ); } );
+        season != seasons.end() )
+        {
+            text += season->text + "\n";
+        }
+        const auto others = std::array{
+            flag_text{ .flag = "INFECTED", .text = _( "Infected player" ) },
+            flag_text{ .flag = "BAD_DAY", .text = _( "Drunk and sick player" ) },
+            flag_text{ .flag = "FIRE_START", .text = _( "Fire nearby" ) },
+            flag_text{ .flag = "SUR_START", .text = _( "Zombies nearby" ) },
+            flag_text{ .flag = "HELI_CRASH", .text = _( "Various limb wounds" ) },
+        };
+        for( const auto &f : others | std::views::filter( [&]( const flag_text & f ) { return scen.has_flag( f.flag ); } ) )
+        {
+            text += f.text + "\n";
+        }
+        if( get_option<std::string>( "STARTING_NPC" ) == "scenario" && scen.has_flag( "LONE_START" ) )
+        {
+            text += std::string( _( "No starting NPC" ) ) + "\n";
+        }
+        if( scen.has_flag( "BORDERED" ) )
+        {
+            text += std::string( _( "Starting location is bordered by an immense wall" ) ) + "\n";
+        }
+        return text;
+    };
+    const auto unavailable = [&]( const scenario & scen ) { return scen.has_flag( "CITY_START" ) && !scenario_sorter.cities_enabled; };
+    const auto native = chargen_view( ui, u, "NEW_CHAR_SCENARIOS", init_windows );
+    const auto publish_native = [&]() {
+        const auto valid = cur_id >= 0 && static_cast<size_t>( cur_id ) < sorted_scens.size();
+        const auto frame = chargen_frame{ .u = u, .points = points, .step = chargen_step::scenario, .category = "NEW_CHAR_SCENARIOS",
+                                          .net_cost = valid ? sorted_scens[cur_id]->point_cost() - g->scen->point_cost() : 0 };
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+            write_choice_toolbar( jsout, { .category = frame.category, .filter = filterstring,
+                                           .placeholder = _( "Search by scenario name." ), .by_points = scenario_sorter.sort_by_points
+                                         } );
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", _( "Scenarios" ) );
+            jsout.member( "icon", "map" );
+            jsout.member( "count", std::to_string( sorted_scens.size() ) );
+            jsout.member( "cursor", cur_id );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto *scen : sorted_scens ) {
+                write_choice_row( jsout, { .name = scen->gender_appropriate_name( u.male ), .cost = scen->point_cost(),
+                                           .chosen = scen == g->scen, .unavailable = unavailable( *scen )
+                                         } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 560 );
+            if( valid ) {
+                const auto &scen = *sorted_scens[cur_id];
+                const auto cost = std::abs( scen.point_cost() );
+                const auto cost_text = scen.point_cost() < 0 ?
+                                       vgettext( "Scenario %1$s earns %2$d point", "Scenario %1$s earns %2$d points", cost ) :
+                                       vgettext( "Scenario %1$s costs %2$d point", "Scenario %1$s cost %2$d points", cost );
+                const auto can_pick = scen.can_pick( *g->scen, points.skill_points_left() );
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = scen.gender_appropriate_name( u.male ), .color = c_white } );
+                if( unavailable( scen ) ) {
+                    jsout.member( "warn" );
+                    gs::write_span( jsout, { .text = _( "This scenario is not available in this world due to city size settings." ), .color = c_red } );
+                }
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = colorize( string_format( cost_text, scen.gender_appropriate_name( u.male ), cost ),
+                                                 can_pick ? c_green : c_light_red ) + "\n\n" + scen.description( u.male ) + "\n\n" +
+                                                 scenario_details( scen )
+                                       } );
+            }
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Choose scenario" ), .icon = "check", .category = frame.category,
+                                       .enabled = valid && sorted_scens[cur_id] != g->scen && !unavailable( *sorted_scens[cur_id] )
+                                     } );
+            write_next_button( jsout, frame );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_hint( jsout, "CONFIRM", frame.category, _( "Pick" ) );
+            gs::write_hint( jsout, "RANDOMIZE", frame.category, _( "Random pick" ) );
+            write_nav_hints( jsout, frame.category );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         werase( w );
         draw_character_tabs( w, _( "SCENARIO" ), u.prof );
 
@@ -3463,6 +4670,17 @@ tab_direction set_scenario( avatar &u, points_left &points,
 
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &u ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::scenario, u.prof ) ) {
+                retval = *direction;
+                continue;
+            }
+            if( *pick < scens_length ) {
+                cur_id = *pick;
+            }
+        }
+#endif
         if( action == "DOWN" ) {
             cur_id++;
             if( cur_id > scens_length - 1 ) {
@@ -3593,7 +4811,9 @@ tab_direction set_description( avatar &you, const bool allow_reroll,
 #if defined(TILES)
         const int int_page_width = 38;
 
-        if( use_character_preview ) {
+        if( use_character_preview && cata::godot_bridge::native_screens() ) {
+            prepare_native_preview( character_preview );
+        } else if( use_character_preview ) {
             constexpr int preview_nlines_min = 7;
             constexpr int preview_ncols_min = 10;
             const int preview_nlines = std::max( ( TERMY - 9 ) / 3, preview_nlines_min );
@@ -3672,7 +4892,279 @@ tab_direction set_description( avatar &you, const bool allow_reroll,
     char_creation::description_selector current_selector = char_creation::NAME;
 
     bool no_name_entered = false;
+#if defined(TILES)
+    const auto native = chargen_view( ui, you, "NEW_CHAR_DESCRIPTION", init_windows );
+    const auto publish_native = [&]() {
+        const auto category = std::string( "NEW_CHAR_DESCRIPTION" );
+        const auto frame = chargen_frame{ .u = you, .points = points, .step = chargen_step::overview, .category = category };
+        const auto none = gs::row{ .text = { .text = _( "None!" ), .color = c_light_red }, .passive = true };
+        const auto heading = []( const std::string & text ) { return gs::row{ .text = { .text = text, .color = c_yellow }, .heading = true }; };
+        const auto line = []( const std::string & text, const nc_color & color ) {
+            return gs::row{ .text = { .text = text, .color = color }, .passive = true };
+        };
+        const auto field = []( const std::string & label, const gs::span & value ) {
+            return gs::row{ .text = { .text = label, .color = c_light_gray }, .note = value, .passive = true };
+        };
+        // Each list: the rows of one column.
+        auto columns = std::array<std::vector<gs::row>, 4> {};
+
+        auto &about = columns[0];
+        const auto name_value = no_name_entered ? gs::span{ .text = _( "--- NO NAME ENTERED ---" ), .color = c_yellow } :
+                                you.name.empty() ? gs::span{ .text = _( "--- RANDOM NAME ---" ), .color = c_light_gray } :
+                                gs::span{ .text = you.name, .color = c_white };
+        about.push_back( { .text = { .text = _( "Name" ), .color = c_white }, .i = 0, .note = name_value } );
+        about.push_back( { .text = { .text = _( "Height" ), .color = c_white }, .i = 1,
+                           .note = { .text = string_format( "%d cm", you.base_height() ), .color = c_white }
+                         } );
+        about.push_back( { .text = { .text = _( "Age" ), .color = c_white }, .i = 2,
+                           .note = { .text = std::to_string( you.base_age() ), .color = c_white }
+                         } );
+        about.push_back( heading( _( "Details" ) ) );
+        about.push_back( field( _( "Gender" ), { .text = you.male ? _( "Male" ) : _( "Female" ), .color = you.male ? c_light_cyan : c_pink } ) );
+        about.push_back( field( _( "Starting location" ), {
+            .text = you.random_start_location ? remove_color_tags( random_start_location_text ) :
+            string_format( remove_color_tags( START_LOC_TEXT_TEMPLATE ), you.start_location.obj().name(), you.start_location.obj().targets_count() ),
+            .color = you.random_start_location ? c_red : c_white
+        } ) );
+        about.push_back( field( _( "Scenario" ), { .text = g->scen->gender_appropriate_name( you.male ), .color = c_white } ) );
+        about.push_back( field( _( "Profession" ), { .text = you.prof->gender_appropriate_name( you.male ), .color = c_white } ) );
+        about.push_back( heading( _( "Stats" ) ) );
+        struct stat_value {
+            std::string name;
+            int value;
+        };
+        for( const auto &st : std::array{
+        stat_value{ .name = _( "Strength" ), .value = you.str_max }, stat_value{ .name = _( "Dexterity" ), .value = you.dex_max },
+            stat_value{ .name = _( "Intelligence" ), .value = you.int_max }, stat_value{ .name = _( "Perception" ), .value = you.per_max } } ) {
+            about.push_back( field( st.name, { .text = std::to_string( st.value ), .color = c_white } ) );
+        }
+
+        auto &abilities = columns[1];
+        abilities.push_back( heading( _( "Traits" ) ) );
+        auto current_traits = points.limit == points_left::TRANSFER ? you.get_mutations() :
+                              you.get_base_traits();
+        std::ranges::sort( current_traits, trait_display_sort );
+        for( const auto &t : current_traits ) {
+            abilities.push_back( line( t->name(), t->get_display_color() ) );
+        }
+        if( current_traits.empty() ) {
+            abilities.push_back( none );
+        }
+        abilities.push_back( heading( _( "Bionics" ) ) );
+        auto current_bionics = you.prof->CBMs();
+        std::ranges::copy( you.get_bionic_collection() | std::views::transform( &bionic::id ),
+                           std::back_inserter( current_bionics ) );
+        std::ranges::sort( current_bionics, []( const bionic_id & a, const bionic_id & b ) {
+            return localized_compare( a->name.translated(), b->name.translated() );
+        } );
+        for( const auto &b : current_bionics ) {
+            abilities.push_back( line( b->name.translated(), c_white ) );
+        }
+        if( current_bionics.empty() ) {
+            abilities.push_back( none );
+        }
+        abilities.push_back( heading( _( "Spells" ) ) );
+        for( const auto &[sp, level] : you.prof->spells() ) {
+            abilities.push_back( line( string_format( _( "%s level %d" ), sp->name, level ), c_white ) );
+        }
+        for( const auto *sp : you.magic->get_spells() ) {
+            abilities.push_back( line( string_format( _( "%s level %d" ), sp->id()->name, sp->get_level() ),
+                                       c_white ) );
+        }
+        if( you.prof->spells().empty() && !you.magic->knows_spell() ) {
+            abilities.push_back( none );
+        }
+
+        auto &skills = columns[2];
+        auto skill_category = skill_displayType_id::NULL_ID();
+        for( const auto *skill : Skill::get_skills_sorted_by( []( const Skill & a, const Skill & b ) {
+        return localized_compare( std::make_pair( a.display_category(), a.name() ),
+                                  std::make_pair( b.display_category(), b.name() ) );
+        } ) ) {
+            auto level = you.get_skill_level( skill->ident(), false );
+            if( points.limit != points_left::TRANSFER ) {
+                const auto &prof_skills = you.prof->skills();
+                const auto bonus = std::ranges::find( prof_skills, skill->ident(),
+                                                      &profession::StartingSkill::first );
+                level += bonus != prof_skills.end() ? bonus->second : 0;
+            }
+            if( level <= 0 ) {
+                continue;
+            }
+            if( skill_category != skill->display_category() ) {
+                skill_category = skill->display_category();
+                skills.push_back( heading( skill_category->display_string() ) );
+            }
+            skills.push_back( field( skill->name(), { .text = std::to_string( level ), .color = c_white } ) );
+        }
+        if( skills.empty() ) {
+            skills.push_back( none );
+        }
+
+        auto &gear = columns[3];
+        auto wielded = std::vector<std::string>();
+        auto worn = std::vector<std::string>();
+        auto carried = std::vector<std::string>();
+        for( const auto &it : you.prof->items( you.male, you.get_mutations() ) ) {
+            if( it->has_flag( json_flag_no_auto_equip ) ) {
+                carried.push_back( it->display_name() );
+            } else if( it->has_flag( json_flag_auto_wield ) ) {
+                wielded.push_back( it->display_name() );
+            } else if( it->is_armor() ) {
+                worn.push_back( it->display_name() );
+            } else {
+                carried.push_back( it->display_name() );
+            }
+        }
+        const auto add_list = [&]( const std::string & title, const std::vector<std::string> &names ) {
+            gear.push_back( heading( title ) );
+            std::ranges::transform( names, std::back_inserter( gear ), [&]( const std::string & n ) { return line( n, c_white ); } );
+            if( names.empty() ) {
+                gear.push_back( none );
+            }
+        };
+        add_list( _( "Wielded" ), wielded );
+        add_list( _( "Worn" ), worn );
+        add_list( _( "Inventory" ), carried );
+        auto vehicles = std::vector<std::string>();
+        if( g->scen->vehicle() ) {
+            vehicles.push_back( g->scen->vehicle()->name );
+        }
+        if( you.prof->vehicle() ) {
+            vehicles.push_back( you.prof->vehicle()->name );
+        }
+        add_list( _( "Vehicle" ), vehicles );
+        add_list( _( "Companions" ), you.prof->npcs() | std::views::filter( &npc_class_id::is_valid )
+        | std::views::transform( []( const npc_class_id & id ) { return id->get_name(); } ) |
+        std::ranges::to<std::vector>() );
+        gear.push_back( heading( _( "Cash" ) ) );
+        gear.push_back( line( you.prof->starting_cash() ? format_money( *you.prof->starting_cash() ) :
+                              _( "Random!" ), c_white ) );
+        add_list( _( "Pets" ), you.prof->pets() | std::views::filter( &mtype_id::is_valid )
+        | std::views::transform( []( const mtype_id & id ) { return monster( id ).get_name(); } ) |
+        std::ranges::to<std::vector>() );
+        add_list( _( "Addictions" ), you.prof->addictions() | std::views::transform( [](
+        const addiction & a ) { return addiction_name( a ); } )
+        | std::ranges::to<std::vector>() );
+
+        native->publish( [&]( JsonOut & jsout ) {
+            write_chargen_frame( jsout, frame );
+
+            jsout.member( "toggles" );
+            jsout.start_array();
+            gs::write_toggle( jsout, { .act = "CHANGE_GENDER", .text = you.male ? _( "Male" ) : _( "Female" ), .icon = "users",
+                                       .category = category, .tip = _( "Change gender" )
+                                     }, false );
+            gs::write_toggle( jsout, { .act = "CHOOSE_LOCATION", .text = _( "Starting location" ), .icon = "map-pin",
+                                       .category = category, .tip = _( "Choose character start location" )
+                                     }, false );
+            gs::write_toggle( jsout, { .act = "RANDOMIZE_CHAR_DESCRIPTION", .text = _( "Random description" ), .icon = "dices",
+                                       .category = category, .enabled = !MAP_SHARING::isSharing(), .tip = _( "Pick random character description" )
+                                     }, false );
+            gs::write_toggle( jsout, { .act = "SAVE_TEMPLATE", .text = _( "Save template" ), .icon = "save", .category = category },
+                              false );
+            if( allow_reroll ) {
+                write_reroll_toggles( jsout, category, false );
+            }
+            jsout.end_array();
+
+            struct column_style {
+                std::string title;
+                std::string icon;
+                double stretch;
+            };
+            const auto styles = std::array{
+                column_style{ .title = _( "Character" ), .icon = "user", .stretch = 1.35 },
+                column_style{ .title = _( "Traits and bionics" ), .icon = "dna", .stretch = 1.0 },
+                column_style{ .title = _( "Skills" ), .icon = "graduation-cap", .stretch = 0.85 },
+                column_style{ .title = _( "Starting gear" ), .icon = "backpack", .stretch = 1.2 },
+            };
+            jsout.member( "active_pane", 0 );
+            jsout.member( "panes" );
+            jsout.start_array();
+            for( const auto &[i, style] : styles | std::views::enumerate ) {
+                jsout.start_object();
+                jsout.member( "title", style.title );
+                jsout.member( "icon", style.icon );
+                jsout.member( "stretch", style.stretch );
+                jsout.member( "count", "" );
+                jsout.member( "cursor", i == 0 ? static_cast<int>( current_selector ) : -1 );
+                jsout.member( "rows" );
+                jsout.start_array();
+                for( const auto &r : columns[i] ) {
+                    gs::write_row( jsout, r );
+                }
+                jsout.end_array();
+                jsout.end_object();
+            }
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 340 );
+            if( use_character_preview ) {
+                write_preview( jsout, character_preview, category );
+            }
+            jsout.member( "title" );
+            const auto selected = std::array{ _( "Name" ), _( "Height" ), _( "Age" ) } [current_selector];
+            gs::write_span( jsout, { .text = selected, .color = c_white } );
+            auto warning = std::string();
+            if( !points.is_valid() ) {
+                warning = points.skill_points_left() < 0 ?
+                          _( "Too many points allocated, change some features and try again." ) :
+                          points.trait_points_left() < 0 ?
+                          _( "Too many trait points allocated, change some traits or lower some stats and try again." ) :
+                          points.stat_points_left() < 0 ?
+                          _( "Too many stat points allocated, lower some stats and try again." ) :
+                          _( "Too many points allocated, change some features and try again." );
+            } else if( points.has_spare() ) {
+                warning = _( "You have points left; they are lost when you start." );
+            }
+            if( !warning.empty() ) {
+                jsout.member( "warn" );
+                gs::write_span( jsout, { .text = warning, .color = points.is_valid() ? c_yellow : c_light_red } );
+            }
+            jsout.member( "body" );
+            const auto [min_age, max_age] = profession_age_bounds( *you.prof );
+            gs::write_span( jsout, { .text = current_selector == char_creation::NAME ? _( "Your name. Leave it empty for a random one." ) :
+                                             current_selector == char_creation::HEIGHT ? _( "Your height in centimeters, from 145 to 200." ) :
+                                             string_format( _( "Your age in years, from %d to %d." ), min_age, max_age )
+                                   } );
+            jsout.member( "buttons" );
+            jsout.start_array();
+            if( current_selector != char_creation::NAME ) {
+                gs::write_button( jsout, { .act = "DOWN", .text = _( "Lower" ), .icon = "minus", .category = category } );
+                gs::write_button( jsout, { .act = "UP", .text = _( "Raise" ), .icon = "plus", .category = category } );
+            }
+            gs::write_button( jsout, { .act = "CONFIRM", .text = _( "Edit" ), .icon = "pencil", .category = category,
+                                       .enabled = !MAP_SHARING::isSharing()
+                                     } );
+            gs::write_button( jsout, { .act = "NEXT_TAB", .text = _( "Start game" ), .icon = "play", .category = category, .primary = true } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "←→", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "↑↓", _( "Change" ) );
+            gs::write_hint( jsout, "CONFIRM", category, _( "Edit" ) );
+            gs::write_hint( jsout, "NEXT_TAB", category, _( "Start game" ) );
+            gs::write_hint( jsout, "PREV_TAB", category, _( "Previous tab" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Main menu" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            if( use_character_preview ) {
+                character_preview.display();
+            }
+            return;
+        }
+#endif
         draw_character_tabs( w, _( "OVERVIEW" ), you.prof );
 
         draw_points( w, points );
@@ -4090,6 +5582,15 @@ tab_direction set_description( avatar &you, const bool allow_reroll,
         ui_manager::redraw();
         const std::string action = ctxt.handle_input();
 #if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &you ) : std::nullopt ) {
+            if( const auto direction = chargen_tab_click( *pick, chargen_step::overview, you.prof ) ) {
+                character_preview.clear();
+                return *direction;
+            }
+            if( *pick >= 0 && *pick <= char_creation::AGE ) {
+                current_selector = static_cast<char_creation::description_selector>( *pick );
+            }
+        }
         if( action == "zoom_in" && use_character_preview ) {
             character_preview.zoom_in();
         }

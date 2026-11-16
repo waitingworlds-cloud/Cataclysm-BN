@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <iterator>
 #include <memory>
+#include <ranges>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,10 @@
 #include "flag.h"
 #include "game.h"
 #include "game_inventory.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "inventory.h"
 #include "item.h"
@@ -509,6 +514,15 @@ void show_armor_layers_ui( Character &who )
     catacurses::window w_encumb;
 
     ui_adaptor ui;
+#if defined(TILES)
+    // Godot lists the worn items, the encumbrance and the layers by body part, with the chosen
+    // item's details beside them.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", &who, "SORT_ARMOR" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         win_h = std::min( TERMY, std::max( { FULL_SCREEN_HEIGHT, req_right_h, req_mid_h } ) );
         win_w = FULL_SCREEN_WIDTH + ( TERMX - FULL_SCREEN_WIDTH ) * 3 / 4;
@@ -529,6 +543,13 @@ void show_armor_layers_ui( Character &who )
         w_encumb = catacurses::newwin( num_of_parts + 1, middle_w,
                                        win + point( 2 + left_w, -1 + 3 + cont_h - num_of_parts ) );
         ui.position_from_window( w_sort_armor );
+#if defined(TILES)
+        if( native ) {
+            // The item details are drawn as usual and shown in the side panel.
+            w_sort_middle = cata::godot_bridge::capture_window( 80, 58 );
+            ui.position( point_zero, point_zero );
+        }
+#endif
     } );
     ui.mark_resize();
 
@@ -558,7 +579,187 @@ void show_armor_layers_ui( Character &who )
     int leftListSize = 0;
     int rightListSize = 0;
 
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "SORT_ARMOR" );
+        const bodypart_id &bp = armor_cat[tabindex];
+        const auto *current = leftListSize > 0 ? *access_tmp_worn( leftListIndex ) : nullptr;
+        werase( w_sort_middle );
+        if( current != nullptr ) {
+            draw_mid_pane( w_sort_middle, access_tmp_worn( leftListIndex ), who, bp );
+            // The name it starts with is the panel's title.
+            const auto name_lines = foldstring( current->type_name( 1 ), getmaxx( w_sort_middle ) - 1 ).size();
+            for( const auto y : std::views::iota( 0, static_cast<int>( name_lines ) ) ) {
+                mvwprintz( w_sort_middle, point( 0, y ), c_black, std::string( getmaxx( w_sort_middle ), ' ' ) );
+            }
+        }
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", who.is_avatar() ? _( "Sort armor" ) :
+                          string_format( _( "Sort armor: %s" ), who.get_name() ) );
+            jsout.member( "icon", "shirt" );
+            jsout.member( "size", std::array{ 1560, 940 } );
+            if( bp.id() ) {
+                jsout.member( "stats" );
+                jsout.start_array();
+                const auto chip = [&]( const std::string & label, const int value ) {
+                    gs::write_stat( jsout, { .icon = "shield", .label = label, .value = { .text = std::to_string( value ), .color = c_white } } );
+                };
+                chip( _( "Bash" ), who.get_armor_bash( bp ) );
+                chip( _( "Cut" ), who.get_armor_cut( bp ) );
+                // Assuming that float armor values are rounded and not floored or truncated
+                chip( _( "Stab" ), static_cast<int>( std::round( who.get_armor_cut( bp ) * 0.8f ) ) );
+                chip( _( "Ballistic" ), who.get_armor_bullet( bp ) );
+                jsout.end_array();
+            }
+
+            jsout.member( "tabs" );
+            jsout.start_array();
+            for( const auto &[n, part] : armor_cat | std::views::enumerate ) {
+                gs::write_tab( jsout, {
+                    .text = part.id() ? body_part_name_as_heading( part, 1 ) : _( "All" ),
+                    .active = static_cast<int>( n ) == tabindex,
+                    .pick = gs::tab_pick + static_cast<int>( n ),
+                } );
+            }
+            jsout.end_array();
+            gs::write_tab_keys( jsout, "LEFT", "RIGHT", category );
+
+            jsout.member( "active_pane", 0 );
+            jsout.member( "panes" );
+            jsout.start_array();
+            // The worn items here, innermost first; the one being moved follows the cursor.
+            jsout.start_object();
+            jsout.member( "title", _( "Worn, innermost first" ) );
+            jsout.member( "icon", "shirt" );
+            jsout.member( "cursor", leftListIndex );
+            jsout.member( "confirm", "MOVE_ARMOR" );
+            jsout.member( "empty", _( "Nothing worn here." ) );
+            jsout.member( "stretch", 1.2 );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto n : std::views::iota( 0, leftListSize ) ) {
+                const auto it = access_tmp_worn( n );
+                const auto &worn = **it;
+                const auto penalties = get_item_penalties( it, who, bp );
+                gs::write_row( jsout, {
+                    .text = { .text = worn.display_name(), .color = penalties.color_for_stacking_badness() },
+                    .cells = { { .text = format_volume( worn.get_storage() ) } },
+                    .icon = n == selected ? "grip-vertical" : worn.has_flag( json_flag_HIDDEN ) ? "eye-off" : "",
+                    .icon_color = n == selected ? "c_yellow" : "c_cyan",
+                    .tip = worn.has_flag( json_flag_HIDDEN ) ? _( "Hidden: not drawn on your character." ) : "",
+                } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.start_object();
+            jsout.member( "title", _( "Encumbrance and warmth" ) );
+            jsout.member( "icon", "weight" );
+            jsout.member( "confirm", "" );
+            jsout.member( "cursor", -1 );
+            jsout.member( "stretch", 0.8 );
+            jsout.member( "rows" );
+            jsout.start_array();
+            gs::write_row( jsout, { .cells = { { .text = _( "Worn" ) }, { .text = _( "Layers" ) }, { .text = _( "Warmth" ) } }, .heading = true } );
+            for( const auto &r : character_display::encumbrance_rows( who, current ) ) {
+                auto passive = r;
+                passive.passive = true;
+                gs::write_row( jsout, passive );
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            // Every body part's layers, with the encumbrance each item adds there.
+            jsout.start_object();
+            jsout.member( "title", _( "Layers by body part" ) );
+            jsout.member( "icon", "layers" );
+            jsout.member( "confirm", "" );
+            jsout.member( "cursor", -1 );
+            jsout.member( "rows" );
+            jsout.start_array();
+            const auto combine_bp = [&who]( const bodypart_id & cover ) -> bool {
+                const bodypart_id opposite = cover.obj().opposite_part;
+                return cover != opposite && items_cover_bp( who, cover ) == items_cover_bp( who, opposite );
+            };
+            auto shown = cata::flat_set<bodypart_id>();
+            for( const bodypart_id &cover : armor_cat ) {
+                if( cover.id().is_null() || ( combine_bp( cover ) &&
+                                              shown.count( cover.obj().opposite_part ) > 0 ) ) {
+                    continue;
+                }
+                shown.insert( cover );
+                const auto here = cover == bp || ( combine_bp( cover ) &&
+                                                   static_cast<bodypart_id>( cover.obj().opposite_part ) == bp );
+                gs::write_row( jsout, {
+                    .text = { .text = body_part_name_as_heading( cover, combine_bp( cover ) ? 2 : 1 ), .color = here ? c_yellow : c_white },
+                    .cells = { { .text = _( "Encumbrance" ) } },
+                    .heading = true,
+                } );
+                for( const auto &elem : items_cover_bp( who, cover ) ) {
+                    gs::write_row( jsout, {
+                        .text = { .text = elem.name, .color = elem.penalties.color_for_stacking_badness() },
+                        .cells = { { .text = string_format( "%d%s", elem.encumber, elem.penalties.badness() > 0 ? "+" : "" ) } },
+                        .passive = true,
+                    } );
+                }
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 470 );
+            jsout.member( "share", 0.32 );
+            if( current != nullptr ) {
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = current->tname(), .color = current->color_in_inventory() } );
+                jsout.member( "mono", true );
+                jsout.member( "body" );
+                cata::godot_bridge::write_window_spans( jsout, w_sort_middle, {} );
+            } else {
+                jsout.member( "empty", _( "Nothing to see here!" ) );
+            }
+            jsout.member( "buttons" );
+            jsout.start_array();
+            const auto button = [&]( const gs::button & b ) {
+                gs::write_button( jsout, b );
+            };
+            const auto has_item = current != nullptr;
+            button( { .act = "MOVE_ARMOR", .text = selected >= 0 ? _( "Drop here" ) : _( "Move" ), .icon = "move", .category = category, .enabled = has_item, .tip = _( "Pick the item up, move it with the arrow keys, and press again to put it down." ) } );
+            button( { .act = "CHANGE_SIDE", .text = _( "Change side" ), .icon = "arrow-left-right", .category = category, .enabled = has_item && current->is_sided() } );
+            gs::write_toggle( jsout, { .act = "TOGGLE_CLOTH", .text = _( "Hide sprite" ), .icon = "eye-off", .category = category, .enabled = has_item },
+                              has_item && current->has_flag( json_flag_HIDDEN ) );
+            button( { .act = "REMOVE_ARMOR", .text = _( "Take off" ), .icon = "circle-minus", .category = category, .enabled = has_item } );
+            button( { .act = "EQUIP_ARMOR", .text = _( "Wear item" ), .icon = "plus", .category = category } );
+            button( { .act = "EQUIP_ARMOR_HERE", .text = _( "Wear here" ), .icon = "list-plus", .category = category, .tip = _( "Wear an item at the chosen position." ) } );
+            button( { .act = "SORT_ARMOR", .text = _( "Sort by layer" ), .icon = "arrow-down-wide-narrow", .category = category } );
+            if( who.is_avatar() ) {
+                button( { .act = "ASSIGN_INVLETS", .text = _( "Assign letters" ), .icon = "tag", .category = category } );
+            }
+            button( { .act = "USAGE_HELP", .text = _( "Help" ), .icon = "info", .category = category } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", selected >= 0 ? _( "Move item" ) : _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Body part" ) );
+            gs::write_hint( jsout, "HELP_KEYBINDINGS", category, _( "All keys" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         draw_grid( w_sort_armor, left_w, middle_w );
 
         werase( w_sort_cat );
@@ -800,6 +1001,28 @@ void show_armor_layers_ui( Character &who )
             }
         };
 
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( &who ) : std::nullopt ) {
+            namespace gs = cata::godot_screen;
+            if( *pick >= gs::tab_pick && *pick < gs::tab_pick + tabcount ) {
+                tabindex = *pick - gs::tab_pick;
+                leftListIndex = leftListOffset = 0;
+                selected = -1;
+                continue;
+            }
+            if( *pick >= 0 && *pick < leftListSize ) {
+                // Clicking a row while carrying an item moves the item there, a step at a time.
+                // A step swaps two of the listed positions, so the list of positions stays the same.
+                const auto positions = tmp_worn;
+                const auto step = *pick > leftListIndex ? 1 : -1;
+                while( leftListIndex != *pick ) {
+                    leftListIndex += step;
+                    shift_selected_item();
+                    tmp_worn = positions;
+                }
+            }
+        }
+#endif
         if( action == "UP" && leftListSize > 0 ) {
             if( leftListIndex > 0 ) {
                 leftListIndex--;

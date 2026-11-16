@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "coordinates.h"
 #include "cursesdef.h"
 #include "detached_ptr.h"
@@ -43,6 +45,15 @@ struct character_preview_window {
         /** Use it as you done with preview **/
         void clear() const;
         auto clothes_showing() const -> bool;
+
+        /// Pixels of the game's frame that hold the character, inside the border.
+        struct frame_area {
+            point at;
+            point size;
+        };
+        /// Where the character is drawn, for a front end that crops it out of the frame.
+        /// Empty while the screen is too narrow to show it.
+        auto drawn_area() const -> std::optional<frame_area>;
 
     private:
         point pos;

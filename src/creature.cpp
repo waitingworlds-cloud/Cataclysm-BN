@@ -18,6 +18,7 @@
 #include "event.h"
 #include "event_bus.h"
 #include "flag.h"
+#include "godot_bridge.h"
 #include "game.h"
 #include "game_constants.h"
 #include "int_id.h"
@@ -785,6 +786,10 @@ void print_dmg_msg( Creature &target, Creature *source, const dealt_damage_insta
     } else if( source != nullptr ) {
         if( source->is_player() ) {
             //player hits monster ranged
+#if defined(TILES)
+            cata::godot_bridge::note_damage( dealt_dam.total_damage(),
+                                             static_cast<double>( std::max( target.get_hp(), 0 ) ) / std::max( target.get_hp_max(), 1 ) );
+#endif
             SCT.add( target.bub_pos().xy().raw(),
                      direction_from( point_rel_ms::zero(), target.bub_pos().xy() - source->bub_pos().xy() ),
                      get_hp_bar( dealt_dam.total_damage(), target.get_hp_max(), true ).first,

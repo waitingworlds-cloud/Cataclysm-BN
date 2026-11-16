@@ -207,6 +207,18 @@ class ui_adaptor
          **/
         void reset();
 
+        /** Where a UI sits on the UI stack, as seen by a front end layering its own screens. */
+        enum class stack_position {
+            /** Not on the stack (never added, or already removed). */
+            absent,
+            /** No UI above it draws anything. */
+            visible,
+            /** A UI above it has a non-empty area. */
+            covered,
+        };
+        /** Only compares addresses, so a dangling pointer is safe to pass. */
+        static auto position_on_stack( const ui_adaptor *ui ) -> stack_position;
+
         /* See the `ui_manager` namespace */
         static void invalidate( const rectangle<point> &rect, bool reenable_uis_below );
         static void redraw();

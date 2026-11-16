@@ -2,6 +2,10 @@
 #include "calendar.h"
 #include "color.h"
 #include "game.h" // IWYU pragma: associated
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "harvest.h"
 #include "input.h"
 #include "item_group.h"
@@ -54,7 +58,20 @@ void game::extended_description( const tripoint_bub_ms &p )
     int width = 0;
     catacurses::window w_head;
     catacurses::window w_main;
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", &w_main,
+                 "EXTENDED_DESCRIPTION" );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         const int left = 0;
         const int right = TERMX;
         const int bottom = TERMY;
@@ -83,24 +100,11 @@ void game::extended_description( const tripoint_bub_ms &p )
     ctxt.register_action( "QUIT" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
-    ui.on_redraw( [&]( const ui_adaptor & ) {
-        werase( w_head );
-        mvwprintz( w_head, point_zero, c_white,
-                   _( "[%s] describe creatures, [%s] describe furniture, "
-                      "[%s] describe terrain, [%s] close." ),
-                   ctxt.get_desc( "CREATURE" ), ctxt.get_desc( "FURNITURE" ),
-                   ctxt.get_desc( "TERRAIN" ), ctxt.get_desc( "QUIT" ) );
-
-        // Set up line drawings
-        for( int i = 0; i < TERMX; i++ ) {
-            mvwputch( w_head, point( i, top - 1 ), c_white, LINE_OXOX );
-        }
-
-        wnoutrefresh( w_head );
-
+    const auto describe = [&]() -> std::string {
         std::string desc;
         // Allow looking at invisible tiles - player may want to examine hallucinations etc.
-        switch( cur_target ) {
+        switch( cur_target )
+        {
             case description_target::creature: {
                 const Creature *critter = seen_critter( *this, p );
                 if( critter != nullptr ) {
@@ -149,20 +153,87 @@ void game::extended_description( const tripoint_bub_ms &p )
         }
 
         std::string signage = m.get_signage( p );
-        if( !signage.empty() ) {
+        if( !signage.empty() )
+        {
             // NOLINTNEXTLINE(cata-text-style): the question mark does not end a sentence
             desc += u.has_trait( trait_ILLITERATE ) ? _( "\nSign: ???" ) : string_format( _( "\nSign: %s" ),
                     signage );
         }
+        return desc;
+    };
 
+    ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                namespace gs = cata::godot_screen;
+                const auto category = std::string( "EXTENDED_DESCRIPTION" );
+                jsout.member( "title", _( "Description" ) );
+                jsout.member( "icon", "info" );
+                jsout.member( "dock", "right" );
+                jsout.member( "size" );
+                jsout.start_array();
+                jsout.write( 520 );
+                jsout.write( 0 );
+                jsout.end_array();
+                jsout.member( "tabs" );
+                jsout.start_array();
+                gs::write_tab( jsout, { .text = _( "Creature" ), .active = cur_target == description_target::creature, .pick = gs::tab_pick, .enabled = seen_critter( *this, p ) != nullptr, .icon = "bug", .tip = ctxt.get_desc( "CREATURE" ) } );
+                gs::write_tab( jsout, { .text = _( "Furniture" ), .active = cur_target == description_target::furniture, .pick = gs::tab_pick + 1, .enabled = m.has_furn( p ), .icon = "armchair", .tip = ctxt.get_desc( "FURNITURE" ) } );
+                gs::write_tab( jsout, { .text = _( "Terrain" ), .active = cur_target == description_target::terrain, .pick = gs::tab_pick + 2, .icon = "mountain", .tip = ctxt.get_desc( "TERRAIN" ) } );
+                jsout.end_array();
+                jsout.member( "aside" );
+                jsout.start_object();
+                jsout.member( "body" );
+                cata::godot_bridge::write_spans( jsout, describe(), c_light_gray );
+                jsout.end_object();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_hint( jsout, "CREATURE", category, _( "Creature" ) );
+                gs::write_hint( jsout, "FURNITURE", category, _( "Furniture" ) );
+                gs::write_hint( jsout, "TERRAIN", category, _( "Terrain" ) );
+                gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
+        werase( w_head );
+        mvwprintz( w_head, point_zero, c_white,
+                   _( "[%s] describe creatures, [%s] describe furniture, "
+                      "[%s] describe terrain, [%s] close." ),
+                   ctxt.get_desc( "CREATURE" ), ctxt.get_desc( "FURNITURE" ),
+                   ctxt.get_desc( "TERRAIN" ), ctxt.get_desc( "QUIT" ) );
+
+        // Set up line drawings
+        for( int i = 0; i < TERMX; i++ ) {
+            mvwputch( w_head, point( i, top - 1 ), c_white, LINE_OXOX );
+        }
+
+        wnoutrefresh( w_head );
+
+        const auto desc = describe();
         werase( w_main );
         fold_and_print_from( w_main, point_zero, width, 0, c_light_gray, desc );
         wnoutrefresh( w_main );
     } );
 
+#if defined(TILES)
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
+
     do {
         ui_manager::redraw();
         action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = cata::godot_bridge::take_pick( &w_main ) ) {
+            cur_target = static_cast<description_target>( std::clamp( *pick - cata::godot_screen::tab_pick, 0,
+                         2 ) );
+            ui.invalidate_ui();
+        }
+#endif
         if( action == "CREATURE" ) {
             cur_target = description_target::creature;
         } else if( action == "FURNITURE" ) {

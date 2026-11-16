@@ -18,6 +18,11 @@
 #include "examine_item_menu.h"
 #include "flag.h"
 #include "game.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_drag.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "inventory.h"
 #include "inventory_ui.h"
@@ -126,6 +131,13 @@ class common_inventory_selector : public inventory_pick_selector
 
     protected:
         auto handle_action( const std::string &action ) -> bool override {
+#if defined(TILES)
+            if( const auto verb = cata::godot_bridge::take_drag_verb( this ) ) {
+                // Rebuild the lists after the change, unless dropping, which happens on the map.
+                keep_open = apply_drag( *verb );
+                return true;
+            }
+#endif
             if( action != "unload_all" ) {
                 return false;
             }
@@ -135,6 +147,38 @@ class common_inventory_selector : public inventory_pick_selector
 
     private:
         bool unload_all_selected = false;
+
+#if defined(TILES)
+        /// Does `verb` with the selected item, dragged in the Godot front end; false when it
+        /// started dropping it, which closes the inventory.
+        auto apply_drag( const std::string &verb ) -> bool {
+            auto &entry = const_cast<inventory_entry &>( get_selected() );
+            if( !entry.is_item() ) {
+                return true;
+            }
+            auto &it = *entry.any_item();
+            if( verb == "wear" ) {
+                wear( entry );
+            } else if( verb == "wield" ) {
+                wield( entry );
+            } else if( verb == "take_off" ) {
+                const auto ret = u.can_takeoff( it );
+                if( ret.success() ) {
+                    u.takeoff( it );
+                } else {
+                    popup_getkey( ret.c_str() );
+                }
+            } else if( verb == "drop" ) {
+                auto what = drop_locations {};
+                for( auto *loc : entry.locations ) {
+                    what.emplace_back( *loc, loc->count() );
+                }
+                u.drop( what, u.bub_pos() );
+                return false;
+            }
+            return true;
+        }
+#endif
 };
 
 std::string good_bad_none( int value )
@@ -268,6 +312,7 @@ void game_menus::inv::common( avatar &you )
     common_inventory_selector inv_s( you );
 
     inv_s.set_title( _( "Inventory" ) );
+    inv_s.set_confirm_label( _( "Item actions" ) );
     inv_s.set_hint( string_format(
                         _( "Item hotkeys assigned: <color_light_gray>%d</color>/<color_light_gray>%d</color>" ),
                         you.allocated_invlets().count(), inv_chars.size() ) );
@@ -1817,7 +1862,19 @@ void game_menus::inv::compare( const item &l, const item &r )
     catacurses::window w_lhs_item_info;
     catacurses::window w_rhs_item_info;
     ui_adaptor ui;
+#if defined(TILES)
+    auto native = std::unique_ptr<cata::godot_bridge::native_view>();
+    if( cata::godot_bridge::native_screens() ) {
+        native = std::make_unique<cata::godot_bridge::native_view>( "screen", &lhs_info, "default" );
+    }
+#endif
     ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( native ) {
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         const int half_width = TERMX / 2;
         const int height = TERMY;
         w_lhs_item_info = catacurses::newwin( height, half_width, point_zero );
@@ -1827,9 +1884,55 @@ void game_menus::inv::compare( const item &l, const item &r )
     ui.mark_resize();
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            native->publish( [&]( JsonOut & jsout ) {
+                namespace gs = cata::godot_screen;
+                jsout.member( "title", _( "Compare" ) );
+                jsout.member( "icon", "scale" );
+                jsout.member( "size" );
+                jsout.start_array();
+                jsout.write( 1100 );
+                jsout.write( 900 );
+                jsout.end_array();
+                jsout.member( "subtitle" );
+                gs::write_span( jsout, { .text = _( "Better values are green, worse are red." ) } );
+                jsout.member( "active_pane", -1 );
+                jsout.member( "panes" );
+                jsout.start_array();
+                const auto write_side = [&]( const std::string & name, const std::string & type_name,
+                const std::vector<iteminfo> &info, const std::vector<iteminfo> &other ) {
+                    jsout.start_object();
+                    jsout.member( "title", remove_color_tags( name ) );
+                    jsout.member( "icon", "package" );
+                    if( remove_color_tags( type_name ) != remove_color_tags( name ) ) {
+                        jsout.member( "count", remove_color_tags( type_name ) );
+                    }
+                    jsout.member( "body" );
+                    cata::godot_bridge::write_spans( jsout, format_item_info( info, other ), c_light_gray );
+                    jsout.member( "scroll", lhs_scroll_pos );
+                    jsout.end_object();
+                };
+                write_side( lhs_tname, lhs_type_name, lhs_info, rhs_info );
+                write_side( rhs_tname, rhs_type_name, rhs_info, lhs_info );
+                jsout.end_array();
+                jsout.member( "hints" );
+                jsout.start_array();
+                gs::write_fixed_hint( jsout, "↑↓", _( "Scroll" ) );
+                gs::write_hint( jsout, "QUIT", "default", _( "Close" ) );
+                jsout.end_array();
+            } );
+            return;
+        }
+#endif
         draw_item_info( w_lhs_item_info, lhs_item_info );
         draw_item_info( w_rhs_item_info, rhs_item_info );
     } );
+#if defined(TILES)
+    if( native ) {
+        native->attach( ui );
+    }
+#endif
 
     do {
         ui_manager::redraw();
@@ -1843,6 +1946,21 @@ void game_menus::inv::compare( const item &l, const item &r )
             lhs_scroll_pos++;
             rhs_scroll_pos++;
         }
+#if defined(TILES)
+        if( native ) {
+            // Godot scrolls by whole lines and stops at the end itself.
+            const auto step = action == "PAGE_UP" || action == "PAGE_DOWN" ? 9 : 2;
+            if( action == "UP" || action == "PAGE_UP" ) {
+                lhs_scroll_pos = std::max( lhs_scroll_pos + 1 - step, 0 );
+            } else if( action == "DOWN" || action == "PAGE_DOWN" ) {
+                // Lines of the longer side, before Godot wraps them: enough to reach its end.
+                const auto lines = std::max( std::ranges::count( format_item_info( lhs_info, rhs_info ), '\n' ),
+                                             std::ranges::count( format_item_info( rhs_info, lhs_info ), '\n' ) );
+                lhs_scroll_pos = std::min( lhs_scroll_pos + step - 1, static_cast<int>( lines ) );
+            }
+            rhs_scroll_pos = lhs_scroll_pos;
+        }
+#endif
 
     } while( action != "QUIT" );
 }

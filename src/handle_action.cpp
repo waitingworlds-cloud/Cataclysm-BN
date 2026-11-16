@@ -32,10 +32,12 @@
 #include "flag.h"
 #include "fstream_utils.h"
 #include "game.h" // IWYU pragma: associated
+#include "godot_bridge.h"
 #include "game_constants.h"
 #include "game_inventory.h"
 #include "gamemode.h"
 #include "gates.h"
+#include "godot_square.h"
 #include "gun_mode.h"
 #include "help.h"
 #include "iexamine.h"
@@ -388,6 +390,10 @@ input_context game::get_player_input( std::string &action )
             const bool weather_has_anim = init_weather_anim( get_weather().weather_id, wPrint );
 
             animate_weather = weather_has_anim && get_option<bool>( "ANIMATION_RAIN" );
+#if defined(TILES)
+            // The Godot front end draws the weather over the map itself.
+            animate_weather = animate_weather && !cata::godot_bridge::is_active();
+#endif
             animate_sct = !SCT.vSCT.empty() && uquit != QUIT_WATCH && get_option<bool>( "ANIMATION_SCT" );
 
 #if defined(TILES)
@@ -2022,7 +2028,13 @@ bool game::handle_action()
                 return false;
             }
 
-            const std::optional<tripoint_bub_ms> mouse_pos = ctxt.get_coordinates( w_terrain );
+            std::optional<tripoint_bub_ms> mouse_pos = ctxt.get_coordinates( w_terrain );
+#if defined(TILES)
+            // The Godot HUD can ask to act on a square without the mouse being over it.
+            if( const auto asked = cata::godot_square::take_target() ) {
+                mouse_pos = asked;
+            }
+#endif
             if( !mouse_pos ) {
                 return false;
             }
@@ -2858,11 +2870,19 @@ bool game::handle_action()
                 break;
 
             case ACTION_QUICKSAVE:
+                if( !moves_since_last_save ) {
+                    add_msg( m_info, _( "Nothing new to save." ) );
+                    return false;
+                }
                 quicksave();
+                add_msg( m_good, _( "Game saved." ) );
                 return false;
 
             case ACTION_QUICKLOAD:
-                quickload();
+                // One key loses everything since the last save, so it asks first.
+                if( query_yn( _( "Load your last save?  Anything since then is lost." ) ) ) {
+                    quickload();
+                }
                 return false;
 
             case ACTION_PL_INFO:

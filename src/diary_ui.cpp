@@ -10,6 +10,10 @@
 #include "cursesdef.h"
 #include "debug.h"
 #include "diary.h"
+#if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
 #include "input.h"
 #include "options.h"
 #include "output.h"
@@ -191,6 +195,22 @@ void diary::show_diary_ui( diary *c_diary )
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
     ui_adaptor ui_diary;
+#if defined(TILES)
+    // Godot shows the pages, the changes since the last page and the page's text side by side,
+    // with what a change means beside them.
+    // It hangs on the topmost part (the info box): the parts all take no room, so the lower ones
+    // count as covered and are never redrawn.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", c_diary, "DIARY" ) : nullptr;
+    // The other parts take no room when Godot draws the screen.
+    const auto hide_native = [&]( ui_adaptor & ui ) {
+        if( native ) {
+            ui.position( point_zero, point_zero );
+        }
+    };
+#else
+    const auto hide_native = []( ui_adaptor & /*ui*/ ) {};
+#endif
     ui_diary.on_screen_resize( [&]( ui_adaptor & ui ) {
         const std::pair<point, point> beg_and_max = diary_window_position();
         point beg = ( uis_padding() != 0 ) ? point( uis_padding() + MAX_DAIRY_UI_WIDTH / 4 - 3,
@@ -204,9 +224,121 @@ void diary::show_diary_ui( diary *c_diary )
         w_border = catacurses::newwin( max.y + 5, max.x + 9, beg + point( -4, -2 ) );
 
         ui.position_from_window( w_border );
+        hide_native( ui );
     } );
     ui_diary.mark_resize();
+#if defined(TILES)
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "DIARY" );
+        auto left_diary_text = c_diary->get_head_text();
+        std::ranges::move( c_diary->get_change_list(), std::back_inserter( left_diary_text ) );
+        auto desc_map = c_diary->get_desc_map();
+        const auto pages = c_diary->get_pages_list();
+        const auto have_page = !c_diary->pages.empty();
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", string_format( _( "%s's Diary" ), c_diary->owner ) );
+            jsout.member( "icon", "book-open" );
+            jsout.member( "size", std::array{ 1480, 900 } );
+            jsout.member( "active_pane", static_cast<int>( currwin ) );
+            jsout.member( "panes" );
+            jsout.start_array();
+
+            jsout.start_object();
+            jsout.member( "title", _( "Pages" ) );
+            jsout.member( "icon", "book-open" );
+            jsout.member( "stretch", 0.8 );
+            jsout.member( "cursor", selected[window_mode::PAGE_WIN] );
+            jsout.member( "empty", _( "No pages yet.  Start one with New page." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &page : pages ) {
+                gs::write_row( jsout, { .text = { .text = page, .color = c_white }, .icon = "file-text" } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.start_object();
+            jsout.member( "title", _( "Since the last page" ) );
+            jsout.member( "icon", "clock" );
+            jsout.member( "cursor", currwin == window_mode::CHANGE_WIN ? selected[window_mode::CHANGE_WIN] :
+                          -1 );
+            jsout.member( "confirm", "" );
+            jsout.member( "empty", _( "Nothing on this page." ) );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &[i, line] : left_diary_text | std::views::enumerate ) {
+                // Lines that explain nothing more are only read, not chosen.
+                const auto described = desc_map.contains( static_cast<int>( i ) ) &&
+                                       !desc_map[static_cast<int>( i )].empty();
+                gs::write_row( jsout, { .text = { .text = line, .color = c_white }, .passive = !described } );
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.start_object();
+            jsout.member( "title", _( "Your notes" ) );
+            jsout.member( "icon", "pencil" );
+            jsout.member( "stretch", 1.2 );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = have_page ? c_diary->get_page_text() : "" } );
+            if( currwin == window_mode::TEXT_WIN ) {
+                jsout.member( "scroll", selected[window_mode::TEXT_WIN] );
+            }
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 380 );
+            jsout.member( "share", 0.26 );
+            const auto change = selected[window_mode::CHANGE_WIN];
+            const auto info = currwin != window_mode::PAGE_WIN && desc_map.contains( change ) ?
+                              desc_map[change] : std::string();
+            if( !info.empty() ) {
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = change < static_cast<int>( left_diary_text.size() ) ?
+                                                 left_diary_text[change] : "", .color = c_white
+                                       } );
+                jsout.member( "body" );
+                gs::write_span( jsout, { .text = info } );
+            } else {
+                jsout.member( "empty", _( "Choose a change to see what it means." ) );
+            }
+            jsout.member( "buttons" );
+            jsout.start_array();
+            gs::write_button( jsout, {
+                .act = "CONFIRM", .text = _( "Edit text" ), .icon = "pencil", .category = category,
+                .primary = true, .enabled = have_page
+            } );
+            gs::write_button( jsout, {
+                .act = "NEW_PAGE", .text = _( "New page" ), .icon = "file-plus", .category = category
+            } );
+            gs::write_button( jsout, {
+                .act = "DELETE PAGE", .text = _( "Delete page" ), .icon = "trash", .category = category,
+                .enabled = have_page
+            } );
+            gs::write_button( jsout, {
+                .act = "EXPORT_DIARY", .text = _( "Export diary" ), .icon = "download", .category = category
+            } );
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Switch list" ) );
+            gs::write_hint( jsout, "QUIT", category, _( "Close" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
     ui_diary.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            return;
+        }
+#endif
         werase( w_changes );
         werase( w_text );
         werase( w_border );
@@ -239,9 +371,15 @@ void diary::show_diary_ui( diary *c_diary )
                                               beg.y - 3 ) );
 
         ui.position_from_window( w_pages );
+        hide_native( ui );
     } );
     ui_pages.mark_resize();
     ui_pages.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            return;
+        }
+#endif
         werase( w_pages );
 
         print_list_scrollable( &w_pages, c_diary->get_pages_list(), &selected[window_mode::PAGE_WIN],
@@ -260,9 +398,15 @@ void diary::show_diary_ui( diary *c_diary )
         w_desc = catacurses::newwin( 3, TERMX - uis_padding() * 2, point( uis_padding(), beg.y - 6 ) );
 
         ui.position_from_window( w_desc );
+        hide_native( ui );
     } );
     ui_desc.mark_resize();
     ui_desc.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            return;
+        }
+#endif
         werase( w_desc );
 
         draw_border( w_desc );
@@ -288,9 +432,21 @@ void diary::show_diary_ui( diary *c_diary )
                                      TERMX - uis_padding() * 2, point( uis_padding(), beg.y + max.y + 2 ) );
 
         ui.position_from_window( w_info );
+        hide_native( ui );
     } );
     ui_info.mark_resize();
+#if defined(TILES)
+    if( native ) {
+        native->attach( ui_info );
+    }
+#endif
     ui_info.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         werase( w_info );
 
         draw_border( w_info );
@@ -311,12 +467,36 @@ void diary::show_diary_ui( diary *c_diary )
             selected[window_mode::PAGE_WIN] = 0;
         }
         selected[window_mode::PAGE_WIN] = c_diary->set_opened_page( selected[window_mode::PAGE_WIN] );
+#if defined(TILES)
+        if( native ) {
+            // The text windows wrap these as they draw them; Godot doesn't.
+            const auto changes = static_cast<int>( c_diary->get_head_text().size() +
+                                                   c_diary->get_change_list().size() );
+            auto &change = selected[window_mode::CHANGE_WIN];
+            change = changes == 0 ? 0 : ( change % changes + changes ) % changes;
+            const auto text_lines = static_cast<int>( std::ranges::count( c_diary->get_page_text(), '\n' ) );
+            selected[window_mode::TEXT_WIN] = std::clamp( selected[window_mode::TEXT_WIN], 0, text_lines );
+        }
+#endif
         ui_diary.invalidate_ui();
         ui_pages.invalidate_ui();
         ui_desc.invalidate_ui();
         ui_info.invalidate_ui();
         ui_manager::redraw_invalidated();
         const std::string action = ctxt.handle_input();
+#if defined(TILES)
+        if( const auto pick = native ? cata::godot_bridge::take_pick( c_diary ) : std::nullopt ) {
+            namespace gs = cata::godot_screen;
+            const auto pane = *pick / gs::row_stride;
+            const auto row = *pick % gs::row_stride;
+            if( pane == 0 || pane == 1 ) {
+                currwin = pane == 0 ? window_mode::PAGE_WIN : window_mode::CHANGE_WIN;
+                selected[currwin] = row;
+                selected[window_mode::TEXT_WIN] = 0;
+            }
+            continue;
+        }
+#endif
         if( action == "RIGHT" ) {
             currwin = static_cast<window_mode>( static_cast<int>( currwin ) + 1 );
             if( currwin >= window_mode::NUM_WIN ) {
@@ -378,7 +558,9 @@ void diary::edit_page_ui( const std::function<catacurses::window()> &create_wind
     std::string &new_text = get_page_ptr()->m_text;
     const std::string old_text = new_text;
 
-    string_editor_window ed( create_window, new_text );
+    string_editor_window ed( create_window, new_text, {
+        .title = string_format( _( "Diary entry, %s" ), to_string( get_page_ptr()->turn ) )
+    } );
 
     do {
         const std::pair<bool, std::string> result = ed.query_string();

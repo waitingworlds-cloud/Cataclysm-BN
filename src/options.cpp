@@ -46,6 +46,11 @@
 #include "worldfactory.h"
 
 #if defined(TILES)
+#include "godot_bridge.h"
+#include "godot_screen.h"
+#endif
+
+#if defined(TILES)
 #include "cata_tiles.h"
 #endif // TILES
 
@@ -3837,7 +3842,152 @@ std::string options_manager::show( bool ingame, const bool world_options_only,
     ui_adaptor ui;
     ui.on_screen_resize( init_windows );
     init_windows( ui );
+
+#if defined(TILES)
+    // The Godot front end draws the pages as tabs, the options as a list and the selected
+    // option's description beside it.
+    auto native = cata::godot_bridge::native_screens() ?
+                  std::make_unique<cata::godot_bridge::native_view>( "screen", this, "OPTIONS" ) : nullptr;
+    if( native ) {
+        native->attach( ui );
+        ui.on_screen_resize( [&]( ui_adaptor & ui ) {
+            init_windows( ui );
+            ui.position( point_zero, point_zero );
+        } );
+        ui.position( point_zero, point_zero );
+    }
+    const auto publish_native = [&]() {
+        namespace gs = cata::godot_screen;
+        const auto category = std::string( "OPTIONS" );
+        const auto &cOPTIONS = ( ingame || world_options_only ) && iCurrentPage == iWorldOptPage ?
+                               ACTIVE_WORLD_OPTIONS : OPTIONS;
+        const auto &page_items = pages_[iCurrentPage].items_;
+        const auto &curr_item = page_items[iCurrentLine];
+        native->publish( [&]( JsonOut & jsout ) {
+            jsout.member( "title", world_options_only ? _( "World Options" ) : _( "Options" ) );
+            jsout.member( "icon", "sliders-horizontal" );
+            jsout.member( "size", std::array{ 1440, 920 } );
+
+            jsout.member( "tabs" );
+            jsout.start_array();
+            if( world_options_only ) {
+                const auto steps = std::array{ _( "World Mods" ), _( "World Options" ), _( "Finalize World" ) };
+                for( const auto &[i, name] : steps | std::views::enumerate ) {
+                    gs::write_tab( jsout, { .text = name, .active = i == 1, .pick = gs::tab_pick + static_cast<int>( i ) } );
+                }
+            } else {
+                for( const auto &[i, page] : pages_ | std::views::enumerate ) {
+                    const auto name = ingame && i == iWorldOptPage ? std::string( _( "Current world" ) ) :
+                                      page.name_.translated();
+                    gs::write_tab( jsout, { .text = name, .active = i == iCurrentPage, .pick = gs::tab_pick + static_cast<int>( i ) } );
+                }
+            }
+            jsout.end_array();
+            gs::write_tab_keys( jsout, "PREV_TAB", "NEXT_TAB", category );
+
+            jsout.member( "panes" );
+            jsout.start_array();
+            jsout.start_object();
+            jsout.member( "title", world_options_only ? std::string( _( "World Options" ) ) :
+                          pages_[iCurrentPage].name_.translated() );
+            jsout.member( "cursor", iCurrentLine );
+            jsout.member( "rows" );
+            jsout.start_array();
+            for( const auto &[i, it] : page_items | std::views::enumerate ) {
+                const auto index = static_cast<int>( i );
+                if( it.type == ItemType::GroupHeader ) {
+                    const auto open = groups_state[it.data];
+                    gs::write_row( jsout, { .text = { .text = find_group( it.data ).name_.translated(), .color = c_white },
+                                            .i = index, .icon = open ? "chevron-down" : "chevron-right", .icon_color = "c_light_gray"
+                                          } );
+                } else if( it.type == ItemType::Option && groups_state[it.group] ) {
+                    const auto &opt = cOPTIONS.find( it.data )->second;
+                    const auto blocked = opt.hasPrerequisite() && !opt.checkPrerequisite();
+                    const auto value = opt.getValue();
+                    const auto off = value == "false" || value == "disabled" || value == "off";
+                    const auto needs = blocked ? string_format( _( "Needs %s" ),
+                                       get_option( opt.getPrerequisite() ).getMenuText() ) : std::string();
+                    gs::write_row( jsout, { .text = { .text = opt.getMenuText(), .color = blocked ? c_dark_gray : c_white },
+                                            .i = index,
+                                            .note = { .text = opt.getValueName(), .color = blocked ? c_light_gray : off ? c_light_red : c_light_green },
+                                            .indent = it.group.empty() ? 0 : 1, .tip = needs
+                                          } );
+                }
+            }
+            jsout.end_array();
+            jsout.end_object();
+            jsout.end_array();
+
+            jsout.member( "aside" );
+            jsout.start_object();
+            jsout.member( "width", 480 );
+            auto buttons = std::vector<gs::button> {};
+            const auto tooltip = curr_item.fmt_tooltip( find_group( curr_item.group ), cOPTIONS );
+            const auto split = tooltip.find( " #" );
+            jsout.member( "body" );
+            gs::write_span( jsout, { .text = split == std::string::npos ? tooltip :
+                                             tooltip.substr( 0, split ) + "\n\n" + colorize( tooltip.substr( split + 2 ), c_light_gray ),
+                                     .color = c_white
+                                   } );
+            if( curr_item.type == ItemType::Option ) {
+                const auto &opt = cOPTIONS.find( curr_item.data )->second;
+                const auto type = opt.getType();
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = opt.getMenuText(), .color = c_white } );
+                if( !curr_item.group.empty() ) {
+                    jsout.member( "subtitle", find_group( curr_item.group ).name_.translated() );
+                }
+                const auto number = type == "int" || type == "float";
+                buttons.push_back( { .act = "LEFT", .text = number ? _( "Less" ) : _( "Previous" ), .icon = "chevron-left", .category = category } );
+                buttons.push_back( { .act = "RIGHT", .text = number ? _( "More" ) : _( "Next" ), .icon = "chevron-right", .category = category } );
+                if( number ) {
+                    buttons.push_back( { .act = "CONFIRM", .text = _( "Type a value" ), .icon = "pencil", .category = category } );
+                }
+            } else if( curr_item.type == ItemType::GroupHeader ) {
+                jsout.member( "title" );
+                gs::write_span( jsout, { .text = find_group( curr_item.data ).name_.translated(), .color = c_white } );
+                buttons.push_back( { .act = "CONFIRM", .text = groups_state[curr_item.data] ? _( "Collapse" ) : _( "Expand" ),
+                                     .icon = groups_state[curr_item.data] ? "chevron-down" : "chevron-right", .category = category } );
+            }
+            if( ingame && iCurrentPage == iWorldOptPage ) {
+                jsout.member( "warn" );
+                gs::write_span( jsout, { .text = string_format( "%s%s", _( "Note: " ), _( "Some of these options may produce unexpected results if changed." ) ),
+                                         .color = c_light_red
+                                       } );
+            }
+            if( world_options_only ) {
+                buttons.push_back( { .act = "NEXT_TAB", .text = _( "Next: Finalize World" ), .icon = "chevron-right", .category = category, .primary = true } );
+            } else {
+                buttons.push_back( { .act = "QUIT", .text = _( "Done" ), .icon = "check", .category = category, .primary = true } );
+            }
+            jsout.member( "buttons" );
+            jsout.start_array();
+            for( const auto &b : buttons ) {
+                gs::write_button( jsout, b );
+            }
+            jsout.end_array();
+            jsout.end_object();
+
+            jsout.member( "hints" );
+            jsout.start_array();
+            gs::write_fixed_hint( jsout, "↑↓", _( "Choose" ) );
+            gs::write_fixed_hint( jsout, "←→", _( "Change" ) );
+            gs::write_hint( jsout, "CONFIRM", category, _( "Toggle or type" ) );
+            gs::write_hint( jsout, "NEXT_TAB", category,
+                            world_options_only ? _( "Next step" ) : _( "Next page" ) );
+            gs::write_hint( jsout, "QUIT", category, world_options_only ? _( "Cancel" ) : _( "Done" ) );
+            jsout.end_array();
+        } );
+    };
+#endif
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( native ) {
+            publish_native();
+            return;
+        }
+#endif
         werase( w_options_header );
         werase( w_options_border );
         werase( w_options_tooltip );
@@ -4016,6 +4166,30 @@ std::string options_manager::show( bool ingame, const bool world_options_only,
                          ACTIVE_WORLD_OPTIONS : OPTIONS;
 
         const std::string action = ctxt.handle_input();
+
+#if defined(TILES)
+        // Clicks in Godot: a page tab, or an option (selected, then changed by the pressed action).
+        if( const auto pick = native ? cata::godot_bridge::take_pick( this ) : std::nullopt ) {
+            namespace gs = cata::godot_screen;
+            if( *pick >= gs::tab_pick ) {
+                const auto tab = *pick - gs::tab_pick;
+                if( world_options_only && tab != 1 ) {
+                    return tab < 1 ? "PREV_TAB" : "NEXT_TAB";
+                }
+                if( !world_options_only && tab != iCurrentPage && tab < static_cast<int>( pages_.size() ) ) {
+                    iCurrentPage = tab;
+                    iCurrentLine = 0;
+                    iStartPos = 0;
+                    sfx::play_variant_sound( "menu_move", "default", 100 );
+                }
+                continue;
+            }
+            const auto line = *pick % gs::row_stride;
+            if( line < static_cast<int>( page_items.size() ) ) {
+                iCurrentLine = line;
+            }
+        }
+#endif
 
         if( world_options_only && ( action == "NEXT_TAB" || action == "PREV_TAB" ||
                                     ( action == "QUIT" && ( !on_quit || on_quit() ) ) ) ) {

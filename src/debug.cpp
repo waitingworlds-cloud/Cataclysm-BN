@@ -2,6 +2,7 @@
 #include "debug_log_capture.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cctype>
@@ -20,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <ranges>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -83,6 +85,8 @@
 #endif
 
 #if defined(TILES)
+#include "godot_bridge.h"
+#include "json.h"
 #include "sdl_wrappers.h"
 #endif // TILES
 
@@ -283,6 +287,45 @@ static std::vector<buffered_prompt_info> &buffered_prompts()
     return buffered_prompts;
 }
 
+#if defined(TILES)
+namespace
+{
+
+/// The error report as a Godot card.
+struct error_card {
+    std::string text;
+    /// The report went to the clipboard.
+    bool copied = false;
+};
+
+/// The prompt key each of the card's buttons stands for, and its name on the button.
+constexpr auto error_card_keys = std::array { ' ', 'i', 'c' };
+constexpr auto error_card_key_names = std::array { "SPACE", "I", "C" };
+
+auto publish_error_card( cata::godot_bridge::native_view &view, const error_card &card ) -> void
+{
+    view.publish( [&]( JsonOut & jsout ) {
+        jsout.member( "text" );
+        cata::godot_bridge::write_spans( jsout, card.text, c_light_gray );
+        jsout.member( "buttons" );
+        jsout.start_array();
+        const auto labels = std::array{ _( "Continue" ), _( "Ignore from now on" ),
+                                        card.copied ? _( "Copied" ) : _( "Copy report" ) };
+        for( const auto &[label, key] : std::views::zip( labels, error_card_key_names ) ) {
+            jsout.start_object();
+            jsout.member( "label", label );
+            jsout.member( "key", key );
+            jsout.end_object();
+        }
+        jsout.end_array();
+        // No button is highlighted: Enter doesn't answer this prompt.
+        jsout.member( "cursor", -1 );
+    } );
+}
+
+} // namespace
+#endif
+
 static void debug_error_prompt(
     const char *filename,
     const char *line,
@@ -335,7 +378,22 @@ static void debug_error_prompt(
     // the graphics are correct when the debug message is displayed during a
     // redraw callback.
     ui_adaptor ui( ui_adaptor::debug_message_ui {} );
-    const auto init_window = []( ui_adaptor & ui ) {
+#if defined(TILES)
+    // Godot draws the report as a card over its screens, so the prompt takes no room in the frame.
+    auto view = cata::godot_bridge::native_screens() ?
+                std::make_unique<cata::godot_bridge::native_view>( "popup", &ui, "DEBUG_MSG" ) : nullptr;
+    if( view ) {
+        view->attach( ui );
+    }
+    auto copied = false;
+#endif
+    const auto init_window = [&]( ui_adaptor & ui ) {
+#if defined(TILES)
+        if( view ) {
+            ui.position( point_zero, point_zero );
+            return;
+        }
+#endif
         ui.position_from_window( catacurses::stdscr );
     };
     init_window( ui );
@@ -365,7 +423,20 @@ static void debug_error_prompt(
                                     , _( "Press <color_white>C</color> (or <color_white>c</color>) to copy this message to the clipboard." )
 #endif // TILES
                                 );
+#if defined(TILES)
+    auto card_text = colorize( _( "An error has occurred!  Written below is the error report:" ),
+                               c_light_red ) + "\n\n" + formatted_report;
+#if defined(BACKTRACE)
+    card_text += "\n" + backtrace_instructions;
+#endif
+#endif
     ui.on_redraw( [&]( const ui_adaptor & ) {
+#if defined(TILES)
+        if( view ) {
+            publish_error_card( *view, { .text = card_text, .copied = copied } );
+            return;
+        }
+#endif
         catacurses::erase();
         fold_and_print( catacurses::stdscr, point_zero, getmaxx( catacurses::stdscr ), c_light_red,
                         "%s", message );
@@ -380,11 +451,20 @@ static void debug_error_prompt(
 #endif
     for( bool stop = false; !stop && !dont_debugmsg; ) {
         ui_manager::redraw();
-        switch( inp_mngr.get_input_event().get_first_input() ) {
+        auto key = inp_mngr.get_input_event().get_first_input();
+#if defined(TILES)
+        // A clicked button stands for its key.
+        if( const auto pick = view ? cata::godot_bridge::take_pick( &ui ) : std::nullopt;
+            pick && *pick >= 0 && static_cast<size_t>( *pick ) < error_card_keys.size() ) {
+            key = error_card_keys[*pick];
+        }
+#endif
+        switch( key ) {
 #if defined(TILES)
             case 'c':
             case 'C':
                 SDL_SetClipboardText( formatted_report.c_str() );
+                copied = true;
                 break;
 #endif // TILES
             case 'i':

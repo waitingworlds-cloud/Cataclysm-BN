@@ -4,6 +4,7 @@
 #include "cursesdef.h"
 #include "cursesport.h"
 #include "game.h"
+#include "godot_bridge.h"
 #include "map/map.h"
 #include "options.h"
 #include "output.h"
@@ -20,7 +21,18 @@ namespace
 constexpr int START_LINE = 1;
 constexpr int MIN_BOX_HEIGHT = 3;
 
+#if defined(TILES)
+auto godot_hover = std::optional<tripoint_bub_ms>();
+#endif
+
 } //namespace
+
+#if defined(TILES)
+auto godot_hover_position() -> std::optional<tripoint_bub_ms>
+{
+    return godot_hover;
+}
+#endif
 
 live_view::live_view() = default;
 live_view::~live_view() = default;
@@ -33,10 +45,21 @@ void live_view::init()
 void live_view::hide()
 {
     ui = nullptr;
+#if defined(TILES)
+    godot_hover.reset();
+#endif
 }
 
 void live_view::show( const tripoint_bub_ms &p )
 {
+#if defined(TILES)
+    // The Godot HUD shows a hover card beside the mouse instead of the box, which would sit
+    // where its sidebar is.
+    if( cata::godot_bridge::is_active() ) {
+        godot_hover = p;
+        return;
+    }
+#endif
     mouse_position = p;
     if( !ui ) {
         ui = std::make_unique<ui_adaptor>();

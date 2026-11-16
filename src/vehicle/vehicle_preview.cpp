@@ -15,6 +15,7 @@
 #    include "vpart_position.h"
 
 #    include <algorithm>
+#    include <cmath>
 
 // Local empty string for tile_search_params
 static const std::string empty_string;
@@ -141,6 +142,24 @@ auto vehicle_preview_window::calc_window_center_pixels() const -> point {
     return point(center_x, center_y);
 }
 
+auto vehicle_preview_window::offset_at_pixel(const point pixel) const
+    -> std::optional<point_rel_veh> {
+    const auto tile_w = tilecontext->get_tile_width();
+    const auto tile_h = tilecontext->get_tile_height();
+    const auto left = win_pos.x * termx_pixels;
+    const auto top = win_pos.y * termy_pixels;
+    const auto inside =
+        pixel.x >= left && pixel.x < left + win_cols * termx_pixels && pixel.y >= top
+        && pixel.y < top + win_lines * termy_pixels;
+    if (tile_w <= 0 || tile_h <= 0 || !inside) { return std::nullopt; }
+    const auto from_cursor = pixel - calc_window_center_pixels() + point(tile_w / 2, tile_h / 2);
+    const auto squares = point_rel_veh(
+        static_cast<int>(std::floor(static_cast<double>(from_cursor.x) / tile_w)),
+        static_cast<int>(std::floor(static_cast<double>(from_cursor.y) / tile_h)));
+    // Parts are drawn at `(mount - cursor)` turned three quarters: one more quarter undoes it.
+    return squares.rotate(1);
+}
+
 void vehicle_preview_window::zoom_in() {
     if (zoom < MAX_ZOOM) {
         zoom *= 2;
@@ -179,11 +198,12 @@ void vehicle_preview_window::draw_cursor_at_pixel(point pixel_pos) {
 void vehicle_preview_window::display(
     const vehicle& veh, tripoint_mnt_veh cursor, int highlight_part) {
     const veh_preview_adapter* adapter = veh_preview_adapter::convert(&*tilecontext);
-    const point center_px = calc_window_center_pixels();
-
     // Get tile dimensions at current zoom
     const int tile_w = tilecontext->get_tile_width();
     const int tile_h = tilecontext->get_tile_height();
+
+    // Top left corner of the square under the cursor: that square sits in the window's middle.
+    const point center_px = calc_window_center_pixels() - point(tile_w / 2, tile_h / 2);
 
     // Calculate window bounds in pixels for clipping
     const int win_left = win_pos.x * termx_pixels;

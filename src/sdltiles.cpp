@@ -18,6 +18,8 @@
 #    include "game.h"
 #    include "game_ui.h"
 #    include "get_version.h"
+#    include "godot_bridge.h"
+#    include "godot_scene.h"
 #    include "hash_utils.h"
 #    include "input.h"
 #    include "json.h"
@@ -122,6 +124,8 @@ static SDL_Window_Ptr window;
 static SDL_Renderer_Ptr renderer;
 static SDL_PixelFormat format = SDL_PIXELFORMAT_UNKNOWN;
 static SDL_Texture_Ptr display_buffer;
+/// The pixel minimap rendered on its own for the Godot front end's HUD.
+static SDL_Texture_Ptr bridge_minimap;
 static GeometryRenderer_Ptr geometry;
 #if defined(__ANDROID__)
 static SDL_Texture_Ptr touch_joystick;
@@ -177,7 +181,13 @@ static void InitSDL()
 {
     SDL_InitFlags init_flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO;
 
+    // Inside the Godot front end the game renders off screen and Godot shows the frames.
+    if( cata::godot_bridge::connect() ) {
+        SDL_SetHint( SDL_HINT_VIDEO_DRIVER, "offscreen" );
+    }
+
     throwErrorIf( !SDL_Init( init_flags ), "SDL_Init failed" );
+    cata::godot_bridge::start();
     throwErrorIf( !TTF_Init(), "TTF_Init failed" );
     printErrorIf( !SDL_InitSubSystem( SDL_INIT_JOYSTICK ), "Initializing joystick subsystem failed" );
 
@@ -216,13 +226,20 @@ static void WinCreate()
     WindowHeight = TERMINAL_HEIGHT * fontheight * scaling_factor;
     window_flags |= SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 
+    if( cata::godot_bridge::is_active() ) {
+        WindowWidth = cata::godot_bridge::window_size().x;
+        WindowHeight = cata::godot_bridge::window_size().y;
+    }
+
 #if !defined(__ANDROID__)
     const auto screen_mode = get_option<std::string>( "FULLSCREEN" );
     const auto minimize = get_option<bool>( "MINIMIZE_ON_FOCUS_LOSS" );
 
     SDL_SetHint( SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, minimize ? "1" : "0" );
 
-    if( screen_mode == "fullscreen" ) {
+    if( cata::godot_bridge::is_active() ) {
+        // Godot owns the real window; the game's window is never shown.
+    } else if( screen_mode == "fullscreen" ) {
         window_flags |= SDL_WINDOW_FULLSCREEN;
         fullscreen = true;
     } else if( screen_mode == "windowedbl" ) {
@@ -278,6 +295,10 @@ static void WinCreate()
         TERMINAL_HEIGHT = WindowHeight / fontheight / scaling_factor;
     }
 #endif
+    if( cata::godot_bridge::is_active() ) {
+        TERMINAL_WIDTH = WindowWidth / fontwidth / scaling_factor;
+        TERMINAL_HEIGHT = WindowHeight / fontheight / scaling_factor;
+    }
     // Initialize framebuffer caches
     terminal_framebuffer.resize( TERMINAL_HEIGHT );
     for( int i = 0; i < TERMINAL_HEIGHT; i++ ) {
@@ -294,7 +315,9 @@ static void WinCreate()
 
     int renderer_id = -1;
 #if !defined(__ANDROID__)
-    bool software_renderer = get_option<std::string>( "RENDERER" ).empty();
+    // Frames are read back for Godot every refresh, which is cheapest from system memory.
+    bool software_renderer = get_option<std::string>( "RENDERER" ).empty() ||
+                             cata::godot_bridge::is_active();
     std::string renderer_name;
     if( software_renderer ) {
         renderer_name = "software";
@@ -416,6 +439,7 @@ static void WinDestroy()
     }
     geometry.reset();
     format = SDL_PIXELFORMAT_UNKNOWN;
+    bridge_minimap.reset();
     display_buffer.reset();
     renderer.reset();
     ::window.reset();
@@ -500,12 +524,91 @@ SDL_FRect get_android_render_rect( float DisplayBufferWidth, float DisplayBuffer
 
 #endif
 
+/// Renders the pixel minimap into a texture of its own and sends it to the Godot HUD.
+static auto send_bridge_minimap() -> void
+{
+    const auto size = cata::godot_bridge::minimap_size;
+    if( !g || !tilecontext ) {
+        return;
+    }
+    if( !bridge_minimap ) {
+        bridge_minimap.reset( SDL_CreateTexture( renderer.get(), SDL_PIXELFORMAT_ARGB8888,
+                              SDL_TEXTUREACCESS_TARGET, size.x, size.y ) );
+        if( !bridge_minimap ) {
+            return;
+        }
+    }
+    // The minimap draws into whatever the display buffer is, so stand the image in for it.
+    std::swap( display_buffer, bridge_minimap );
+    SetRenderTarget( renderer, display_buffer );
+    SetRenderDrawColor( renderer, 0, 0, 0, 255 );
+    RenderClear( renderer );
+    tilecontext->draw_minimap( point_zero, tripoint_bub_ms( g->u.bub_pos().xy(), g->ter_view_p.z() ),
+                               size.x, size.y );
+    std::swap( display_buffer, bridge_minimap );
+    cata::godot_bridge::send_minimap( renderer.get(), bridge_minimap.get() );
+    SetRenderTarget( renderer, display_buffer );
+}
+
+/// Draws the tile sprites the Godot front end asked for, side by side at the tileset's own
+/// size, and sends them. Ids are `category:id`, e.g. `item:knife_combat`.
+static auto send_bridge_sprites( const std::vector<std::string> &ids ) -> void
+{
+    // One strip stays well inside the largest texture a renderer takes.
+    constexpr auto per_strip = std::size_t{ 48 };
+    if( !g || !tilecontext || ids.empty() ) {
+        return;
+    }
+    static const auto categories = std::map<std::string, TILE_CATEGORY> {
+        { "item", C_ITEM }, { "monster", C_MONSTER }, { "furniture", C_FURNITURE }, { "terrain", C_TERRAIN },
+    };
+    tilecontext->set_draw_scale( DEFAULT_TILESET_ZOOM );
+    const auto tile = point( tilecontext->get_tile_width(), tilecontext->get_tile_height() );
+    for( auto start = std::size_t{ 0 }; start < ids.size(); start += per_strip ) {
+        const auto count = std::min( per_strip, ids.size() - start );
+        auto strip = SDL_Texture_Ptr( SDL_CreateTexture( renderer.get(), SDL_PIXELFORMAT_ARGB8888,
+                                      SDL_TEXTUREACCESS_TARGET, tile.x * static_cast<int>( count ), tile.y ) );
+        if( !strip ) {
+            break;
+        }
+        // Tiles draw into whatever the display buffer is, so stand the strip in for it.
+        std::swap( display_buffer, strip );
+        SetRenderTarget( renderer, display_buffer );
+        SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_NONE );
+        SetRenderDrawColor( renderer, 0, 0, 0, 0 );
+        RenderClear( renderer );
+        auto sent = cata::godot_bridge::sprite_strip{ .renderer = renderer.get(), .tile = tile };
+        for( auto i = std::size_t{ 0 }; i < count; ++i ) {
+            const auto &id = ids[start + i];
+            const auto split = id.find( ':' );
+            const auto category = categories.find( id.substr( 0, split ) );
+            sent.ids.push_back( id );
+            sent.found.push_back( split != std::string::npos && category != categories.end() &&
+                                  tilecontext->draw_ui_sprite( id.substr( split + 1 ), category->second,
+                                          point( tile.x * static_cast<int>( i ), 0 ) ) );
+        }
+        std::swap( display_buffer, strip );
+        sent.image = strip.get();
+        cata::godot_bridge::send_sprites( sent );
+    }
+    tilecontext->set_draw_scale( g->get_zoom() );
+    SetRenderTarget( renderer, display_buffer );
+}
+
 void refresh_display()
 {
     needupdate = false;
     lastupdate = SDL_GetTicks();
 
     if( test_mode ) {
+        return;
+    }
+
+    if( cata::godot_bridge::is_active() ) {
+        if( cata::godot_bridge::take_minimap_request() ) {
+            send_bridge_minimap();
+        }
+        cata::godot_bridge::send_frame( renderer.get(), display_buffer.get() );
         return;
     }
 
@@ -1634,6 +1737,15 @@ void cata_cursesport::curses_drawwindow( const catacurses::window &w )
             TERRAIN_WINDOW_TERM_HEIGHT * font->height,
             overlay_strings,
             color_blocks );
+        if( cata::godot_bridge::is_active() && !tile_iso ) {
+            cata::godot_scene::publish( {
+                .at = point( win->pos.x * fontwidth, win->pos.y * fontheight ),
+                .center = g->ter_view_p,
+                .tile = point( tilecontext->get_tile_width(), tilecontext->get_tile_height() ),
+                .size = point( TERRAIN_WINDOW_TERM_WIDTH * font->width,
+                               TERRAIN_WINDOW_TERM_HEIGHT * font->height ),
+            } );
+        }
 
         // color blocks overlay
         if( !color_blocks.second.empty() ) {
@@ -3221,6 +3333,16 @@ static void CheckMessages()
     bool render_target_reset = false;
 
     while( SDL_PollEvent( &ev ) ) {
+        const auto bridged = cata::godot_bridge::translate_event( ev );
+        if( bridged == cata::godot_bridge::event_result::consumed ) {
+            // Sprites are answered right away; the game may not draw another frame for a while.
+            send_bridge_sprites( cata::godot_bridge::take_sprite_requests() );
+            continue;
+        }
+        if( bridged == cata::godot_bridge::event_result::input ) {
+            last_input = cata::godot_bridge::take_input();
+            break;
+        }
         switch( ev.type ) {
 #if defined(__ANDROID__)
             // SDL will send a focus lost event whenever the app loses focus (eg. lock screen, switch app focus etc.)
@@ -3602,6 +3724,13 @@ static void CheckMessages()
         restore_on_out_of_scope<input_event> prev_last_input( last_input );
         needupdate = resized = handle_resize( resize_dims.value().x, resize_dims.value().y );
     }
+    // The Godot HUD's bars changed size: lay the screens out again around them.
+    if( cata::godot_bridge::take_layout_change() && !resized ) {
+        restore_on_out_of_scope<input_event> prev_last_input( last_input );
+        need_invalidate_framebuffers = true;
+        ui_manager::screen_resized();
+        needupdate = resized = true;
+    }
     // resizing already reinitializes the render target
     if( !resized && render_target_reset ) {
         throwErrorIf( !SetupRenderTarget(), "SetupRenderTarget failed" );
@@ -3618,6 +3747,9 @@ static void CheckMessages()
     }
     if( needupdate ) {
         try_sdl_update();
+    }
+    if( cata::godot_bridge::is_active() ) {
+        cata::godot_bridge::sync_screens();
     }
     if( quit ) {
         exit_handler( 0 );
@@ -4000,7 +4132,9 @@ input_event input_manager::get_input_event()
         CheckMessages();
     }
 
-    if( last_input.type == input_event_t::mouse ) {
+    if( last_input.type == input_event_t::mouse && cata::godot_bridge::is_active() ) {
+        last_input.mouse_pos = cata::godot_bridge::mouse_position();
+    } else if( last_input.type == input_event_t::mouse ) {
         float mx, my;
         SDL_GetMouseState( &mx, &my );
         last_input.mouse_pos.x = static_cast<int>( mx );
@@ -4166,7 +4300,17 @@ std::optional<tripoint_bub_ms> input_context::get_coordinates( const catacurses:
         p = view_offset + selected;
     } else {
         const point_rel_ms selected( screen_pos.x / fw, screen_pos.y / fh );
-        p = view_offset + selected - dim.window_size_cell / 2;
+        auto half_cells = dim.window_size_cell / 2;
+        if( capture_win == g->w_overmap && use_tiles && use_tiles_overmap ) {
+            // The overmap draws a last, partly shown column and row (see draw_om), and counts
+            // them when it centers the view, so a click has to count them as well.
+            const auto cells = point( divide_round_up( OVERMAP_WINDOW_TERM_WIDTH * fontwidth,
+                                      overmap_tilecontext->get_tile_width() ),
+                                      divide_round_up( OVERMAP_WINDOW_TERM_HEIGHT * fontheight,
+                                              overmap_tilecontext->get_tile_height() ) );
+            half_cells = cells / 2;
+        }
+        p = view_offset + selected - half_cells;
     }
 
     return tripoint_bub_ms( p, g->get_levz() );

@@ -159,7 +159,7 @@ if (TILES)
 
     # Windows specific tiles libraries
     if (WIN32)
-        target_link_libraries(cataclysm-bn-tiles-common PUBLIC setupapi.lib)
+        target_link_libraries(cataclysm-bn-tiles-common PUBLIC setupapi.lib ws2_32)
         if (SOUND)
             target_link_libraries(cataclysm-bn-tiles-common PUBLIC shlwapi.lib)
         endif()

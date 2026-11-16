@@ -12,7 +12,12 @@
 
 class input_context;
 class item;
+class string_input_popup;
 struct advanced_inv_save_state;
+namespace cata::godot_bridge
+{
+class native_view;
+} // namespace cata::godot_bridge
 
 void create_advanced_inv();
 
@@ -182,4 +187,10 @@ class advanced_inventory
          */
         bool query_charges( aim_location destarea, const advanced_inv_listitem &sitem,
                             const std::string &action, int &amount );
+        /// Sends both lists to the Godot front end; `filter` is the filter being typed, if any.
+        auto publish_native( cata::godot_bridge::native_view &view,
+                             const string_input_popup *filter ) -> void;
+        /// Handles a click in the Godot screen: a row (selects it and its side) or a location.
+        /// Returns whether the selection changed.
+        auto take_native_pick() -> bool;
 };

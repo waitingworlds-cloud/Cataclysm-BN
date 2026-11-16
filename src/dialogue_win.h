@@ -18,6 +18,24 @@ struct talk_data {
 
 class ui_adaptor;
 
+#if defined(TILES)
+namespace cata::godot_bridge
+{
+class native_view;
+} // namespace cata::godot_bridge
+
+/// What a click in the dialogue drawn by Godot stands for.
+struct dialogue_click {
+    /// Response clicked; the Enter key that follows the click chooses it.
+    std::optional<size_t> response = std::nullopt;
+    /// Key of a talk command button (look at, size up, yell, opinion), or 0.
+    int key = 0;
+};
+
+/// Reads a pick code sent by the dialogue drawn by Godot.
+auto read_dialogue_click( int pick ) -> dialogue_click;
+#endif
+
 class dialogue_window
 {
     public:
@@ -31,6 +49,11 @@ class dialogue_window
         void refresh_response_display();
         /** Adds message to history. It must be already translated. */
         void add_to_history( const std::string &msg );
+#if defined(TILES)
+        /** Sends the conversation and the responses to the Godot front end instead of drawing them. */
+        auto publish_native( cata::godot_bridge::native_view &view, const std::vector<talk_data> &responses,
+                             size_t selected_response ) -> void;
+#endif
 
     private:
         catacurses::window d_win;

@@ -960,6 +960,10 @@ class cata_tiles
         bool draw_item_highlight( const tripoint_bub_ms &pos );
 
     public:
+        /// Draws the sprite for `id` with its top left corner at pixel `at` of the render target,
+        /// unlit and unrotated, for interface use off the map. False when the tileset has none.
+        auto draw_ui_sprite( const std::string &id, TILE_CATEGORY category, point at ) -> bool;
+
         auto find_tile_looks_like( const std::string &id, TILE_CATEGORY category,
                                    int looks_like_jumps_limit = 10 ) const -> std::optional<tile_lookup_res>;
 

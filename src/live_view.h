@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 
 #include "coordinates.h"
 #include "cursesdef.h"
@@ -25,4 +26,8 @@ class live_view
         std::unique_ptr<ui_adaptor> ui;
 };
 
-
+#if defined(TILES)
+/// Map square the mouse rests on while the Godot front end is in use. Its hover card shows what
+/// the "Mouse View" box would.
+auto godot_hover_position() -> std::optional<tripoint_bub_ms>;
+#endif

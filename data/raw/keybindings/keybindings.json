@@ -900,14 +900,14 @@
     "id": "ZOOM_OUT",
     "category": "OVERMAP",
     "name": "Zoom Out",
-    "bindings": [ { "input_method": "keyboard", "key": "Z" } ]
+    "bindings": [ { "input_method": "keyboard", "key": "Z" }, { "input_method": "mouse", "key": "SCROLL_DOWN" } ]
   },
   {
     "type": "keybinding",
     "id": "ZOOM_IN",
     "category": "OVERMAP",
     "name": "Zoom In",
-    "bindings": [ { "input_method": "keyboard", "key": "z" } ]
+    "bindings": [ { "input_method": "keyboard", "key": "z" }, { "input_method": "mouse", "key": "SCROLL_UP" } ]
   },
   {
     "type": "keybinding",
@@ -1529,14 +1529,14 @@
     "id": "ZOOM_IN",
     "category": "VEH_INTERACT",
     "name": "Zoom in (tiles mode)",
-    "bindings": [ { "input_method": "keyboard", "key": "z" } ]
+    "bindings": [ { "input_method": "keyboard", "key": "z" }, { "input_method": "mouse", "key": "SCROLL_UP" } ]
   },
   {
     "type": "keybinding",
     "id": "ZOOM_OUT",
     "category": "VEH_INTERACT",
     "name": "Zoom out (tiles mode)",
-    "bindings": [ { "input_method": "keyboard", "key": "Z" } ]
+    "bindings": [ { "input_method": "keyboard", "key": "Z" }, { "input_method": "mouse", "key": "SCROLL_DOWN" } ]
   },
   {
     "type": "keybinding",
@@ -1802,6 +1802,13 @@
     "type": "keybinding",
     "name": "Show/Hide Preview Outfit",
     "category": "NEW_CHAR_TRAITS",
+    "id": "TOGGLE_CHARACTER_PREVIEW_CLOTHES",
+    "bindings": [ { "input_method": "keyboard", "key": "c" }, { "input_method": "keyboard", "key": "C" } ]
+  },
+  {
+    "type": "keybinding",
+    "name": "Show/Hide Preview Outfit",
+    "category": "NEW_CHAR_DESCRIPTION",
     "id": "TOGGLE_CHARACTER_PREVIEW_CLOTHES",
     "bindings": [ { "input_method": "keyboard", "key": "c" }, { "input_method": "keyboard", "key": "C" } ]
   },
@@ -2507,13 +2514,15 @@
     "type": "keybinding",
     "name": "Quicksave",
     "category": "DEFAULTMODE",
-    "id": "quicksave"
+    "id": "quicksave",
+    "bindings": [ { "input_method": "keyboard", "key": "F5" } ]
   },
   {
     "type": "keybinding",
     "name": "Quickload",
     "category": "DEFAULTMODE",
-    "id": "quickload"
+    "id": "quickload",
+    "bindings": [ { "input_method": "keyboard", "key": "F9" } ]
   },
   {
     "type": "keybinding",

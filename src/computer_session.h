@@ -9,6 +9,12 @@
 #include "cursesdef.h"
 
 class Character;
+#if defined(TILES)
+namespace cata::godot_bridge
+{
+class native_view;
+} // namespace cata::godot_bridge
+#endif
 
 class computer_session
 {
@@ -27,6 +33,19 @@ class computer_session
         const int width;
         const int height;
         std::vector<std::pair<int, std::string>> lines;
+
+        /// What the terminal waits for, so the Godot front end can offer it as buttons.
+        enum class prompt_kind {
+            none,
+            any_key,
+            yes_no_quit,
+        };
+        prompt_kind prompt = prompt_kind::none;
+#if defined(TILES)
+        /// The terminal as the Godot front end draws it, while `use()` runs.
+        cata::godot_bridge::native_view *native = nullptr;
+        void publish_native();
+#endif
 
         /** Returns true if the player successfully hacks the computer. Security = -1 defaults to
          *  the main system security. */
