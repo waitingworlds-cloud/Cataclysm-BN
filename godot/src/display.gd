@@ -5,9 +5,15 @@ extends Node
 ## the player picks one. The game draws the map at the window size divided by the map scale, and
 ## Godot shows it enlarged with sharp pixels: tiles get bigger and the game has fewer pixels to
 ## draw and send. Shortcuts: Ctrl+= / Ctrl+- for the interface, with Shift for the map, Ctrl+0 to
-## go back to automatic.
+## go back to automatic. Ctrl+wheel zooms the map when the mouse is on it, the interface elsewhere.
+##
+## The automatic map size takes the tileset's square size into account (a 64 px tileset needs half
+## the enlargement of a 32 px one), and the zoom is remembered between games as the size of a
+## square on screen, so it survives a change of tileset or map size.
 
 signal changed
+## The wanted zoom changed (back to automatic, or a new tileset): the map should be zoomed again.
+signal zoom_reset
 
 const PATH := "user://display.cfg"
 const UI_STEPS := [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0]
@@ -16,6 +22,12 @@ const MAP_MAX := 6
 ## 0 means automatic.
 var ui_choice := 0.0
 var map_choice := 0
+## The tileset's own square size in game pixels at normal zoom, as the game last reported it.
+var tile_base := 32
+## Remembered size of a map square on screen, in screen pixels; 0 means automatic.
+var tile_choice := 0.0
+## The game's zoom as last reported (a square's size in sixteenths); 0 before a game is up.
+var game_zoom := 0.0
 var _ui := 0.0
 var _map := 0
 
@@ -25,6 +37,8 @@ func _ready() -> void:
 	if cfg.load(PATH) == OK:
 		ui_choice = float(cfg.get_value("display", "interface", 0.0))
 		map_choice = int(cfg.get_value("display", "map", 0))
+		tile_base = maxi(int(cfg.get_value("display", "tile_base", 32)), 1)
+		tile_choice = float(cfg.get_value("display", "tile_px", 0.0))
 	var window := get_window()
 	# The default window is small on a big screen; start filling it.
 	var screen := DisplayServer.screen_get_usable_rect(window.current_screen)
@@ -61,8 +75,46 @@ func ui_scale() -> float:
 func map_scale() -> int:
 	if map_choice > 0:
 		return map_choice
+	return clampi(roundi(auto_tile_px() / tile_base), 1, MAP_MAX)
+
+
+## Size of a map square on screen that the automatic sizes aim for: 32 px squares drawn 3x on a
+## 4K screen, 2x on 1440p, 1x on 1080p.
+func auto_tile_px() -> float:
 	var height := DisplayServer.screen_get_size(get_window().current_screen).y
-	return 3 if height >= 1800 else 2 if height >= 1300 else 1
+	return 32.0 * (3 if height >= 1800 else 2 if height >= 1300 else 1)
+
+
+## Size of a map square on screen the player wants, in screen pixels.
+func wanted_tile_px() -> float:
+	return tile_choice if tile_choice > 0.0 else auto_tile_px()
+
+
+## The game's zoom (a square's size in sixteenths) that shows squares at the wanted size.
+func wanted_zoom() -> float:
+	return 16.0 * wanted_tile_px() / float(tile_base * _map)
+
+
+## Size on screen of a map square at a game zoom.
+func tile_px_at(zoom: float) -> float:
+	return zoom / 16.0 * tile_base * _map
+
+
+## The game reported its tileset's square size; the automatic map size follows it.
+func set_tile_base(base: int) -> void:
+	if base <= 0 or base == tile_base:
+		return
+	tile_base = base
+	_save()
+	zoom_reset.emit()
+
+
+## Remembers the size of a map square on screen after a zoom.
+func remember_tile_px(px: float) -> void:
+	if absf(px - wanted_tile_px()) < 0.5:
+		return
+	tile_choice = px
+	_save()
 
 
 ## Size in game pixels of an area measured in interface units.
@@ -91,6 +143,7 @@ func step_ui(direction: int) -> void:
 func step_map(direction: int) -> void:
 	map_choice = clampi(map_scale() + direction, 1, MAP_MAX)
 	_save()
+	_keep_zoom()
 
 
 func set_ui(choice: float) -> void:
@@ -101,24 +154,38 @@ func set_ui(choice: float) -> void:
 func set_map(choice: int) -> void:
 	map_choice = choice
 	_save()
+	_keep_zoom()
+
+
+## A new map size makes squares bigger on screen at the same zoom: remember that size.
+func _keep_zoom() -> void:
+	if game_zoom > 0.0:
+		remember_tile_px(tile_px_at(game_zoom))
 
 
 func reset() -> void:
 	ui_choice = 0.0
 	map_choice = 0
+	tile_choice = 0.0
 	_save()
+	zoom_reset.emit()
 
 
 ## Short description of the current sizes, e.g. "Interface 200% · Map 2×".
 func describe() -> String:
-	return "Interface %d%%%s · Map %d×%s" % [roundi(_ui * 100), " (auto)" if ui_choice <= 0.0 else "",
+	var text := "Interface %d%%%s · Map %d×%s" % [roundi(_ui * 100), " (auto)" if ui_choice <= 0.0 else "",
 			_map, " (auto)" if map_choice <= 0 else ""]
+	if game_zoom > 0.0:
+		text += " · Squares %d px" % roundi(tile_px_at(game_zoom))
+	return text
 
 
 func _save() -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("display", "interface", ui_choice)
 	cfg.set_value("display", "map", map_choice)
+	cfg.set_value("display", "tile_base", tile_base)
+	cfg.set_value("display", "tile_px", tile_choice)
 	cfg.save(PATH)
 	_apply()
 

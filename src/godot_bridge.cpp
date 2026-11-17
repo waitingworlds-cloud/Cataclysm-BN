@@ -575,6 +575,7 @@ auto translate_event( SDL_Event &ev ) -> event_result
             if( main_view_visible() ) {
                 cata::godot_square::move_view( {
                     .zoom = obj.get_int( "zoom", 0 ),
+                    .zoom_to = static_cast<float>( obj.get_float( "zoom_to", 0.0 ) ),
                     .drag = drag,
                     .shift = point( obj.get_int( "sx", 0 ), obj.get_int( "sy", 0 ) ),
                     .center = obj.get_bool( "center", false ),

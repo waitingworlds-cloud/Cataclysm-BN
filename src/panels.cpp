@@ -3536,6 +3536,12 @@ auto write_view( JsonOut &jsout, const avatar &u ) -> void
     jsout.member( "y", at.y );
     jsout.member( "w", tilecontext->get_tile_width() );
     jsout.member( "h", tilecontext->get_tile_height() );
+    // The zoom (a square's size in sixteenths) and the tileset's own square size, so the front
+    // end can pick a map size that suits the tileset and remember the zoom between games.
+    jsout.member( "zoom", g->get_zoom() );
+    if( const auto *ts = tilecontext->current_tileset() ) {
+        jsout.member( "base", static_cast<int>( ts->get_tile_width() * ts->get_tile_pixelscale() ) );
+    }
     jsout.end_object();
 }
 

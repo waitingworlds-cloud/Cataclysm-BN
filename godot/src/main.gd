@@ -36,6 +36,13 @@ var _atmosphere: ColorRect
 var _map_hole := Rect2()
 ## When a screen last went away, to tell a screen opening from one taking another's place.
 var _last_hide_ms := -100000
+## The map's zoom was set from the remembered one since the game started.
+var _zoom_synced := false
+## A zoom sent to the game and not yet seen in the HUD, and when it was sent.
+var _zoom_pending := 0.0
+var _zoom_sent_ms := 0
+## The mouse is over the game's frame (the map), not over a panel.
+var _over_frame := false
 
 
 func _ready() -> void:
@@ -53,8 +60,12 @@ func _ready() -> void:
 	frame_view.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	frame_view.mouse_filter = Control.MOUSE_FILTER_PASS
 	frame_view.gui_input.connect(_on_frame_input)
-	frame_view.mouse_entered.connect(func(): hud.set_map_hover(true))
-	frame_view.mouse_exited.connect(func(): hud.set_map_hover(false))
+	frame_view.mouse_entered.connect(func():
+		_over_frame = true
+		hud.set_map_hover(true))
+	frame_view.mouse_exited.connect(func():
+		_over_frame = false
+		hud.set_map_hover(false))
 	add_child(frame_view)
 
 	_stage = MapStage.new()
@@ -85,6 +96,8 @@ func _ready() -> void:
 	Bridge.frame_received.connect(_on_frame)
 	Bridge.frame_meta.connect(_on_frame_meta)
 	Bridge.hud_received.connect(hud.apply)
+	Bridge.hud_received.connect(_sync_zoom)
+	Display.zoom_reset.connect(func(): _zoom_synced = false)
 	Bridge.view_received.connect(_on_view)
 	Bridge.entries_received.connect(_on_entries)
 	Bridge.view_closed.connect(_on_view_closed)
@@ -126,9 +139,12 @@ func _show_splash_message(text: String) -> void:
 
 func _on_connected() -> void:
 	_last_size = Display.game_size(size)
+	_zoom_synced = false
 
 
 func _on_game_exited(reason: String) -> void:
+	_zoom_synced = false
+	Display.game_zoom = 0.0
 	_show_splash_message(reason)
 	_main_view = false
 	Cockpit.in_game = false
@@ -258,6 +274,49 @@ func _display_shortcut(event: InputEventKey) -> bool:
 	return true
 
 
+## The map's zoom is remembered between games as the size of a square on screen. When a game
+## starts (or the tileset or the wanted size changes) the remembered zoom is sent to the game;
+## after that, a zoom from the wheel, Ctrl+wheel or the game's own zoom keys is remembered.
+func _sync_zoom(msg: Dictionary) -> void:
+	var view: Dictionary = msg.get("view", {})
+	if not view.has("zoom"):
+		return
+	if view.has("base"):
+		Display.set_tile_base(int(view["base"]))
+	var zoom := float(view["zoom"])
+	Display.game_zoom = zoom
+	if not _zoom_synced:
+		_zoom_synced = true
+		_zoom_pending = Display.wanted_zoom()
+		_zoom_sent_ms = Time.get_ticks_msec()
+		if absf(_zoom_pending - zoom) > 0.01:
+			Bridge.send({"t": "map", "zoom_to": _zoom_pending})
+		return
+	if _zoom_pending > 0.0:
+		# HUDs sent before the game took the new zoom still show the old one.
+		if absf(_zoom_pending - zoom) > 0.01 and Time.get_ticks_msec() - _zoom_sent_ms < 1500:
+			return
+		_zoom_pending = 0.0
+	Display.remember_tile_px(Display.tile_px_at(zoom))
+
+
+## Ctrl+wheel zooms: the map when the mouse is on it, the interface (panels, lists, cards)
+## anywhere else. On a game screen drawn in the frame (the big Map), the game takes the wheel.
+func _ctrl_wheel(mb: InputEventMouseButton) -> bool:
+	if not mb.ctrl_pressed or mb.alt_pressed or mb.meta_pressed:
+		return false
+	if mb.button_index != MOUSE_BUTTON_WHEEL_UP and mb.button_index != MOUSE_BUTTON_WHEEL_DOWN:
+		return false
+	var direction := 1 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1
+	if _over_frame:
+		# The frame's own handling zooms the main map and passes the wheel to other game screens.
+		return false
+	if mb.pressed:
+		Display.step_ui(direction)
+		_show_toast(Display.describe())
+	return true
+
+
 ## True when the map and HUD are showing with no game screen over them.
 func _on_map() -> bool:
 	return hud.visible and visible_views.is_empty()
@@ -367,6 +426,9 @@ func _on_view_closed(id: int) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and _ctrl_wheel(event):
+		get_viewport().set_input_as_handled()
+		return
 	# The game owns the keyboard: every key goes to it, even while a Godot menu is open. Cards
 	# that only Godot draws (the command search) take it while they are open.
 	if event is InputEventKey:

@@ -66,6 +66,8 @@ auto health_word( const Creature &critter ) -> std::string;
 struct view_change {
     /// Zoom steps in (positive) or out (negative).
     int zoom = 0;
+    /// A zoom to set outright (a square's size in sixteenths); 0 leaves it.
+    float zoom_to = 0.0f;
     /// How far the map was dragged, in screen pixels.
     point drag;
     /// Squares to move the view by.

@@ -234,8 +234,14 @@ auto cata::godot_square::move_view( const view_change &change ) -> void
         you.view_offset.y() = g->driving_view_offset.y;
         rest = point();
     }
+    if( change.zoom_to > 0.0f ) {
+        g->set_zoom( static_cast<float>( std::clamp( static_cast<double>( change.zoom_to ), farthest,
+                                         closest ) ) );
+        g->mark_main_ui_adaptor_resize();
+    }
     if( change.zoom != 0 ) {
-        const auto steps = std::max( get_option<int>( "ZOOM_STEP_COUNT" ), 1 );
+        // The wheel takes at least four steps to double the size, so each notch is a small one.
+        const auto steps = std::max( get_option<int>( "ZOOM_STEP_COUNT" ), 4 );
         const auto level = std::round( std::log2( g->get_zoom() ) * steps ) + change.zoom;
         g->set_zoom( static_cast<float>( std::clamp( std::pow( 2.0, level / steps ), farthest,
                                          closest ) ) );
