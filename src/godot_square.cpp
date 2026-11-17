@@ -262,6 +262,11 @@ auto cata::godot_square::move_view( const view_change &change ) -> void
         you.view_offset.x() = std::clamp( you.view_offset.x() - squares.x, -reach, reach );
         you.view_offset.y() = std::clamp( you.view_offset.y() - squares.y, -reach, reach );
     }
+    // A moved view needs the map drawn again; without this a drag or shift only showed after
+    // the next turn.
+    if( change.center || change.shift != point_zero || change.drag != point_zero ) {
+        g->invalidate_main_ui_adaptor();
+    }
 }
 
 namespace
