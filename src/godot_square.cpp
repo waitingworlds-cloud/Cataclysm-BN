@@ -242,9 +242,10 @@ auto cata::godot_square::move_view( const view_change &change ) -> void
     if( change.zoom != 0 ) {
         // The wheel takes at least four steps to double the size, so each notch is a small one.
         const auto steps = std::max( get_option<int>( "ZOOM_STEP_COUNT" ), 4 );
-        const auto level = std::round( std::log2( g->get_zoom() ) * steps ) + change.zoom;
-        g->set_zoom( static_cast<float>( std::clamp( std::pow( 2.0, level / steps ), farthest,
-                                         closest ) ) );
+        // Steps from the current size, which can be between levels (the size the front end
+        // picked for the tileset), so zooming in and back out returns to the same size.
+        const auto zoom = g->get_zoom() * std::pow( 2.0, static_cast<double>( change.zoom ) / steps );
+        g->set_zoom( static_cast<float>( std::clamp( zoom, farthest, closest ) ) );
         g->mark_main_ui_adaptor_resize();
     }
     if( change.shift != point_zero ) {

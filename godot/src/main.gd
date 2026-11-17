@@ -97,7 +97,7 @@ func _ready() -> void:
 	Bridge.frame_meta.connect(_on_frame_meta)
 	Bridge.hud_received.connect(hud.apply)
 	Bridge.hud_received.connect(_sync_zoom)
-	Display.zoom_reset.connect(func(): _zoom_synced = false)
+	Display.zoom_reset.connect(_on_zoom_reset)
 	Bridge.view_received.connect(_on_view)
 	Bridge.entries_received.connect(_on_entries)
 	Bridge.view_closed.connect(_on_view_closed)
@@ -286,11 +286,7 @@ func _sync_zoom(msg: Dictionary) -> void:
 	var zoom := float(view["zoom"])
 	Display.game_zoom = zoom
 	if not _zoom_synced:
-		_zoom_synced = true
-		_zoom_pending = Display.wanted_zoom()
-		_zoom_sent_ms = Time.get_ticks_msec()
-		if absf(_zoom_pending - zoom) > 0.01:
-			Bridge.send({"t": "map", "zoom_to": _zoom_pending})
+		_send_wanted_zoom(zoom)
 		return
 	if _zoom_pending > 0.0:
 		# HUDs sent before the game took the new zoom still show the old one.
@@ -298,6 +294,22 @@ func _sync_zoom(msg: Dictionary) -> void:
 			return
 		_zoom_pending = 0.0
 	Display.remember_tile_px(Display.tile_px_at(zoom))
+
+
+## Back to the automatic zoom (Ctrl+0), or a new tileset: zoom the map right away when a game is
+## up, instead of waiting for the next turn.
+func _on_zoom_reset() -> void:
+	_zoom_synced = false
+	if Display.game_zoom > 0.0 and Bridge.is_connected_to_game():
+		_send_wanted_zoom(Display.game_zoom)
+
+
+func _send_wanted_zoom(current: float) -> void:
+	_zoom_synced = true
+	_zoom_pending = Display.wanted_zoom()
+	_zoom_sent_ms = Time.get_ticks_msec()
+	if absf(_zoom_pending - current) > 0.01:
+		Bridge.send({"t": "map", "zoom_to": _zoom_pending})
 
 
 ## Ctrl+wheel zooms: the map when the mouse is on it, the interface (panels, lists, cards)

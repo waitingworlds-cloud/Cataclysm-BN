@@ -176,7 +176,7 @@ func describe() -> String:
 	var text := "Interface %d%%%s · Map %d×%s" % [roundi(_ui * 100), " (auto)" if ui_choice <= 0.0 else "",
 			_map, " (auto)" if map_choice <= 0 else ""]
 	if game_zoom > 0.0:
-		text += " · Squares %d px" % roundi(tile_px_at(game_zoom))
+		text += " · Squares %d px%s" % [roundi(wanted_tile_px()), " (auto)" if tile_choice <= 0.0 else ""]
 	return text
 
 
