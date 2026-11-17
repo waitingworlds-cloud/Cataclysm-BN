@@ -101,6 +101,8 @@ struct bridge_state {
     std::string sent_meta;
     std::vector<std::uint8_t> frame_bytes;
     bool minimap_requested = false;
+    /// A timeout was pressed only to redraw (zoom, drag, hotbar change); it must not pass a turn.
+    bool redraw_nudge = false;
     /// Tile ids Godot asked sprites for and has not been sent yet.
     std::vector<std::string> sprites_wanted;
     std::vector<std::uint8_t> minimap_bytes;
@@ -278,6 +280,7 @@ auto press_action( const std::string &action, const std::string &category ) -> e
         auto nudge = input_event();
         nudge.type = input_event_t::timeout;
         state().pending_input = nudge;
+        state().redraw_nudge = true;
         return event_result::input;
     }
     const auto key = key_for_action( action, category );
@@ -668,6 +671,11 @@ auto take_damage_note() -> std::optional<damage_note>
 auto request_minimap() -> void
 {
     state().minimap_requested = true;
+}
+
+auto take_redraw_nudge() -> bool
+{
+    return std::exchange( state().redraw_nudge, false );
 }
 
 auto take_minimap_request() -> bool

@@ -1966,6 +1966,12 @@ bool game::handle_action()
     if( act == ACTION_NULL ) {
         ZoneScopedN( "handle_action_resolve_action" );
         act = look_up_action( action );
+#if defined(TILES)
+        // A zoom or drag from the Godot front end only needs the redraw that already happened.
+        if( act == ACTION_TIMEOUT && cata::godot_bridge::take_redraw_nudge() ) {
+            return false;
+        }
+#endif
 
         if( act == ACTION_KEYBINDINGS ) {
             // already handled by input context

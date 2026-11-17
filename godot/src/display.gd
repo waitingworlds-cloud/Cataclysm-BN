@@ -75,7 +75,9 @@ func ui_scale() -> float:
 func map_scale() -> int:
 	if map_choice > 0:
 		return map_choice
-	return clampi(roundi(auto_tile_px() / tile_base), 1, MAP_MAX)
+	# Rounded down: a big tileset (64 px) is drawn by the game at full size and zoomed there,
+	# which keeps its detail; enlarging it 2x with sharp pixels made it look blocky.
+	return clampi(floori(auto_tile_px() / tile_base), 1, MAP_MAX)
 
 
 ## Size of a map square on screen that the automatic sizes aim for: 32 px squares drawn 3x on a

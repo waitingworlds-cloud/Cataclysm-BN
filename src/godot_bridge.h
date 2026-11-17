@@ -83,6 +83,9 @@ constexpr auto minimap_size = point( 336, 252 );
 /// Asks for the pixel minimap to be rendered for Godot with the next frame; the HUD builder calls
 /// this while the HUD shows the map.
 auto request_minimap() -> void;
+/// True once after Godot pressed a timeout only to get the map redrawn (a zoom, a drag); the
+/// game must not treat that timeout as waiting a turn.
+auto take_redraw_nudge() -> bool;
 /// True once per `request_minimap`, telling the frame code to render the minimap.
 auto take_minimap_request() -> bool;
 /// Sends the minimap held in the render target `image` to Godot, unless it is unchanged.
